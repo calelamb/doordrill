@@ -1,0 +1,236 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
+import { useNavigate } from "react-router-dom";
+import { AlertTriangle, Layers3, ShieldCheck } from "lucide-react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+
+import { EmptyState } from "../components/shared/EmptyState";
+import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
+import { fetchManagerScenarioIntelligence } from "../lib/api";
+import type { ScenarioIntelligenceResponse } from "../lib/types";
+
+const PERIOD_OPTIONS = [
+  { key: "7", label: "7D" },
+  { key: "30", label: "30D" },
+  { key: "90", label: "90D" },
+] as const;
+
+type PeriodKey = (typeof PERIOD_OPTIONS)[number]["key"];
+
+export function ScenarioIntelligencePage() {
+  const navigate = useNavigate();
+  const auth = getValidStoredAuth();
+  const managerId = auth?.user.id ?? "";
+
+  const [period, setPeriod] = useState<PeriodKey>("30");
+  const [data, setData] = useState<ScenarioIntelligenceResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadData = useCallback(async () => {
+    if (!managerId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetchManagerScenarioIntelligence(managerId, { period });
+      setData(response);
+    } catch (err) {
+      if (isAuthError(err)) {
+        clearStoredAuth();
+        navigate("/login", { replace: true });
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Failed to load scenario intelligence");
+    } finally {
+      setLoading(false);
+    }
+  }, [managerId, navigate, period]);
+
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
+
+  const scatterData = useMemo(
+    () => (data?.items ?? []).map((item) => ({ ...item, x: item.difficulty, y: Math.round(item.pass_rate * 100), z: item.average_score ?? 0 })),
+    [data?.items]
+  );
+
+  const objectionMap = useMemo(
+    () =>
+      (data?.objection_failure_map ?? [])
+        .slice(0, 10)
+        .map((item, index) => ({ ...item, fill: index % 2 === 0 ? "#2d5a3d" : "#b77a13" })),
+    [data?.objection_failure_map]
+  );
+
+  const strongestScenario = useMemo(() => {
+    const items = [...(data?.items ?? [])].filter((item) => item.average_score !== null);
+    items.sort((a, b) => (b.average_score ?? 0) - (a.average_score ?? 0));
+    return items[0] ?? null;
+  }, [data?.items]);
+
+  const toughestScenario = useMemo(() => {
+    const items = [...(data?.items ?? [])].filter((item) => item.average_score !== null);
+    items.sort((a, b) => (a.pass_rate - b.pass_rate) || ((a.average_score ?? 0) - (b.average_score ?? 0)));
+    return items[0] ?? null;
+  }, [data?.items]);
+
+  if (loading) return <EmptyState variant="loading" message="Loading scenario intelligence..." />;
+  if (error) return <EmptyState variant="error" message={error} onRetry={() => void loadData()} />;
+  if (!data || !data.items.length) return <EmptyState variant="empty" message="No scenario intelligence available yet." />;
+
+  return (
+    <motion.main
+      className="mx-auto max-w-7xl px-6 py-6 space-y-6"
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35, ease: "easeOut" }}
+    >
+      <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div>
+          <h1 className="text-3xl font-black tracking-tight text-ink">Scenario Intelligence</h1>
+          <p className="mt-1 text-sm text-muted">Find which drills create durable skill, which stall reps, and where objections cluster.</p>
+        </div>
+        <div className="flex rounded-2xl border border-white/35 bg-white/55 p-1">
+          {PERIOD_OPTIONS.map((option) => (
+            <button
+              key={option.key}
+              onClick={() => setPeriod(option.key)}
+              className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${period === option.key ? "bg-accent text-white" : "text-muted hover:bg-white/70 hover:text-ink"}`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      <section className="grid gap-4 md:grid-cols-3">
+        <div className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Strongest Scenario</div>
+          <div className="mt-3 text-xl font-bold text-ink">{strongestScenario?.scenario_name ?? "--"}</div>
+          <div className="mt-2 text-sm text-muted">Avg {strongestScenario?.average_score?.toFixed(1) ?? "--"} · Pass {(strongestScenario?.pass_rate ?? 0) * 100}%</div>
+        </div>
+        <div className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Most Punishing</div>
+          <div className="mt-3 text-xl font-bold text-ink">{toughestScenario?.scenario_name ?? "--"}</div>
+          <div className="mt-2 text-sm text-muted">Difficulty {toughestScenario?.difficulty ?? "--"} · Pass {Math.round((toughestScenario?.pass_rate ?? 0) * 100)}%</div>
+        </div>
+        <div className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Scenario Volume</div>
+          <div className="mt-3 text-xl font-bold text-ink">{data.items.length}</div>
+          <div className="mt-2 text-sm text-muted">Active scenarios in the selected window</div>
+        </div>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <div className="mb-4 flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-accent" />
+            <h2 className="text-lg font-bold tracking-tight text-ink">Difficulty vs Pass Rate</h2>
+          </div>
+          <div className="h-[320px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <ScatterChart margin={{ top: 10, right: 10, bottom: 10, left: -20 }}>
+                <CartesianGrid stroke="rgba(45,90,61,0.08)" />
+                <XAxis type="number" dataKey="x" name="Difficulty" domain={[1, 5]} tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                <YAxis type="number" dataKey="y" name="Pass Rate" unit="%" domain={[0, 100]} tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                <RechartsTooltip />
+                <Scatter data={scatterData} fill="#2d5a3d" />
+              </ScatterChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <div className="mb-4 flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-accent" />
+            <h2 className="text-lg font-bold tracking-tight text-ink">Objection Failure Clusters</h2>
+          </div>
+          <div className="h-[320px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={objectionMap} layout="vertical" margin={{ top: 10, right: 12, left: 30, bottom: 0 }}>
+                <CartesianGrid stroke="rgba(45,90,61,0.08)" strokeDasharray="3 3" horizontal={false} />
+                <XAxis type="number" tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                <YAxis type="category" dataKey="objection_tag" width={110} tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                <RechartsTooltip />
+                <Bar dataKey="count" radius={[0, 12, 12, 0]}>
+                  {objectionMap.map((item) => (
+                    <Cell key={`${item.scenario_id}-${item.objection_tag}`} fill={item.fill} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <div className="mb-4 flex items-center gap-2">
+          <Layers3 className="h-4 w-4 text-accent" />
+          <h2 className="text-lg font-bold tracking-tight text-ink">Scenario Leaderboard</h2>
+        </div>
+        <div className="grid gap-3">
+          {data.items.map((scenario) => (
+            <div key={scenario.scenario_id} className="rounded-2xl border border-white/25 bg-white/45 p-4">
+              <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-ink">{scenario.scenario_name}</span>
+                    <span className="rounded-full bg-white/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted">
+                      difficulty {scenario.difficulty}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {scenario.top_weakness_tags.map((tag) => (
+                      <span key={tag} className="rounded-full bg-accent-soft px-2.5 py-1 text-[11px] font-medium text-accent">
+                        {tag}
+                      </span>
+                    ))}
+                    {scenario.top_objection_tags.map((tag) => (
+                      <span key={tag} className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-medium text-amber-900">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid gap-3 text-sm sm:grid-cols-5">
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Avg</div>
+                    <div className="mt-1 font-bold text-ink">{scenario.average_score?.toFixed(1) ?? "--"}</div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Pass</div>
+                    <div className="mt-1 font-bold text-ink">{Math.round(scenario.pass_rate * 100)}%</div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Reps</div>
+                    <div className="mt-1 font-bold text-ink">{scenario.rep_count}</div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Duration</div>
+                    <div className="mt-1 font-bold text-ink">{scenario.average_duration_seconds ? `${Math.round(scenario.average_duration_seconds / 60)}m` : "--"}</div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Repeat Δ</div>
+                    <div className="mt-1 font-bold text-ink">{typeof scenario.improvement_delta === "number" ? `${scenario.improvement_delta >= 0 ? "+" : ""}${scenario.improvement_delta.toFixed(1)}` : "--"}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </motion.main>
+  );
+}

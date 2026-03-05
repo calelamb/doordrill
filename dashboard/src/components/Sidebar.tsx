@@ -1,4 +1,4 @@
-import { LayoutDashboard, BarChart2, History, LogOut, TreePine } from "lucide-react";
+import { ActivitySquare, BarChart2, Compass, History, LayoutDashboard, LogOut, Scale, TreePine } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { clearStoredAuth, getValidStoredAuth } from "../lib/auth";
@@ -16,6 +16,9 @@ export function Sidebar() {
 
     const isFeed = location.pathname.startsWith("/manager/feed") || location.pathname.includes("/manager/sessions/");
     const isAnalytics = location.pathname.startsWith("/manager/analytics");
+    const isScenarios = location.pathname.startsWith("/manager/scenarios");
+    const isCoaching = location.pathname.startsWith("/manager/coaching");
+    const isExplorer = location.pathname.startsWith("/manager/explorer");
     const isActions = location.pathname.startsWith("/manager/actions");
 
     return (
@@ -47,7 +50,40 @@ export function Sidebar() {
                         }`}
                 >
                     <BarChart2 className="w-4.5 h-4.5 min-w-4.5" />
-                    Analytics
+                    Command Center
+                </Link>
+
+                <Link
+                    to="/manager/scenarios"
+                    className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-200 text-sm ${isScenarios
+                            ? "bg-accent-soft text-accent font-semibold"
+                            : "text-muted hover:bg-white/40 font-medium"
+                        }`}
+                >
+                    <ActivitySquare className="w-4.5 h-4.5 min-w-4.5" />
+                    Scenarios
+                </Link>
+
+                <Link
+                    to="/manager/coaching"
+                    className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-200 text-sm ${isCoaching
+                            ? "bg-accent-soft text-accent font-semibold"
+                            : "text-muted hover:bg-white/40 font-medium"
+                        }`}
+                >
+                    <Scale className="w-4.5 h-4.5 min-w-4.5" />
+                    Coaching
+                </Link>
+
+                <Link
+                    to="/manager/explorer"
+                    className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-200 text-sm ${isExplorer
+                            ? "bg-accent-soft text-accent font-semibold"
+                            : "text-muted hover:bg-white/40 font-medium"
+                        }`}
+                >
+                    <Compass className="w-4.5 h-4.5 min-w-4.5" />
+                    Explorer
                 </Link>
 
                 <Link

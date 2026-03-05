@@ -5,10 +5,13 @@ import { ManagerFeedPage } from "./pages/ManagerFeedPage";
 import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { ActionsPage } from "./pages/ActionsPage";
 import { AssignmentCreatePage } from "./pages/AssignmentCreatePage";
+import { CoachingLabPage } from "./pages/CoachingLabPage";
+import { ExplorerPage } from "./pages/ExplorerPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ManagerReplayPage } from "./pages/ManagerReplayPage";
 import { RepProgressPage } from "./pages/RepProgressPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { ScenarioIntelligencePage } from "./pages/ScenarioIntelligencePage";
 
 function RootRedirect() {
   const auth = getValidStoredAuth();
@@ -45,6 +48,9 @@ export function App() {
           <Route path="/manager/sessions/:id/replay" element={<ManagerReplayPage />} />
           <Route path="/manager/reps/:id/progress" element={<RepProgressPage />} />
           <Route path="/manager/analytics" element={<AnalyticsPage />} />
+          <Route path="/manager/scenarios" element={<ScenarioIntelligencePage />} />
+          <Route path="/manager/coaching" element={<CoachingLabPage />} />
+          <Route path="/manager/explorer" element={<ExplorerPage />} />
           <Route path="/manager/actions" element={<ActionsPage />} />
           <Route path="/manager/assignments/new" element={<AssignmentCreatePage />} />
         </Route>

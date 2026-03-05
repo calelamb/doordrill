@@ -314,7 +314,7 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
               Session {replay.session_id.slice(0, 8)}
             </h2>
             <p className="mt-1 text-sm text-muted">
-              {replay.session?.scenario_id ?? "Scenario unavailable"} · {replay.status}
+              {replay.scenario?.name ?? replay.session?.scenario_id ?? "Scenario unavailable"} · {replay.status}
             </p>
           </div>
         </div>
@@ -614,6 +614,57 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
                 <span>{actionError}</span>
               </div>
             ) : null}
+          </section>
+
+          <section className="rounded-2xl border border-white/25 bg-white/35 p-5 space-y-4">
+            <div className="flex items-center gap-2">
+              <MessageSquare className="w-4 h-4 text-accent" />
+              <h3 className="text-sm font-semibold tracking-tight text-ink">Review History</h3>
+            </div>
+            {replay.manager_reviews?.length ? (
+              replay.manager_reviews.map((review) => (
+                <div key={review.id} className="rounded-2xl border border-white/25 bg-white/50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="rounded-full bg-white/60 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+                      {review.reason_code.replace(/_/g, " ")}
+                    </span>
+                    <span className="text-xs text-muted">{new Date(review.reviewed_at).toLocaleString()}</span>
+                  </div>
+                  {typeof review.override_score === "number" ? (
+                    <div className="mt-3 text-sm font-semibold text-ink">Override score: {review.override_score.toFixed(1)}</div>
+                  ) : null}
+                  <p className="mt-2 text-sm leading-6 text-ink">{review.notes ?? "No review note recorded."}</p>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-muted">No manager reviews have been recorded yet.</p>
+            )}
+          </section>
+
+          <section className="rounded-2xl border border-white/25 bg-white/35 p-5 space-y-4">
+            <div className="flex items-center gap-2">
+              <Save className="w-4 h-4 text-accent" />
+              <h3 className="text-sm font-semibold tracking-tight text-ink">Coaching Notes</h3>
+            </div>
+            {replay.coaching_notes?.length ? (
+              replay.coaching_notes.map((note) => (
+                <div key={note.id} className="rounded-2xl border border-white/25 bg-white/50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex flex-wrap gap-2">
+                      {note.weakness_tags.map((tag) => (
+                        <span key={tag} className="rounded-full bg-accent-soft px-2.5 py-1 text-[11px] font-semibold text-accent">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                    <span className="text-xs text-muted">{new Date(note.created_at).toLocaleString()}</span>
+                  </div>
+                  <p className="mt-3 text-sm leading-6 text-ink">{note.note}</p>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-muted">No coaching notes have been attached yet.</p>
+            )}
           </section>
         </div>
       </div>
