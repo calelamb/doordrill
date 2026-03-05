@@ -1,86 +1,179 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { RootStackParamList } from "../navigation/types";
 import { fetchRepSession } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { RepSessionDetail } from "../types";
+import { RepSessionDetail, Scorecard } from "../types";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Score">;
+
+type CategoryKey = "opening" | "pitch_delivery" | "objection_handling" | "closing_technique" | "professionalism";
+
+type CategoryRow = {
+  key: CategoryKey;
+  label: string;
+  score: number;
+};
+
+const CATEGORY_ORDER: Array<{ key: CategoryKey; label: string }> = [
+  { key: "opening", label: "Opening" },
+  { key: "pitch_delivery", label: "Pitch" },
+  { key: "objection_handling", label: "Objection Handling" },
+  { key: "closing_technique", label: "Closing" },
+  { key: "professionalism", label: "Professionalism" },
+];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function scorePercent(score: number): number {
-  return clamp(score, 0, 100);
+function scoreValue(value: number | { score?: number } | undefined): number {
+  if (typeof value === "number") {
+    return clamp(value, 0, 10);
+  }
+  if (value && typeof value.score === "number") {
+    return clamp(value.score, 0, 10);
+  }
+  return 0;
 }
 
-function highlightTone(type: string): { bg: string; border: string; label: string } {
-  const normalized = type.toLowerCase();
-  if (normalized.includes("weak") || normalized.includes("risk")) {
-    return { bg: "#FCE7E3", border: "#E7B1A7", label: "#9B2F1D" };
+function scoreBand(score: number): { bg: string; border: string; text: string; fill: string } {
+  if (score < 5) {
+    return { bg: "#FBE5E1", border: "#E5B3AA", text: "#9F3021", fill: "#D2553C" };
   }
-  if (normalized.includes("objection") || normalized.includes("critical")) {
-    return { bg: "#FFF0DC", border: "#E3C090", label: "#8D5D1B" };
+  if (score < 7) {
+    return { bg: "#FFF2DA", border: "#E4C18B", text: "#8B5C1D", fill: "#D19A2F" };
   }
-  return { bg: "#E8F2FF", border: "#BCD3F3", label: "#1C4F87" };
+  return { bg: "#E3F3E8", border: "#B5D9BF", text: "#1E6A3B", fill: "#2E8B57" };
+}
+
+function scoreWidth(score: number): `${number}%` {
+  return `${clamp((score / 10) * 100, 0, 100)}%`;
+}
+
+function managerNoteFromData(data: RepSessionDetail | null): string | null {
+  if (!data) {
+    return null;
+  }
+  const reviewNotes = data.manager_review?.notes;
+  if (reviewNotes && reviewNotes.trim()) {
+    return reviewNotes.trim();
+  }
+  const managerNote = data.manager_note;
+  if (managerNote && managerNote.trim()) {
+    return managerNote.trim();
+  }
+  return null;
 }
 
 export function ScoreScreen({ route, navigation }: Props) {
   const { repId } = useSession();
+  const { sessionId } = route.params;
   const [data, setData] = useState<RepSessionDetail | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const sessionId = route.params.sessionId;
+  const [pollCount, setPollCount] = useState(0);
 
   useEffect(() => {
-    if (!repId) {
-      return;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    async function loadScorecard() {
+      if (!repId) {
+        return;
+      }
+
+      if (!cancelled) {
+        setLoading((current) => (pollCount === 0 ? true : current));
+        setRefreshing(pollCount > 0);
+        setError(null);
+      }
+
+      try {
+        const result = await fetchRepSession(repId, sessionId);
+        if (cancelled) {
+          return;
+        }
+        setData(result);
+
+        if (!result.scorecard && pollCount < 5) {
+          retryTimer = setTimeout(() => {
+            setPollCount((current) => current + 1);
+          }, 2000);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Failed to load scorecard");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
     }
-    setLoading(true);
-    setError(null);
-    fetchRepSession(repId, sessionId)
-      .then((result) => setData(result))
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Failed to fetch scorecard"))
-      .finally(() => setLoading(false));
-  }, [repId, sessionId]);
+
+    void loadScorecard();
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+      }
+    };
+  }, [pollCount, repId, sessionId]);
 
   const scorecard = data?.scorecard;
-  const categoryRows = useMemo(() => Object.entries(scorecard?.category_scores ?? {}), [scorecard]);
+  const overallScore = scorecard?.overall_score ?? 0;
+  const overallBand = scoreBand(overallScore);
+  const managerNote = managerNoteFromData(data);
+
+  const categories = useMemo<CategoryRow[]>(() => {
+    const scores = scorecard?.category_scores ?? {};
+    return CATEGORY_ORDER.map((category) => ({
+      ...category,
+      score: scoreValue(scores[category.key]),
+    }));
+  }, [scorecard]);
+
+  const highlights = (scorecard?.highlights ?? []).slice(0, 4);
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
-        <Text style={styles.title}>Drill Scorecard</Text>
-        <Text style={styles.subtitle}>Session {sessionId.slice(0, 8)}</Text>
+        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+          <View style={[styles.heroCard, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}> 
+            <Text style={[styles.heroKicker, { color: overallBand.text }]}>Drill Score</Text>
+            <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
+            <Text style={styles.heroSubtext}>Session {sessionId.slice(0, 8)}</Text>
+          </View>
 
-        {loading ? <Text style={styles.muted}>Scoring in progress...</Text> : null}
-        {error ? <Text style={styles.error}>{error}</Text> : null}
+          {loading ? (
+            <View style={styles.loadingCard}>
+              <ActivityIndicator color={colors.accent} />
+              <Text style={styles.loadingText}>Pulling your scorecard...</Text>
+            </View>
+          ) : null}
 
-        <View style={styles.heroCard}>
-          <Text style={styles.heroLabel}>Overall Score</Text>
-          <Text style={styles.heroValue}>{scorecard?.overall_score ?? "--"}</Text>
-          <Text style={styles.heroHint}>{scorecard?.ai_summary ?? "Manager-grade rationale will appear here."}</Text>
-        </View>
+          {refreshing && !scorecard ? <Text style={styles.refreshText}>AI grading is still processing...</Text> : null}
+          {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
-        <ScrollView contentContainerStyle={styles.scrollContent}>
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Category Breakdown</Text>
-            {categoryRows.length === 0 ? <Text style={styles.empty}>No category scores yet.</Text> : null}
-            {categoryRows.map(([category, score]) => {
-              const width = scorePercent(score);
+            {categories.map((category) => {
+              const band = scoreBand(category.score);
               return (
-                <View style={styles.categoryRow} key={category}>
+                <View key={category.key} style={styles.categoryRow}>
                   <View style={styles.categoryHeader}>
-                    <Text style={styles.categoryName}>{category.replaceAll("_", " ")}</Text>
-                    <Text style={styles.categoryScore}>{score.toFixed(1)}</Text>
+                    <Text style={styles.categoryName}>{category.label}</Text>
+                    <Text style={styles.categoryScore}>{category.score.toFixed(1)}</Text>
                   </View>
                   <View style={styles.track}>
-                    <View style={[styles.trackFill, { width: `${Math.round(width)}%` }]} />
+                    <View style={[styles.trackFill, { width: scoreWidth(category.score), backgroundColor: band.fill }]} />
                   </View>
                 </View>
               );
@@ -88,37 +181,58 @@ export function ScoreScreen({ route, navigation }: Props) {
           </View>
 
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Highlights</Text>
-            {scorecard?.highlights?.length ? null : <Text style={styles.empty}>No highlight events recorded.</Text>}
-            {scorecard?.highlights?.map((highlight, index) => {
-              const tone = highlightTone(highlight.type);
+            <Text style={styles.sectionTitle}>Highlight Moments</Text>
+            {highlights.length === 0 ? <Text style={styles.emptyText}>No highlights are available yet.</Text> : null}
+            {highlights.map((highlight, index) => {
+              const band = highlight.type === "strong" ? scoreBand(8) : scoreBand(6);
+              const quote = highlight.transcript_quote || highlight.quote || null;
               return (
-                <View key={`${highlight.note}-${index}`} style={[styles.highlight, { backgroundColor: tone.bg, borderColor: tone.border }]}>
-                  <Text style={[styles.highlightType, { color: tone.label }]}>{highlight.type.toUpperCase()}</Text>
-                  <Text style={styles.highlightText}>{highlight.note}</Text>
-                  {highlight.turn_id ? <Text style={styles.turnRef}>Turn {highlight.turn_id.slice(0, 8)}</Text> : null}
+                <View key={`${highlight.note}-${index}`} style={[styles.highlightCard, { backgroundColor: band.bg, borderColor: band.border }]}> 
+                  <View style={styles.highlightHeader}>
+                    <Text style={[styles.highlightType, { color: band.text }]}>
+                      {highlight.type === "strong" ? "Strong" : "Improve"}
+                    </Text>
+                    {highlight.turn_id ? <Text style={styles.turnRef}>Turn {highlight.turn_id.slice(0, 8)}</Text> : null}
+                  </View>
+                  <Text style={styles.highlightNote}>{highlight.note}</Text>
+                  {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
                 </View>
               );
             })}
           </View>
 
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Weakness Tags</Text>
-            <View style={styles.tagWrap}>
-              {scorecard?.weakness_tags?.length ? null : <Text style={styles.empty}>No weakness tags.</Text>}
-              {scorecard?.weakness_tags?.map((tag) => (
-                <View key={tag} style={styles.tagChip}>
-                  <Text style={styles.tagLabel}>{tag.replaceAll("_", " ")}</Text>
-                </View>
-              ))}
-            </View>
-            <Text style={styles.evidenceCount}>Evidence turns linked: {scorecard?.evidence_turn_ids?.length ?? 0}</Text>
+            <Text style={styles.sectionTitle}>AI Summary</Text>
+            <Text style={styles.summaryText}>
+              {scorecard?.ai_summary ?? "Your scorecard is still being assembled. Check back in a few seconds."}
+            </Text>
           </View>
+
+          {managerNote ? (
+            <View style={styles.managerNoteCard}>
+              <Text style={styles.managerNoteLabel}>Manager Coaching Note</Text>
+              <Text style={styles.managerNoteText}>{managerNote}</Text>
+            </View>
+          ) : null}
         </ScrollView>
 
-        <Pressable style={styles.doneBtn} onPress={() => navigation.replace("Assignments")}>
-          <Text style={styles.doneLabel}>Back To Assignments</Text>
-        </Pressable>
+        <View style={styles.ctaRow}>
+          <Pressable
+            style={styles.primaryCta}
+            onPress={() => {
+              const assignmentId = data?.session.assignment_id;
+              const scenarioId = data?.session.scenario_id;
+              if (assignmentId && scenarioId) {
+                navigation.replace("PreSession", { assignmentId, scenarioId });
+              }
+            }}
+          >
+            <Text style={styles.primaryCtaLabel}>Try Again</Text>
+          </Pressable>
+          <Pressable style={styles.secondaryCta} onPress={() => navigation.replace("Assignments")}>
+            <Text style={styles.secondaryCtaLabel}>Back to Drills</Text>
+          </Pressable>
+        </View>
       </View>
     </SafeAreaView>
   );
@@ -126,71 +240,109 @@ export function ScoreScreen({ route, navigation }: Props) {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.bg },
-  container: { flex: 1, padding: 18, gap: 10 },
-  title: { fontSize: 28, fontWeight: "800", color: colors.ink },
-  subtitle: { color: colors.muted },
-  muted: { color: colors.muted },
-  error: { color: "#AF2D18", fontWeight: "700" },
+  container: { flex: 1 },
+  content: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 150, gap: 16 },
   heroCard: {
+    borderRadius: 24,
+    borderWidth: 1,
+    padding: 24,
+    alignItems: "center",
+    gap: 6,
+  },
+  heroKicker: { fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 1 },
+  heroValue: { fontSize: 56, fontWeight: "900", lineHeight: 60 },
+  heroSubtext: { color: colors.muted, fontSize: 13, fontWeight: "600" },
+  loadingCard: {
+    borderRadius: 18,
+    backgroundColor: colors.panel,
+    borderWidth: 1,
+    borderColor: colors.line,
+    padding: 16,
+    alignItems: "center",
+    gap: 10,
+  },
+  loadingText: { color: colors.muted, fontSize: 14 },
+  refreshText: { color: colors.muted, fontSize: 13, textAlign: "center" },
+  errorText: { color: "#AF2D18", fontSize: 14, fontWeight: "700", textAlign: "center" },
+  section: {
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.panel,
+    padding: 18,
+    gap: 14,
+  },
+  sectionTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
+  categoryRow: { gap: 8 },
+  categoryHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  categoryName: { color: colors.ink, fontSize: 14, fontWeight: "700" },
+  categoryScore: { color: colors.ink, fontSize: 14, fontWeight: "800" },
+  track: {
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: "#EFE3D4",
+    overflow: "hidden",
+  },
+  trackFill: {
+    height: "100%",
+    borderRadius: 999,
+  },
+  emptyText: { color: colors.muted, fontSize: 14 },
+  highlightCard: {
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 14,
+    gap: 8,
+  },
+  highlightHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  highlightType: { fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 },
+  turnRef: { color: colors.muted, fontSize: 11, fontWeight: "700" },
+  highlightNote: { color: colors.ink, fontSize: 15, fontWeight: "700", lineHeight: 21 },
+  highlightQuote: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 19,
+    fontStyle: "italic",
+  },
+  summaryText: { color: colors.ink, fontSize: 15, lineHeight: 23 },
+  managerNoteCard: {
+    marginHorizontal: 20,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "#C8D9EA",
+    backgroundColor: "#EFF6FD",
+    padding: 18,
+    gap: 8,
+  },
+  managerNoteLabel: { color: "#25527A", fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 },
+  managerNoteText: { color: "#163954", fontSize: 15, lineHeight: 22, fontWeight: "600" },
+  ctaRow: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 20,
+    paddingTop: 14,
+    paddingBottom: 24,
+    gap: 10,
+    backgroundColor: colors.bg,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+  },
+  primaryCta: {
+    borderRadius: 16,
+    backgroundColor: colors.accent,
+    alignItems: "center",
+    paddingVertical: 16,
+  },
+  primaryCtaLabel: { color: "#fff", fontSize: 16, fontWeight: "800" },
+  secondaryCta: {
     borderRadius: 16,
     borderWidth: 1,
     borderColor: colors.line,
     backgroundColor: colors.panel,
-    padding: 14,
-    gap: 5
-  },
-  heroLabel: { color: colors.muted, fontWeight: "700", fontSize: 12, textTransform: "uppercase" },
-  heroValue: { color: colors.ink, fontSize: 42, fontWeight: "800", lineHeight: 46 },
-  heroHint: { color: colors.ink, fontSize: 13, lineHeight: 18 },
-  scrollContent: { gap: 10, paddingBottom: 20 },
-  section: {
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.panel,
-    padding: 12,
-    gap: 8
-  },
-  sectionTitle: { color: colors.ink, fontSize: 14, fontWeight: "800" },
-  empty: { color: colors.muted, fontSize: 13 },
-  categoryRow: { gap: 6 },
-  categoryHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  categoryName: { color: colors.ink, fontWeight: "600", textTransform: "capitalize" },
-  categoryScore: { color: colors.success, fontWeight: "800" },
-  track: {
-    width: "100%",
-    height: 8,
-    borderRadius: 999,
-    backgroundColor: "#F0E4D5",
-    overflow: "hidden"
-  },
-  trackFill: { height: "100%", borderRadius: 999, backgroundColor: colors.accent },
-  highlight: {
-    borderRadius: 12,
-    borderWidth: 1,
-    padding: 10,
-    gap: 3
-  },
-  highlightType: { fontSize: 11, fontWeight: "800" },
-  highlightText: { color: colors.ink, fontSize: 13 },
-  turnRef: { color: colors.muted, fontSize: 11, fontWeight: "600" },
-  tagWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" },
-  tagChip: {
-    borderRadius: 999,
-    backgroundColor: colors.accentSoft,
-    borderWidth: 1,
-    borderColor: colors.line,
-    paddingVertical: 5,
-    paddingHorizontal: 10
-  },
-  tagLabel: { color: colors.ink, fontSize: 12, fontWeight: "700", textTransform: "capitalize" },
-  evidenceCount: { color: colors.muted, fontSize: 12, fontWeight: "600" },
-  doneBtn: {
-    marginTop: "auto",
-    borderRadius: 12,
-    backgroundColor: colors.accent,
     alignItems: "center",
-    paddingVertical: 12
+    paddingVertical: 15,
   },
-  doneLabel: { color: "white", fontWeight: "800" }
+  secondaryCtaLabel: { color: colors.ink, fontSize: 15, fontWeight: "700" },
 });
