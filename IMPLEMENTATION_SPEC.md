@@ -199,7 +199,7 @@ Stubbed integrations:
 
 3. Auth and authorization
    - add real auth (Firebase/Supabase/JWT)
-   - enforce manager/rep/org access controls on every endpoint
+   - enforce manager/rep/org access controls on every endpoint (header-based RBAC scaffold implemented; org-level enforcement still pending)
 
 4. Infra readiness
    - add Alembic migrations (implemented baseline + initial revision)

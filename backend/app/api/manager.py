@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.auth import Actor, require_manager
 from app.db.session import get_db
 from app.models.assignment import Assignment
 from app.models.scorecard import ManagerReview, Scorecard
@@ -22,7 +23,14 @@ storage_service = StorageService()
 
 
 @router.post("/assignments", response_model=AssignmentResponse)
-def create_assignment(payload: AssignmentCreateRequest, db: Session = Depends(get_db)) -> Assignment:
+def create_assignment(
+    payload: AssignmentCreateRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> Assignment:
+    if actor.user_id and actor.role == "manager" and actor.user_id != payload.assigned_by:
+        raise HTTPException(status_code=403, detail="manager can only assign as themselves")
+
     assignment = Assignment(
         scenario_id=payload.scenario_id,
         rep_id=payload.rep_id,
@@ -38,13 +46,25 @@ def create_assignment(payload: AssignmentCreateRequest, db: Session = Depends(ge
 
 
 @router.get("/feed", response_model=ManagerFeedResponse)
-def get_manager_feed(manager_id: str = Query(...), db: Session = Depends(get_db)) -> ManagerFeedResponse:
+def get_manager_feed(
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> ManagerFeedResponse:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own feed")
+
     items = feed_service.get_feed(db, manager_id=manager_id)
     return ManagerFeedResponse(items=items)
 
 
 @router.get("/sessions/{session_id}/replay", response_model=SessionReplayResponse)
-def get_session_replay(session_id: str, db: Session = Depends(get_db)) -> SessionReplayResponse:
+def get_session_replay(
+    session_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> SessionReplayResponse:
+    _ = actor
     session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -133,8 +153,12 @@ def get_session_replay(session_id: str, db: Session = Depends(get_db)) -> Sessio
 def override_scorecard(
     scorecard_id: str,
     payload: ScorecardOverrideRequest,
+    actor: Actor = Depends(require_manager),
     db: Session = Depends(get_db),
 ) -> ManagerReview:
+    if actor.user_id and actor.role == "manager" and actor.user_id != payload.reviewer_id:
+        raise HTTPException(status_code=403, detail="manager can only review as themselves")
+
     scorecard = db.scalar(select(Scorecard).where(Scorecard.id == scorecard_id))
     if scorecard is None:
         raise HTTPException(status_code=404, detail="scorecard not found")

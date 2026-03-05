@@ -52,6 +52,15 @@ Server events:
 - `server.turn.committed`
 - `server.error`
 
+## Auth / RBAC Scaffold
+
+- Header-based actor identity is supported via:
+  - `x-user-id`
+  - `x-user-role` (`rep`, `manager`, `admin`)
+- `AUTH_REQUIRED=true` enforces header presence.
+- Manager and rep endpoints now enforce role-aware access checks.
+- Current implementation is a scaffold for future JWT/Firebase/Supabase integration.
+
 ## Run
 
 ```bash

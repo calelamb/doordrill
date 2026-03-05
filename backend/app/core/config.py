@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     ws_flush_interval_ms: int = Field(default=350, alias="WS_FLUSH_INTERVAL_MS")
     max_ws_event_batch: int = Field(default=200, alias="MAX_WS_EVENT_BATCH")
 
+    auth_required: bool = Field(default=False, alias="AUTH_REQUIRED")
+
     stt_provider: str = Field(default="mock", alias="STT_PROVIDER")
     llm_provider: str = Field(default="mock", alias="LLM_PROVIDER")
     tts_provider: str = Field(default="mock", alias="TTS_PROVIDER")
