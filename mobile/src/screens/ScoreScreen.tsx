@@ -1,7 +1,8 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useEffect, useMemo, useState, useRef } from "react";
-import { ActivityIndicator, Animated, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Animated as RNAnimated, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
 import { UserCircle } from "lucide-react-native";
+import Animated, { FadeInDown, FadeInUp, withSpring } from "react-native-reanimated";
 
 import { RootStackParamList } from "../navigation/types";
 import { fetchRepSession, fetchRepScenario } from "../services/api";
@@ -49,11 +50,11 @@ function scoreBand(score: number) {
 }
 
 function CategoryBar({ label, score, index }: { label: string; score: number; index: number }) {
-  const widthAnim = useRef(new Animated.Value(0)).current;
+  const widthAnim = useRef(new RNAnimated.Value(0)).current;
   const band = scoreBand(score);
 
   useEffect(() => {
-    Animated.timing(widthAnim, {
+    RNAnimated.timing(widthAnim, {
       toValue: (score / 10) * 100,
       duration: 700,
       delay: index * 100,
@@ -62,20 +63,20 @@ function CategoryBar({ label, score, index }: { label: string; score: number; in
   }, [score, index, widthAnim]);
 
   return (
-    <View style={styles.categoryRow}>
+    <Animated.View entering={FadeInDown.delay(300 + index * 100).springify()} style={styles.categoryRow}>
       <View style={styles.categoryHeader}>
         <Text style={styles.categoryName}>{label}</Text>
         <Text style={[styles.categoryScore, { color: band.text }]}>{score.toFixed(1)}</Text>
       </View>
       <View style={styles.track}>
-        <Animated.View
+        <RNAnimated.View
           style={[
             styles.trackFill,
             { backgroundColor: colors.accent, width: widthAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }) }
           ]}
         />
       </View>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -89,7 +90,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [pollCount, setPollCount] = useState(0);
 
-  const heroBarAnim = useRef(new Animated.Value(0)).current;
+  const heroBarAnim = useRef(new RNAnimated.Value(0)).current;
 
   useEffect(() => {
     let cancelled = false;
@@ -145,7 +146,7 @@ export function ScoreScreen({ route, navigation }: Props) {
 
   useEffect(() => {
     if (scorecard) {
-      Animated.timing(heroBarAnim, {
+      RNAnimated.timing(heroBarAnim, {
         toValue: (overallScore / 10) * 100,
         duration: 800,
         useNativeDriver: false,
@@ -176,10 +177,13 @@ export function ScoreScreen({ route, navigation }: Props) {
         ) : (
           <>
             <View style={styles.heroBlock}>
-              <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
-              <Text style={styles.heroLabel}>Overall Score</Text>
+              {/* @ts-ignore */}
+              <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg }]}>
+                <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
+                <Text style={styles.heroLabel}>Overall Score</Text>
+              </Animated.View>
               <View style={styles.heroBarTrack}>
-                <Animated.View
+                <RNAnimated.View
                   style={[
                     styles.heroBarFill,
                     {
@@ -212,7 +216,7 @@ export function ScoreScreen({ route, navigation }: Props) {
                   const quote = hl.transcript_quote || hl.quote || null;
 
                   return (
-                    <View key={idx} style={styles.highlightCard}>
+                    <Animated.View key={idx} entering={FadeInDown.delay(700 + idx * 100).springify()} style={styles.highlightCard}>
                       <View style={styles.highlightHeader}>
                         <View style={[styles.highlightTag, { backgroundColor: isStrong ? colors.accentSoft : "#FEF3C7" }]}> 
                           <Text style={[styles.highlightTagText, { color: isStrong ? colors.accent : "#92400E" }]}>
@@ -223,23 +227,23 @@ export function ScoreScreen({ route, navigation }: Props) {
                       </View>
                       <Text style={styles.highlightNote}>{hl.note}</Text>
                       {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
-                    </View>
+                    </Animated.View>
                   );
                 })}
 
                 <Text style={styles.sectionTitle}>FEEDBACK</Text>
-                <View style={styles.summaryCard}>
+                <Animated.View entering={FadeInDown.delay(1000).springify()} style={styles.summaryCard}>
                   <Text style={styles.summaryText}>{scorecard.ai_summary}</Text>
-                </View>
+                </Animated.View>
 
                 {managerNote ? (
-                  <View style={styles.managerNoteCard}>
+                  <Animated.View entering={FadeInDown.delay(1100).springify()} style={styles.managerNoteCard}>
                     <View style={styles.managerNoteHeader}>
                       <UserCircle size={16} color={colors.accent} />
                       <Text style={styles.managerNoteLabel}>Manager Note</Text>
                     </View>
                     <Text style={styles.managerNoteText}>{managerNote}</Text>
-                  </View>
+                  </Animated.View>
                 ) : null}
               </>
             ) : null}
@@ -257,9 +261,9 @@ export function ScoreScreen({ route, navigation }: Props) {
               >
                 <Text style={styles.primaryCtaLabel}>Try Again</Text>
               </Pressable>
-              <Pressable style={styles.secondaryCta} onPress={() => navigation.replace("Assignments")}>
-                <Text style={styles.secondaryCtaLabel}>Back to Drills</Text>
-              </Pressable>
+          <Pressable style={styles.secondaryCta} onPress={() => navigation.replace("MainTabs", { screen: "AssignmentsTab" })}>
+            <Text style={styles.secondaryCtaLabel}>Back to Drills</Text>
+          </Pressable>
             </View>
           </>
         )}
@@ -283,12 +287,24 @@ const styles = StyleSheet.create({
   
   heroBlock: {
     alignItems: "center",
-    paddingTop: 32,
+    paddingTop: 12,
     marginBottom: 24,
+  },
+  heroOrb: {
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 12,
+    shadowColor: colors.ink,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
   },
   heroValue: {
     fontSize: 64,
-    fontWeight: "800",
+    fontFamily: "Poppins_800ExtraBold",
   },
   heroLabel: {
     fontSize: 13,

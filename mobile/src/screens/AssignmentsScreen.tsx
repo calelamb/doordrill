@@ -1,16 +1,21 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View, ActivityIndicator } from "react-native";
-import { UserCircle, LogOut } from "lucide-react-native";
+import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View, ActivityIndicator, RefreshControl } from "react-native";
 
 import { AssignmentCard } from "../components/AssignmentCard";
-import { RootStackParamList } from "../navigation/types";
+import { BottomTabParamList } from "../navigation/types";
 import { fetchRepAssignments, fetchAllScenarios } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
 import { RepAssignment, ScenarioBrief } from "../types";
+import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
+import { CompositeScreenProps } from "@react-navigation/native";
+import { RootStackParamList } from "../navigation/types";
 
-type Props = NativeStackScreenProps<RootStackParamList, "Assignments">;
+type Props = CompositeScreenProps<
+  BottomTabScreenProps<BottomTabParamList, "AssignmentsTab">,
+  NativeStackScreenProps<RootStackParamList>
+>;
 
 function isDueSoon(dueAt: string | null): boolean {
   if (!dueAt) return false;
@@ -28,7 +33,7 @@ function isPastDue(dueAt: string | null): boolean {
 }
 
 export function AssignmentsScreen({ navigation }: Props) {
-  const { repId, clearSession } = useSession();
+  const { repId } = useSession();
   const [assignments, setAssignments] = useState<RepAssignment[]>([]);
   const [scenarios, setScenarios] = useState<Record<string, ScenarioBrief>>({});
   const [loading, setLoading] = useState(false);
@@ -102,14 +107,6 @@ export function AssignmentsScreen({ navigation }: Props) {
             <Text style={styles.title}>Your Drills</Text>
             <Text style={styles.subtitle}>Open a brief, then jump straight in.</Text>
           </View>
-          <View style={styles.headerActions}>
-            <Pressable style={styles.iconButton} onPress={() => navigation.navigate("Profile")}>
-              <UserCircle size={28} color={colors.ink} />
-            </Pressable>
-            <Pressable style={styles.iconButton} onPress={clearSession}>
-              <LogOut size={24} color={colors.muted} />
-            </Pressable>
-          </View>
         </View>
 
         {error ? (
@@ -123,8 +120,9 @@ export function AssignmentsScreen({ navigation }: Props) {
 
         <ScrollView 
           contentContainerStyle={styles.list}
-          refreshing={loading}
-          onRefresh={loadData}
+          refreshControl={
+            <RefreshControl refreshing={loading && assignments.length > 0} onRefresh={loadData} colors={[colors.accent]} tintColor={colors.accent} />
+          }
         >
           {loading && assignments.length === 0 ? (
             <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
@@ -179,8 +177,6 @@ const styles = StyleSheet.create({
   headerRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 },
   title: { fontSize: 32, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 4 },
   subtitle: { color: colors.muted, fontSize: 15 },
-  headerActions: { flexDirection: "row", alignItems: "center", gap: 12 },
-  iconButton: { padding: 4 },
   errorContainer: {
     backgroundColor: "#FEE2E2",
     padding: 12,
@@ -191,7 +187,7 @@ const styles = StyleSheet.create({
   },
   error: { color: "#991B1B", fontWeight: "600", flex: 1 },
   retryText: { color: "#991B1B", fontWeight: "800", textDecorationLine: "underline" },
-  list: { gap: 16, paddingBottom: 40 },
+  list: { gap: 16, paddingBottom: 20 },
   emptyState: { flex: 1, alignItems: "center", justifyContent: "center", marginTop: 60, gap: 8 },
   emptyText: { fontSize: 18, fontWeight: "700", color: colors.ink },
   emptySubtext: { fontSize: 14, color: colors.muted },

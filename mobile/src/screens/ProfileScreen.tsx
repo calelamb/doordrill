@@ -3,13 +3,18 @@ import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 import { Award, Target, Zap } from "lucide-react-native";
 
-import { RootStackParamList } from "../navigation/types";
+import { BottomTabParamList, RootStackParamList } from "../navigation/types";
 import { fetchRepProgress } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
 import { RepProgress } from "../types";
+import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
+import { CompositeScreenProps } from "@react-navigation/native";
 
-type Props = NativeStackScreenProps<RootStackParamList, "Profile">;
+type Props = CompositeScreenProps<
+  BottomTabScreenProps<BottomTabParamList, "ProfileTab">,
+  NativeStackScreenProps<RootStackParamList>
+>;
 
 export function ProfileScreen({ navigation }: Props) {
   const { repId, clearSession } = useSession();
@@ -90,10 +95,6 @@ export function ProfileScreen({ navigation }: Props) {
         ) : null}
 
         <View style={styles.actionsContainer}>
-          <Pressable style={styles.actionButton} onPress={() => navigation.navigate("History")}>
-            <Text style={styles.actionButtonText}>View Drill History</Text>
-          </Pressable>
-          
           <Pressable style={styles.logoutButton} onPress={clearSession}>
             <Text style={styles.logoutText}>Sign Out</Text>
           </Pressable>
@@ -119,7 +120,7 @@ const styles = StyleSheet.create({
     borderColor: colors.accent,
   },
   avatarText: { fontSize: 32, fontWeight: "800", color: colors.accent },
-  name: { fontSize: 24, fontWeight: "800", color: colors.ink, marginBottom: 4 },
+  name: { fontSize: 28, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 4 },
   role: { fontSize: 15, color: colors.muted },
   errorContainer: {
     backgroundColor: "#FEE2E2",
@@ -148,18 +149,13 @@ const styles = StyleSheet.create({
   statLabel: { fontSize: 13, fontWeight: "700", color: colors.muted, textTransform: "uppercase" },
   statValue: { fontSize: 32, fontWeight: "800", color: colors.ink },
   actionsContainer: { marginTop: "auto", gap: 12, paddingTop: 24 },
-  actionButton: {
-    backgroundColor: colors.panel,
-    borderWidth: 1,
-    borderColor: colors.line,
-    paddingVertical: 16,
-    borderRadius: 14,
-    alignItems: "center",
-  },
-  actionButtonText: { fontSize: 16, fontWeight: "700", color: colors.ink },
   logoutButton: {
     paddingVertical: 16,
     alignItems: "center",
+    backgroundColor: colors.panel,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 14,
   },
   logoutText: { fontSize: 16, fontWeight: "700", color: colors.accent },
 });

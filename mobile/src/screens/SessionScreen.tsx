@@ -1,8 +1,18 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
+import * as Haptics from "expo-haptics";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Animated, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
+import { Animated as RNAnimated, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
+import Animated, { 
+  useSharedValue, 
+  useAnimatedStyle, 
+  withSpring, 
+  withTiming, 
+  withRepeat, 
+  withSequence,
+  interpolateColor
+} from "react-native-reanimated";
 import { Activity, Home, Mic, MicOff, Volume2, WifiOff } from "lucide-react-native";
 
 import { RootStackParamList } from "../navigation/types";
@@ -59,6 +69,100 @@ async function configurePlaybackAudioMode(): Promise<void> {
   });
 }
 
+function WaveBar({ targetHeight }: { targetHeight: number }) {
+  const height = useSharedValue(10);
+  
+  useEffect(() => {
+    height.value = withTiming(targetHeight, { duration: 100 });
+  }, [targetHeight]);
+  
+  const animatedStyle = useAnimatedStyle(() => ({
+    height: height.value,
+  }));
+  
+  return <Animated.View style={[styles.waveBar, animatedStyle]} />;
+}
+
+function VisualizationRing({ mode }: { mode: 'idle' | 'listening' | 'speaking' }) {
+  const scale = useSharedValue(1);
+  const opacity = useSharedValue(0.5);
+
+  useEffect(() => {
+    if (mode === 'speaking') {
+      scale.value = withRepeat(withSequence(withTiming(1.3, { duration: 1000 }), withTiming(1, { duration: 1000 })), -1, true);
+      opacity.value = withRepeat(withSequence(withTiming(0, { duration: 1000 }), withTiming(0.5, { duration: 1000 })), -1, true);
+    } else if (mode === 'listening') {
+      scale.value = withTiming(1.1, { duration: 500 });
+      opacity.value = withTiming(0.2, { duration: 500 });
+    } else {
+      scale.value = withTiming(1, { duration: 500 });
+      opacity.value = withTiming(1, { duration: 500 });
+    }
+  }, [mode]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+    opacity: opacity.value,
+    borderColor: mode === 'speaking' ? "rgba(200,81,42,0.8)" : mode === 'listening' ? colors.accent : "#E9D7C7"
+  }));
+
+  return <Animated.View style={[styles.orbRing, animatedStyle]} />;
+}
+
+function VisualizationOrb({ mode, hasError }: { mode: 'idle' | 'listening' | 'speaking', hasError: boolean }) {
+  const scale = useSharedValue(1);
+  const colorProgress = useSharedValue(0);
+
+  useEffect(() => {
+    if (mode === 'speaking') {
+      scale.value = withRepeat(withSequence(withTiming(1.15, { duration: 800 }), withTiming(1, { duration: 800 })), -1, true);
+      colorProgress.value = withRepeat(withTiming(1, { duration: 2000 }), -1, true);
+    } else if (mode === 'listening') {
+      scale.value = withTiming(1.05, { duration: 300 });
+      colorProgress.value = withTiming(0, { duration: 300 });
+    } else {
+      scale.value = withTiming(1, { duration: 500 });
+      colorProgress.value = withTiming(0, { duration: 500 });
+    }
+  }, [mode]);
+
+  const animatedStyle = useAnimatedStyle(() => {
+    const backgroundColor = interpolateColor(
+      colorProgress.value,
+      [0, 0.5, 1],
+      [
+        mode === 'listening' ? colors.accent : colors.panel,
+        '#A74223', // speaking color 1
+        '#D95831'  // speaking color 2
+      ]
+    );
+    const borderColor = mode === 'listening' ? colors.accent : mode === 'speaking' ? '#A74223' : colors.line;
+
+    return {
+      transform: [{ scale: scale.value }],
+      backgroundColor,
+      borderColor,
+    };
+  });
+
+  return (
+    <>
+      {/* @ts-ignore */}
+      <Animated.View style={[styles.orb, animatedStyle]} sharedTransitionTag="ai-orb">
+        {hasError ? (
+          <WifiOff color={colors.ink} size={28} />
+        ) : mode === 'listening' ? (
+          <Mic color="#fff" size={30} />
+        ) : mode === 'speaking' ? (
+          <Activity color="#fff" size={30} />
+        ) : (
+          <Home color={colors.ink} size={30} />
+        )}
+      </Animated.View>
+    </>
+  );
+}
+
 export function SessionScreen({ route, navigation }: Props) {
   const { sessionId } = route.params;
 
@@ -75,7 +179,8 @@ export function SessionScreen({ route, navigation }: Props) {
   const ignoreNextCloseRef = useRef(false);
   const manualCloseRef = useRef(false);
   const speechDetectedRef = useRef(false);
-  const endHoldProgress = useRef(new Animated.Value(0)).current;
+  const endHoldProgress = useRef(new RNAnimated.Value(0)).current;
+  const holdIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [connected, setConnected] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -294,6 +399,7 @@ export function SessionScreen({ route, navigation }: Props) {
       }
 
       if (nextState === "ai_speaking") {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         setAiSpeaking(true);
         setStatusLabel("AI is responding...");
         setHomeownerPreview("");
@@ -321,6 +427,7 @@ export function SessionScreen({ route, navigation }: Props) {
       }
 
       if (nextState === "barge_in_detected") {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         showInterruptCue("You interrupted the homeowner");
         void cancelAudioPlayback();
         return;
@@ -411,6 +518,7 @@ export function SessionScreen({ route, navigation }: Props) {
       return;
     }
 
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     speechDetectedRef.current = false;
     setError(null);
     clearWaitingNudgeTimer();
@@ -449,6 +557,7 @@ export function SessionScreen({ route, navigation }: Props) {
       const chunk = await audioCapture.stop();
       if (chunk && speechDetectedRef.current && client?.isConnected()) {
         client.sendAudioChunk(chunk);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         setStatusLabel("AI is responding...");
       } else if (!speechDetectedRef.current) {
         setError("No speech detected. Hold the mic and speak clearly.");
@@ -548,23 +657,16 @@ export function SessionScreen({ route, navigation }: Props) {
           ) : null}
 
           <View style={styles.orbShell}>
-            <View style={[styles.orbRing, aiSpeaking || playingAudio ? styles.orbRingActive : null]} />
-            <View style={[styles.orb, aiSpeaking || playingAudio ? styles.orbHot : repSpeaking || recording ? styles.orbCool : null]}>
-              {reconnectAttempt > 0 ? (
-                <WifiOff color={colors.ink} size={28} />
-              ) : repSpeaking || recording ? (
-                <Mic color="#fff" size={30} />
-              ) : aiSpeaking || playingAudio ? (
-                <Activity color="#fff" size={30} />
-              ) : (
-                <Home color={colors.ink} size={30} />
-              )}
-            </View>
+            <VisualizationRing mode={aiSpeaking || playingAudio ? 'speaking' : repSpeaking || recording ? 'listening' : 'idle'} />
+            <VisualizationOrb 
+              mode={aiSpeaking || playingAudio ? 'speaking' : repSpeaking || recording ? 'listening' : 'idle'} 
+              hasError={reconnectAttempt > 0} 
+            />
           </View>
 
           <View style={styles.waveformRow}>
             {waveHeights.map((height, index) => (
-              <View key={index} style={[styles.waveBar, { height }]} />
+              <WaveBar key={index} targetHeight={height} />
             ))}
           </View>
 
@@ -630,17 +732,27 @@ export function SessionScreen({ route, navigation }: Props) {
             disabled={endingSession}
             delayLongPress={HOLD_END_MS}
             onLongPress={() => {
+              if (holdIntervalRef.current) clearInterval(holdIntervalRef.current);
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
               void completeSessionFlow();
             }}
             onPressIn={() => {
-              Animated.timing(endHoldProgress, {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              let ticks = 0;
+              holdIntervalRef.current = setInterval(() => {
+                ticks++;
+                if (ticks < 5) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }, HOLD_END_MS / 5);
+
+              RNAnimated.timing(endHoldProgress, {
                 toValue: 1,
                 duration: HOLD_END_MS,
                 useNativeDriver: false,
               }).start();
             }}
             onPressOut={() => {
-              Animated.timing(endHoldProgress, {
+              if (holdIntervalRef.current) clearInterval(holdIntervalRef.current);
+              RNAnimated.timing(endHoldProgress, {
                 toValue: 0,
                 duration: 120,
                 useNativeDriver: false,
@@ -648,7 +760,7 @@ export function SessionScreen({ route, navigation }: Props) {
             }}
             style={styles.endButton}
           >
-            <Animated.View
+            <RNAnimated.View
               style={[
                 styles.endButtonFill,
                 {

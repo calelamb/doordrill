@@ -1,6 +1,14 @@
+import { NavigatorScreenParams } from "@react-navigation/native";
+
+export type BottomTabParamList = {
+  AssignmentsTab: undefined;
+  HistoryTab: undefined;
+  ProfileTab: undefined;
+};
+
 export type RootStackParamList = {
   Login: undefined;
-  Assignments: undefined;
+  MainTabs: NavigatorScreenParams<BottomTabParamList>;
   PreSession: {
     assignmentId: string;
     scenarioId: string;
@@ -13,6 +21,4 @@ export type RootStackParamList = {
   Score: {
     sessionId: string;
   };
-  History: undefined;
-  Profile: undefined;
 };

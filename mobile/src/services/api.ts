@@ -1,5 +1,5 @@
 import { API_BASE_URL } from "./config";
-import { RepAssignment, RepSessionDetail, ScenarioBrief } from "../types";
+import { RepAssignment, RepProgress, RepSessionDetail, ScenarioBrief } from "../types";
 
 type HeaderMap = Record<string, string>;
 
