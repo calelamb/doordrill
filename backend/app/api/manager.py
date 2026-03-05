@@ -26,6 +26,7 @@ from app.schemas.scorecard import (
 )
 from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
 from app.services.manager_action_service import ManagerActionService
+from app.services.management_analytics_service import ManagementAnalyticsService
 from app.services.manager_feed_service import ManagerFeedService
 from app.services.manager_review_service import ManagerReviewService
 from app.services.notification_service import NotificationService
@@ -37,6 +38,7 @@ storage_service = StorageService()
 action_service = ManagerActionService()
 review_service = ManagerReviewService()
 notification_service = NotificationService()
+management_analytics_service = ManagementAnalyticsService()
 RUBRIC_CATEGORY_KEYS = {
     "opening": "opening",
     "pitch": "pitch",
@@ -704,6 +706,16 @@ def get_manager_analytics(
                 bucket["count"] += 1
                 break
 
+    command_center = management_analytics_service.get_command_center(
+        db,
+        manager_id=manager_id,
+        date_from=current_start,
+        date_to=current_end,
+        previous_start=previous_start,
+        previous_end=previous_end,
+        period=period,
+    )
+
     return {
         "manager_id": manager_id,
         "period": period,
@@ -752,7 +764,200 @@ def get_manager_analytics(
             for row in pass_rate_rows
         ],
         "score_distribution_histogram": histogram_bins,
+        "summary": command_center["summary"],
+        "score_trend": command_center["score_trend"],
+        "scenario_pass_matrix": command_center["scenario_pass_matrix"],
+        "rep_risk_matrix": command_center["rep_risk_matrix"],
+        "weakest_categories": command_center["weakest_categories"],
+        "alerts_preview": command_center["alerts_preview"],
     }
+
+
+@router.get("/command-center")
+def get_command_center(
+    manager_id: str = Query(...),
+    period: str = Query(default="30"),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    current_start, current_end, previous_start, previous_end = _resolve_period_bounds(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return management_analytics_service.get_command_center(
+        db,
+        manager_id=manager_id,
+        date_from=current_start,
+        date_to=current_end,
+        previous_start=previous_start,
+        previous_end=previous_end,
+        period=period,
+    )
+
+
+@router.get("/analytics/scenarios")
+def get_scenario_intelligence(
+    manager_id: str = Query(...),
+    period: str = Query(default="30"),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    current_start, current_end, _, _ = _resolve_period_bounds(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return management_analytics_service.get_scenario_intelligence(
+        db,
+        manager_id=manager_id,
+        date_from=current_start,
+        date_to=current_end,
+        period=period,
+    )
+
+
+@router.get("/analytics/coaching")
+def get_coaching_analytics(
+    manager_id: str = Query(...),
+    period: str = Query(default="30"),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    current_start, current_end, _, _ = _resolve_period_bounds(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return management_analytics_service.get_coaching_analytics(
+        db,
+        manager_id=manager_id,
+        date_from=current_start,
+        date_to=current_end,
+        period=period,
+    )
+
+
+@router.get("/analytics/explorer")
+def get_session_explorer(
+    manager_id: str = Query(...),
+    period: str = Query(default="30"),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    rep_id: str | None = Query(default=None),
+    scenario_id: str | None = Query(default=None),
+    reviewed: bool | None = Query(default=None),
+    weakness_tag: str | None = Query(default=None),
+    score_min: float | None = Query(default=None),
+    score_max: float | None = Query(default=None),
+    barge_in_only: bool = Query(default=False),
+    search: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    current_start, current_end, _, _ = _resolve_period_bounds(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return management_analytics_service.get_session_explorer(
+        db,
+        manager_id=manager_id,
+        date_from=current_start,
+        date_to=current_end,
+        rep_id=rep_id,
+        scenario_id=scenario_id,
+        reviewed=reviewed,
+        weakness_tag=weakness_tag,
+        score_min=score_min,
+        score_max=score_max,
+        barge_in_only=barge_in_only,
+        search=search,
+        limit=limit,
+    )
+
+
+@router.get("/alerts")
+def get_manager_alerts(
+    manager_id: str = Query(...),
+    period: str = Query(default="30"),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    current_start, current_end, _, _ = _resolve_period_bounds(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return management_analytics_service.get_alerts(
+        db,
+        manager_id=manager_id,
+        date_from=current_start,
+        date_to=current_end,
+        period=period,
+    )
+
+
+@router.get("/benchmarks")
+def get_manager_benchmarks(
+    manager_id: str = Query(...),
+    period: str = Query(default="30"),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    current_start, current_end, _, _ = _resolve_period_bounds(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return management_analytics_service.get_benchmarks(
+        db,
+        manager_id=manager_id,
+        date_from=current_start,
+        date_to=current_end,
+        period=period,
+    )
 
 
 @router.get("/sessions/{session_id}/replay", response_model=SessionReplayResponse)
