@@ -14,6 +14,7 @@ from app.core.auth import resolve_ws_actor
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.assignment import Assignment
+from app.models.scenario import Scenario
 from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionTurn
 from app.models.types import AssignmentStatus, EventDirection, SessionStatus, TurnSpeaker
@@ -87,6 +88,13 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=4404)
         db.close()
         return
+
+    scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
+    orchestrator.bind_session_context(
+        session_id=session_id,
+        scenario=scenario,
+        prompt_version=session.prompt_version,
+    )
 
     incoming: asyncio.Queue[WsEvent] = asyncio.Queue(maxsize=1000)
     disconnected = asyncio.Event()
@@ -505,4 +513,5 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             logger.exception("Failed to finalize websocket session", extra={"session_id": session_id, "trace_id": ws_trace_id})
             db.rollback()
         finally:
+            orchestrator.clear_session_context(session_id)
             db.close()

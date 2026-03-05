@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -12,6 +13,7 @@ from app.core.config import get_settings
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.types import SessionStatus
+from app.schemas.scorecard import StructuredScorecardPayload
 
 CATEGORY_KEYS = [
     "opening",
@@ -20,6 +22,51 @@ CATEGORY_KEYS = [
     "closing_technique",
     "professionalism",
 ]
+CATEGORY_WEIGHTS = {
+    "opening": 0.15,
+    "pitch_delivery": 0.25,
+    "objection_handling": 0.30,
+    "closing_technique": 0.20,
+    "professionalism": 0.10,
+}
+
+
+class GradingPromptBuilder:
+    @classmethod
+    def template_blueprint(cls) -> str:
+        return (
+            "Return valid JSON only.\n"
+            "Use category_scores with keys opening, pitch_delivery, objection_handling, closing_technique, professionalism.\n"
+            "Each category must contain score, rationale, and evidence_turn_ids.\n"
+            "Compute weighted overall_score using 15/25/30/20/10 weights.\n"
+            "Provide 2-4 highlights using type strong|improve, plus a plain-English second-person ai_summary."
+        )
+
+    def build(self, turns: list[Any]) -> str:
+        transcript_rows = [
+            f'{turn.turn_index}. ({turn.id}) [{turn.speaker.value}/{turn.stage}] "{turn.text}"'
+            for turn in turns
+        ]
+        transcript_text = "\n".join(transcript_rows) or "No transcript turns captured."
+        schema = StructuredScorecardPayload.model_json_schema()
+        return (
+            "You are grading a door-to-door sales training session.\n"
+            "Be evidence-based, strict, and specific.\n"
+            "Return valid JSON only.\n"
+            "All evidence_turn_ids must refer to turn ids that appear in the transcript.\n"
+            "The ai_summary must be plain English, written directly to the rep in second person.\n"
+            "Highlights must contain 2 to 4 items with type 'strong' or 'improve'.\n"
+            "Use these weighted category rules:\n"
+            "- opening: 15%\n"
+            "- pitch_delivery: 25%\n"
+            "- objection_handling: 30%\n"
+            "- closing_technique: 20%\n"
+            "- professionalism: 10%\n"
+            "Use this JSON schema shape:\n"
+            f"{json.dumps(schema, ensure_ascii=True)}\n"
+            "Transcript:\n"
+            f"{transcript_text}"
+        )
 
 
 class GradingService:
@@ -27,6 +74,7 @@ class GradingService:
 
     def __init__(self) -> None:
         self.settings = get_settings()
+        self.prompt_builder = GradingPromptBuilder()
 
     async def grade_session(self, db: Session, session_id: str) -> Scorecard:
         session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
@@ -74,26 +122,10 @@ class GradingService:
         return scorecard
 
     async def _grade_with_llm(self, turns: list[Any]) -> dict[str, Any] | None:
-        if not self.settings.openai_api_key:
+        if not self.settings.openai_api_key or os.getenv("PYTEST_CURRENT_TEST"):
             return None
 
-        transcript_rows = [
-            f'{turn.turn_index}. ({turn.id}) [{turn.speaker.value}/{turn.stage}] "{turn.text}"'
-            for turn in turns
-        ]
-        transcript_text = "\n".join(transcript_rows) or "No transcript turns captured."
-        rubric_text = ", ".join(CATEGORY_KEYS)
-
-        prompt = (
-            "Score this door-to-door roleplay transcript from 0.0-10.0 per category. "
-            "Be strict, concise, and evidence-based.\n"
-            f"Categories: {rubric_text}.\n"
-            "Return JSON only with keys: overall_score, category_scores, highlights, ai_summary, "
-            "evidence_turn_ids, weakness_tags.\n"
-            "highlights must be list[{'type':'strong|improve','note':string,'turn_id':string|null}] max 3.\n"
-            "evidence_turn_ids should reference turn ids that exist in transcript.\n"
-            f"Transcript:\n{transcript_text}"
-        )
+        prompt = self.prompt_builder.build(turns)
 
         url = f"{self.settings.openai_base_url.rstrip('/')}/chat/completions"
         headers = {
@@ -141,7 +173,7 @@ class GradingService:
             "closing_technique": round(closing, 1),
             "professionalism": round(professionalism, 1),
         }
-        overall = round(sum(category_scores.values()) / len(category_scores), 2)
+        overall = self._calculate_weighted_overall(category_scores)
         weakness_tags = [key for key, score in category_scores.items() if score < 7.0]
         if not weakness_tags and overall < 8.0:
             weakness_tags = ["consistency"]
@@ -160,7 +192,7 @@ class GradingService:
             "overall_score": overall,
             "category_scores": category_scores,
             "highlights": highlights,
-            "ai_summary": "Solid drill. Improve explicit close attempts and objection reframing.",
+            "ai_summary": "You handled the drill with decent control, but you need a clearer close and more direct objection reframing.",
             "evidence_turn_ids": [e for e in evidence if e],
             "weakness_tags": weakness_tags,
         }
@@ -176,6 +208,8 @@ class GradingService:
         raw_scores = payload.get("category_scores", {})
         for key in CATEGORY_KEYS:
             source = raw_scores.get(key) if isinstance(raw_scores, dict) else fallback["category_scores"][key]
+            if isinstance(source, dict):
+                source = source.get("score")
             try:
                 value = float(source)
             except Exception:
@@ -186,7 +220,7 @@ class GradingService:
         try:
             overall_score = round(max(0.0, min(10.0, float(overall))), 2)
         except Exception:
-            overall_score = round(sum(category_scores.values()) / len(category_scores), 2)
+            overall_score = self._calculate_weighted_overall(category_scores)
 
         raw_highlights = payload.get("highlights", [])
         highlights = []
@@ -210,6 +244,18 @@ class GradingService:
             for turn_id in payload.get("evidence_turn_ids", [])
             if isinstance(turn_id, str) and turn_id in valid_turn_ids
         ]
+        if not evidence_turn_ids and isinstance(raw_scores, dict):
+            evidence_turn_ids = []
+            for key in CATEGORY_KEYS:
+                category_payload = raw_scores.get(key)
+                if not isinstance(category_payload, dict):
+                    continue
+                evidence_turn_ids.extend(
+                    turn_id
+                    for turn_id in category_payload.get("evidence_turn_ids", [])
+                    if isinstance(turn_id, str) and turn_id in valid_turn_ids
+                )
+            evidence_turn_ids = list(dict.fromkeys(evidence_turn_ids))
         if not evidence_turn_ids:
             evidence_turn_ids = fallback["evidence_turn_ids"]
 
@@ -230,3 +276,7 @@ class GradingService:
             "evidence_turn_ids": evidence_turn_ids,
             "weakness_tags": weakness_tags,
         }
+
+    def _calculate_weighted_overall(self, category_scores: dict[str, float]) -> float:
+        total = sum(float(category_scores.get(key, 0.0)) * weight for key, weight in CATEGORY_WEIGHTS.items())
+        return round(max(0.0, min(10.0, total)), 2)

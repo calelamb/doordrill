@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import Actor, require_rep_or_manager
 from app.db.session import get_db
 from app.models.assignment import Assignment
+from app.models.prompt_version import PromptVersion
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.types import AssignmentStatus, SessionStatus
@@ -73,6 +74,15 @@ def create_session(
         assignment_id=payload.assignment_id,
         rep_id=payload.rep_id,
         scenario_id=payload.scenario_id,
+        prompt_version=(
+            db.scalar(
+                select(PromptVersion.version).where(
+                    PromptVersion.prompt_type == "conversation",
+                    PromptVersion.active.is_(True),
+                )
+            )
+            or "conversation_v1"
+        ),
         started_at=datetime.now(timezone.utc),
         status=SessionStatus.ACTIVE,
     )
