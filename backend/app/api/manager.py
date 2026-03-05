@@ -26,8 +26,8 @@ from app.schemas.scorecard import (
 )
 from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
 from app.services.manager_action_service import ManagerActionService
-from app.services.management_analytics_service import ManagementAnalyticsService
 from app.services.analytics_refresh_service import AnalyticsRefreshService
+from app.services.management_analytics_runtime_service import ManagementAnalyticsRuntimeService
 from app.services.manager_feed_service import ManagerFeedService
 from app.services.manager_review_service import ManagerReviewService
 from app.services.notification_service import NotificationService
@@ -39,7 +39,7 @@ storage_service = StorageService()
 action_service = ManagerActionService()
 review_service = ManagerReviewService()
 notification_service = NotificationService()
-management_analytics_service = ManagementAnalyticsService()
+management_analytics_service = ManagementAnalyticsRuntimeService()
 analytics_refresh_service = AnalyticsRefreshService()
 RUBRIC_CATEGORY_KEYS = {
     "opening": "opening",
@@ -90,10 +90,12 @@ def _resolve_period_bounds(
         date_to = now
     if date_to.tzinfo is None:
         date_to = date_to.replace(tzinfo=timezone.utc)
+    date_to = date_to.replace(microsecond=0)
 
     normalized_period = period.lower()
     if normalized_period == "custom" and date_from is not None:
         current_start = date_from if date_from.tzinfo else date_from.replace(tzinfo=timezone.utc)
+        current_start = current_start.replace(microsecond=0)
     else:
         days = 30
         if normalized_period == "7":
@@ -599,180 +601,15 @@ def get_manager_analytics(
         date_to=date_to,
     )
 
-    assignment_count = db.scalar(select(func.count(Assignment.id)).where(Assignment.assigned_by == manager_id)) or 0
-    completed_assignments = (
-        db.scalar(
-            select(func.count(Assignment.id)).where(
-                Assignment.assigned_by == manager_id, Assignment.status == AssignmentStatus.COMPLETED
-            )
-        )
-        or 0
-    )
-    sessions_count = (
-        db.scalar(
-            select(func.count(DrillSession.id))
-            .join(Assignment, Assignment.id == DrillSession.assignment_id)
-            .where(Assignment.assigned_by == manager_id)
-        )
-        or 0
-    )
-    avg_score = db.scalar(
-        select(func.avg(Scorecard.overall_score))
-        .join(DrillSession, DrillSession.id == Scorecard.session_id)
-        .join(Assignment, Assignment.id == DrillSession.assignment_id)
-        .where(Assignment.assigned_by == manager_id)
-    )
-
-    unique_reps = db.scalar(select(func.count(func.distinct(Assignment.rep_id))).where(Assignment.assigned_by == manager_id)) or 0
-
-    current_avg_score = db.scalar(
-        select(func.avg(Scorecard.overall_score))
-        .join(DrillSession, DrillSession.id == Scorecard.session_id)
-        .join(Assignment, Assignment.id == DrillSession.assignment_id)
-        .where(
-            Assignment.assigned_by == manager_id,
-            DrillSession.started_at >= current_start,
-            DrillSession.started_at <= current_end,
-        )
-    )
-    previous_avg_score = db.scalar(
-        select(func.avg(Scorecard.overall_score))
-        .join(DrillSession, DrillSession.id == Scorecard.session_id)
-        .join(Assignment, Assignment.id == DrillSession.assignment_id)
-        .where(
-            Assignment.assigned_by == manager_id,
-            DrillSession.started_at >= previous_start,
-            DrillSession.started_at < previous_end,
-        )
-    )
-
-    completion_rows = db.execute(
-        select(
-            Assignment.rep_id.label("rep_id"),
-            User.name.label("rep_name"),
-            func.count(Assignment.id).label("assignment_count"),
-            func.sum(case((Assignment.status == AssignmentStatus.COMPLETED, 1), else_=0)).label("completed_count"),
-        )
-        .join(User, User.id == Assignment.rep_id)
-        .where(
-            Assignment.assigned_by == manager_id,
-            Assignment.created_at >= current_start,
-            Assignment.created_at <= current_end,
-        )
-        .group_by(Assignment.rep_id, User.name)
-        .order_by(User.name.asc())
-    ).mappings().all()
-
-    pass_rate_rows = db.execute(
-        select(
-            Scenario.id.label("scenario_id"),
-            Scenario.name.label("scenario_name"),
-            func.count(Scorecard.id).label("scored_session_count"),
-            func.sum(case((Scorecard.overall_score >= 7.0, 1), else_=0)).label("pass_count"),
-        )
-        .join(DrillSession, DrillSession.scenario_id == Scenario.id)
-        .join(Assignment, Assignment.id == DrillSession.assignment_id)
-        .join(Scorecard, Scorecard.session_id == DrillSession.id)
-        .where(
-            Assignment.assigned_by == manager_id,
-            DrillSession.started_at >= current_start,
-            DrillSession.started_at <= current_end,
-        )
-        .group_by(Scenario.id, Scenario.name)
-        .order_by(Scenario.name.asc())
-    ).mappings().all()
-
-    histogram_rows = db.execute(
-        select(Scorecard.overall_score)
-        .join(DrillSession, DrillSession.id == Scorecard.session_id)
-        .join(Assignment, Assignment.id == DrillSession.assignment_id)
-        .where(
-            Assignment.assigned_by == manager_id,
-            DrillSession.started_at >= current_start,
-            DrillSession.started_at <= current_end,
-        )
-    ).all()
-    histogram_bins = [
-        {"label": "0-2", "min": 0.0, "max": 2.0, "count": 0},
-        {"label": "2-4", "min": 2.0, "max": 4.0, "count": 0},
-        {"label": "4-6", "min": 4.0, "max": 6.0, "count": 0},
-        {"label": "6-8", "min": 6.0, "max": 8.0, "count": 0},
-        {"label": "8-10", "min": 8.0, "max": 10.1, "count": 0},
-    ]
-    for (raw_score,) in histogram_rows:
-        if raw_score is None:
-            continue
-        score = float(raw_score)
-        for bucket in histogram_bins:
-            if bucket["min"] <= score < bucket["max"]:
-                bucket["count"] += 1
-                break
-
-    command_center = management_analytics_service.get_command_center(
+    return management_analytics_service.get_team_analytics(
         db,
         manager_id=manager_id,
-        date_from=current_start,
-        date_to=current_end,
+        period=period,
+        current_start=current_start,
+        current_end=current_end,
         previous_start=previous_start,
         previous_end=previous_end,
-        period=period,
     )
-
-    return {
-        "manager_id": manager_id,
-        "period": period,
-        "date_from": current_start.isoformat(),
-        "date_to": current_end.isoformat(),
-        "assignment_count": int(assignment_count),
-        "completed_assignment_count": int(completed_assignments),
-        "sessions_count": int(sessions_count),
-        "active_rep_count": int(unique_reps),
-        "average_score": round(float(avg_score), 2) if avg_score is not None else None,
-        "completion_rate": round((completed_assignments / assignment_count), 3) if assignment_count else 0.0,
-        "team_average_score": round(float(current_avg_score), 2) if current_avg_score is not None else None,
-        "team_average_delta_vs_previous_period": (
-            round(float(current_avg_score) - float(previous_avg_score), 2)
-            if current_avg_score is not None and previous_avg_score is not None
-            else None
-        ),
-        "completion_rate_by_rep": [
-            {
-                "rep_id": row["rep_id"],
-                "rep_name": row["rep_name"],
-                "assignment_count": int(row["assignment_count"] or 0),
-                "completed_assignment_count": int(row["completed_count"] or 0),
-                "completion_rate": round(
-                    (int(row["completed_count"] or 0) / int(row["assignment_count"] or 1)),
-                    3,
-                )
-                if int(row["assignment_count"] or 0)
-                else 0.0,
-            }
-            for row in completion_rows
-        ],
-        "scenario_pass_rates": [
-            {
-                "scenario_id": row["scenario_id"],
-                "scenario_name": row["scenario_name"],
-                "scored_session_count": int(row["scored_session_count"] or 0),
-                "pass_count": int(row["pass_count"] or 0),
-                "pass_rate": round(
-                    (int(row["pass_count"] or 0) / int(row["scored_session_count"] or 1)),
-                    3,
-                )
-                if int(row["scored_session_count"] or 0)
-                else 0.0,
-            }
-            for row in pass_rate_rows
-        ],
-        "score_distribution_histogram": histogram_bins,
-        "summary": command_center["summary"],
-        "score_trend": command_center["score_trend"],
-        "scenario_pass_matrix": command_center["scenario_pass_matrix"],
-        "rep_risk_matrix": command_center["rep_risk_matrix"],
-        "weakest_categories": command_center["weakest_categories"],
-        "alerts_preview": command_center["alerts_preview"],
-    }
 
 
 @router.get("/command-center")
@@ -960,6 +797,20 @@ def get_manager_benchmarks(
         date_to=current_end,
         period=period,
     )
+
+
+@router.get("/analytics/operations")
+def get_manager_analytics_operations(
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    return management_analytics_service.get_operations_status(db, manager_id=manager_id)
 
 
 @router.get("/sessions/{session_id}/replay", response_model=SessionReplayResponse)

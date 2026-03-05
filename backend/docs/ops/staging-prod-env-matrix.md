@@ -68,6 +68,10 @@ This matrix defines the minimum infrastructure and environment configuration req
 | `FCM_SERVER_KEY` | optional | required if `NOTIFICATION_PUSH_PROVIDER=fcm` |
 | `NOTIFICATION_MAX_RETRIES` | `5` | `5` |
 | `NOTIFICATION_RETRY_BASE_SECONDS` | `30` | `30` |
+| `MANAGEMENT_ANALYTICS_CACHE_TTL_SECONDS` | `60` | `30-60` | Cache window for management dashboards |
+| `MANAGEMENT_ANALYTICS_CACHE_MAX_ENTRIES` | `512` | `1000+` | In-memory fallback cap when Redis is unavailable |
+| `MANAGEMENT_ANALYTICS_WARN_MS` | `800` | `800` | Logs warnings for slow management queries |
+| `MANAGEMENT_ANALYTICS_CRITICAL_MS` | `1500` | `1500` | Logs elevated severity for management query budget misses |
 
 ## Release Readiness Gate
 
@@ -83,11 +87,16 @@ This matrix defines the minimum infrastructure and environment configuration req
    - `/auth/register`
    - JWT-backed `/ws/sessions/{id}?access_token=...`
 5. SLO harness passes `50/100/200` ramp with JSON report retained.
-6. Replay spot check passes for at least 20 sessions:
+6. Management analytics harness passes cached dashboard gate with JSON report retained.
+7. Replay spot check passes for at least 20 sessions:
    - transcript turn count > 0
    - turn linkage present in `server.turn.committed`
    - audio artifact key resolves to signed URL
-7. Notification delivery table shows successful sends with retries < threshold and no `retry_scheduled` buildup.
+8. Notification delivery table shows successful sends with retries < threshold and no `retry_scheduled` buildup.
+9. `GET /manager/analytics/operations` shows:
+   - recent refresh runs
+   - no sustained `failed`/`running` buildup
+   - analytics cache backend healthy
 
 ## Observability Minimum
 
@@ -97,8 +106,12 @@ This matrix defines the minimum infrastructure and environment configuration req
   - queue depth by postprocess task
   - notification delivery success/failure/retry counts
   - retry sweeper processed count per minute
+  - management analytics p50/p95 by endpoint
+  - analytics cache hit/miss ratio
+  - analytics refresh lag (`analytics_last_refresh_at`)
 - Logs include:
   - `trace_id`
   - `session_id`
   - task id/status transitions (`postprocess_runs`)
   - websocket auth failures without logging raw `access_token` query values
+  - management analytics query duration with cache status

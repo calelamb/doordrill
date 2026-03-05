@@ -1,6 +1,6 @@
 # DoorDrill Backend Incident Runbook
 
-This runbook covers the v1 highest-risk failure modes: worker outages, provider outages, websocket auth failures, and replay integrity drift.
+This runbook covers the v1 highest-risk failure modes: worker outages, provider outages, websocket auth failures, replay integrity drift, and stale management analytics.
 
 ## 1) Celery Worker Outage
 
@@ -162,3 +162,46 @@ limit 100;
 2. SLO gate sample passes p50/p95 first-audio and barge-in p95 latency.
 3. `postprocess_runs` backlog is draining and failure rate trends down.
 4. Manager replay for canary org shows synchronized transcript/audio timeline.
+5. `GET /manager/analytics/operations` shows recent successful refresh runs and healthy cache stats.
+
+## 6) Stale Analytics / Slow Dashboard Queries
+
+### Symptoms
+
+- Manager dashboards show old data more than 60 seconds behind recent coaching or grading changes.
+- Dashboard endpoints breach p95 targets.
+- `/_meta.cache_status` stays `miss` or `analytics_last_refresh_at` lags.
+
+### Immediate Checks
+
+1. Inspect analytics operations payload:
+   - `GET /manager/analytics/operations?manager_id={manager_id}`
+2. Confirm recent refresh activity:
+
+```sql
+select scope_type, scope_id, status, started_at, completed_at, error
+from analytics_refresh_runs
+order by started_at desc
+limit 20;
+```
+
+3. Confirm warehouse population:
+
+```sql
+select count(*) as fact_sessions
+from analytics_fact_sessions
+where manager_id = :manager_id;
+```
+
+4. Check management analytics load report artifact from CI for p50/p95 regressions.
+
+### Mitigation
+
+1. If refresh runs are failing, fix the underlying refresh error first and rerun `analytics.backfill`.
+2. If cache is disabled unexpectedly, verify `REDIS_URL` and `MANAGEMENT_ANALYTICS_CACHE_*` env vars.
+3. If dashboards are stale after a successful refresh, clear the in-memory process cache by recycling API pods.
+4. If p95 is high with healthy cache hit rates, inspect slow SQL on:
+   - `/manager/analytics`
+   - `/manager/command-center`
+   - `/manager/analytics/explorer`
+5. Re-run `python scripts/load_test_management_analytics.py ...` against staging before promoting fixes.

@@ -21,6 +21,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
       LOAD_RAMP: "50,100,200"
       LOAD_REPORT_PATH: "./load-reports/ws-ramp.json"
+      MANAGEMENT_REPORT_PATH: "./load-reports/management-analytics.json"
 
     steps:
       - name: Checkout
@@ -92,12 +93,32 @@ jobs:
             --trigger-barge-in \
             --report-json "$LOAD_REPORT_PATH"
 
+      - name: Run Management Analytics Load Gate
+        run: |
+          python scripts/load_test_management_analytics.py \
+            --api-base http://127.0.0.1:8000 \
+            --manager-id "$MANAGER_ID" \
+            --warmup 1 \
+            --iterations 5 \
+            --concurrency 4 \
+            --max-p50-ms 600 \
+            --max-p95-ms 1500 \
+            --report-json "$MANAGEMENT_REPORT_PATH"
+
       - name: Upload SLO Report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ws-slo-report
           path: backend/load-reports/ws-ramp.json
+          if-no-files-found: warn
+
+      - name: Upload Management Analytics Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: management-analytics-report
+          path: backend/load-reports/management-analytics.json
           if-no-files-found: warn
 
       - name: Upload API Logs
