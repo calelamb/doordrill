@@ -1,0 +1,103 @@
+name: Backend SLO Gate
+
+on:
+  push:
+    paths:
+      - backend/**
+      - .github/workflows/backend-slo-gate.yml
+  pull_request:
+    paths:
+      - backend/**
+      - .github/workflows/backend-slo-gate.yml
+
+jobs:
+  backend-slo-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      PYTHONUNBUFFERED: "1"
+      LOAD_RAMP: "50,100,200"
+      LOAD_REPORT_PATH: "./load-reports/ws-ramp.json"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Run Backend Tests
+        run: pytest
+
+      - name: Start API
+        run: |
+          nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 >/tmp/doordrill-api.log 2>&1 &
+          echo $! > /tmp/doordrill-api.pid
+
+      - name: Wait For API
+        run: |
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:8000/docs >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API failed to start"
+          cat /tmp/doordrill-api.log
+          exit 1
+
+      - name: Seed Load Test Data
+        run: |
+          echo "MANAGER_ID=$(python scripts/seed_load_data.py --field manager_id)" >> "$GITHUB_ENV"
+          echo "REP_ID=$(python scripts/seed_load_data.py --field rep_id)" >> "$GITHUB_ENV"
+          echo "SCENARIO_ID=$(python scripts/seed_load_data.py --field scenario_id)" >> "$GITHUB_ENV"
+
+      - name: Run Staged Load Gate
+        run: |
+          python scripts/load_test_ws.py \
+            --api-base http://127.0.0.1:8000 \
+            --ws-base ws://127.0.0.1:8000 \
+            --manager-id "$MANAGER_ID" \
+            --rep-id "$REP_ID" \
+            --scenario-id "$SCENARIO_ID" \
+            --ramp "$LOAD_RAMP" \
+            --slo-p50-ms 900 \
+            --slo-p95-ms 1400 \
+            --barge-slo-ms 150 \
+            --min-success-rate 0.99 \
+            --verify-replay \
+            --trigger-barge-in \
+            --report-json "$LOAD_REPORT_PATH"
+
+      - name: Upload SLO Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ws-slo-report
+          path: backend/load-reports/ws-ramp.json
+          if-no-files-found: warn
+
+      - name: Upload API Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-server-log
+          path: /tmp/doordrill-api.log
+          if-no-files-found: warn
+
+      - name: Stop API
+        if: always()
+        run: |
+          if [ -f /tmp/doordrill-api.pid ]; then
+            kill "$(cat /tmp/doordrill-api.pid)" || true
+          fi

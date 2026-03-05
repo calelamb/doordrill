@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import statistics
 import time
-from dataclasses import dataclass
-from pathlib import Path
 
 import httpx
 import websockets
@@ -18,8 +18,11 @@ import websockets
 class WorkerResult:
     session_id: str | None
     first_audio_ms: float | None
+    barge_ack_ms: float | None
+    barge_server_latency_ms: float | None
     turn_committed: bool
     replay_ok: bool
+    link_ok: bool
     ok: bool
     error: str | None = None
 
@@ -91,6 +94,9 @@ async def run_worker(
             )
 
         ws_url = f"{ws_base}/ws/sessions/{session_id}"
+        committed_rep_turn_id = None
+        committed_ai_turn_id = None
+
         async with websockets.connect(ws_url, max_size=2_000_000) as ws:
             await ws.recv()  # connected state
 
@@ -109,22 +115,41 @@ async def run_worker(
             )
 
             first_audio_ms: float | None = None
+            barge_ack_ms: float | None = None
+            barge_server_latency_ms: float | None = None
             turn_committed = False
             barge_in_sent = False
-            for _ in range(200):
+            barge_sent_at: float | None = None
+
+            for _ in range(250):
                 msg = json.loads(await ws.recv())
-                if msg.get("type") == "server.ai.audio.chunk" and first_audio_ms is None:
+                msg_type = msg.get("type")
+
+                if msg_type == "server.ai.audio.chunk" and first_audio_ms is None:
                     first_audio_ms = (time.perf_counter() - start) * 1000
+
                 if trigger_barge_in and first_audio_ms is not None and not barge_in_sent:
+                    barge_sent_at = time.perf_counter()
                     await ws.send(json.dumps({"type": "client.vad.state", "sequence": 2, "payload": {"speaking": True}}))
                     barge_in_sent = True
-                if msg.get("type") == "server.turn.committed":
+
+                if msg_type == "server.session.state" and barge_sent_at is not None and barge_ack_ms is None:
+                    payload = msg.get("payload") or {}
+                    if payload.get("state") == "barge_in_detected":
+                        barge_ack_ms = (time.perf_counter() - barge_sent_at) * 1000
+                        barge_server_latency_ms = float(payload.get("latency_ms") or 0)
+
+                if msg_type == "server.turn.committed":
+                    payload = msg.get("payload") or {}
+                    committed_rep_turn_id = payload.get("rep_turn_id")
+                    committed_ai_turn_id = payload.get("ai_turn_id")
                     turn_committed = True
                     break
 
             await ws.send(json.dumps({"type": "client.session.end", "sequence": 3, "payload": {}}))
 
         replay_ok = True
+        link_ok = True
         if verify_replay:
             async with httpx.AsyncClient(base_url=api_base, timeout=15.0) as client:
                 replay_resp = await client.get(
@@ -133,24 +158,46 @@ async def run_worker(
                 )
                 replay_resp.raise_for_status()
                 replay = replay_resp.json()
-                turn_count = int((replay.get("transport_metrics") or {}).get("turn_count") or 0)
-                replay_ok = turn_count > 0
 
-        ok = first_audio_ms is not None and turn_committed and replay_ok
+            turn_count = int((replay.get("transport_metrics") or {}).get("turn_count") or 0)
+            replay_ok = turn_count > 0
+
+            turn_ids = {turn.get("turn_id") for turn in replay.get("transcript_turns") or []}
+            link_ok = bool(committed_rep_turn_id and committed_ai_turn_id)
+            if link_ok:
+                link_ok = committed_rep_turn_id in turn_ids and committed_ai_turn_id in turn_ids
+
+            if trigger_barge_in:
+                interruptions = replay.get("interruption_timeline") or []
+                link_ok = link_ok and len(interruptions) > 0
+
+        ok = (
+            first_audio_ms is not None
+            and turn_committed
+            and replay_ok
+            and link_ok
+            and (not trigger_barge_in or barge_ack_ms is not None)
+        )
         return WorkerResult(
             session_id=session_id,
             first_audio_ms=first_audio_ms,
+            barge_ack_ms=barge_ack_ms,
+            barge_server_latency_ms=barge_server_latency_ms,
             turn_committed=turn_committed,
             replay_ok=replay_ok,
+            link_ok=link_ok,
             ok=ok,
-            error=None if ok else "missing_first_audio_or_commit_or_replay",
+            error=None if ok else "missing_latency_turn_replay_or_link_integrity",
         )
     except Exception as exc:  # pragma: no cover - load harness runtime
         return WorkerResult(
             session_id=None,
             first_audio_ms=None,
+            barge_ack_ms=None,
+            barge_server_latency_ms=None,
             turn_committed=False,
             replay_ok=False,
+            link_ok=False,
             ok=False,
             error=str(exc),
         )
@@ -190,23 +237,36 @@ async def run_stage(args: argparse.Namespace, concurrency: int) -> dict:
     errors = [r for r in results if not r.ok]
     committed = [r for r in results if r.turn_committed]
     replay_ok = [r for r in results if r.replay_ok]
+    linked = [r for r in results if r.link_ok]
 
     latencies = [r.first_audio_ms for r in ok_results if r.first_audio_ms is not None]
     latencies.sort()
-
     p50 = percentile(latencies, 0.50) if latencies else 0.0
     p95 = percentile(latencies, 0.95) if latencies else 0.0
     p99 = percentile(latencies, 0.99) if latencies else 0.0
     avg = statistics.mean(latencies) if latencies else 0.0
+
+    barge_ack = [r.barge_ack_ms for r in ok_results if r.barge_ack_ms is not None]
+    barge_ack.sort()
+    barge_server = [r.barge_server_latency_ms for r in ok_results if r.barge_server_latency_ms is not None]
+    barge_server.sort()
+    barge_p95 = percentile(barge_ack, 0.95) if barge_ack else 0.0
+    barge_server_p95 = percentile(barge_server, 0.95) if barge_server else 0.0
+
     success_rate = (len(ok_results) / len(results)) if results else 0.0
-    slo_pass = (
-        success_rate >= args.min_success_rate
-        and (not latencies or (p50 <= args.slo_p50_ms and p95 <= args.slo_p95_ms))
-    )
+    latency_slo_pass = (not latencies) or (p50 <= args.slo_p50_ms and p95 <= args.slo_p95_ms)
+    barge_slo_pass = True
+    if args.trigger_barge_in:
+        barge_slo_pass = bool(barge_ack) and barge_p95 <= args.barge_slo_ms
+
+    slo_pass = success_rate >= args.min_success_rate and latency_slo_pass and barge_slo_pass
 
     print(f"workers={concurrency}")
     print(f"success={len(ok_results)} errors={len(errors)}")
-    print(f"turn_committed={len(committed)} replay_verified={len(replay_ok)}")
+    print(
+        "turn_committed="
+        f"{len(committed)} replay_verified={len(replay_ok)} turn_linked={len(linked)}"
+    )
 
     if latencies:
         print(f"first_audio_ms_avg={avg:.1f}")
@@ -216,6 +276,9 @@ async def run_stage(args: argparse.Namespace, concurrency: int) -> dict:
         print(f"first_audio_ms_max={max(latencies):.1f}")
 
     print(f"slo_target_p50_ms={args.slo_p50_ms:.1f} slo_target_p95_ms={args.slo_p95_ms:.1f}")
+    if args.trigger_barge_in:
+        print(f"barge_ack_p95_ms={barge_p95:.1f} target={args.barge_slo_ms:.1f}")
+        print(f"barge_server_latency_p95_ms={barge_server_p95:.1f}")
     print(f"success_rate={success_rate:.3f} slo_pass={slo_pass}")
 
     if errors:
@@ -230,12 +293,16 @@ async def run_stage(args: argparse.Namespace, concurrency: int) -> dict:
         "error_count": len(errors),
         "turn_committed_count": len(committed),
         "replay_verified_count": len(replay_ok),
+        "turn_link_integrity_count": len(linked),
         "success_rate": round(success_rate, 4),
         "first_audio_ms_avg": round(avg, 2),
         "first_audio_ms_p50": round(p50, 2),
         "first_audio_ms_p95": round(p95, 2),
         "first_audio_ms_p99": round(p99, 2),
         "first_audio_ms_max": round(max(latencies), 2) if latencies else 0.0,
+        "barge_ack_ms_p95": round(barge_p95, 2),
+        "barge_server_latency_ms_p95": round(barge_server_p95, 2),
+        "barge_slo_ms": args.barge_slo_ms,
         "slo_target_p50_ms": args.slo_p50_ms,
         "slo_target_p95_ms": args.slo_p95_ms,
         "slo_pass": slo_pass,
@@ -254,6 +321,7 @@ async def run_load(args: argparse.Namespace) -> int:
         "slo": {
             "p50_ms": args.slo_p50_ms,
             "p95_ms": args.slo_p95_ms,
+            "barge_p95_ms": args.barge_slo_ms,
             "min_success_rate": args.min_success_rate,
         },
         "stages": [],
@@ -291,6 +359,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ramp-wait-ms", type=int, default=750, help="Delay between ramp stages in ms")
     parser.add_argument("--slo-p50-ms", type=float, default=900.0, help="First-audio p50 SLO budget in ms")
     parser.add_argument("--slo-p95-ms", type=float, default=1400.0, help="First-audio p95 SLO budget in ms")
+    parser.add_argument("--barge-slo-ms", type=float, default=150.0, help="Barge-in cancel p95 latency budget in ms")
     parser.add_argument("--min-success-rate", type=float, default=0.99, help="Minimum acceptable success rate per stage")
     parser.add_argument("--verify-replay", action="store_true", help="Verify replay turn capture after each worker run")
     parser.add_argument("--trigger-barge-in", action="store_true", help="Send a VAD barge-in during AI audio")
