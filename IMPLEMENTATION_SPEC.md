@@ -23,6 +23,8 @@ The backend foundation is implemented under:
 - `backend/`
 The manager dashboard scaffold is implemented under:
 - `dashboard/`
+The mobile app foundation is implemented under:
+- `mobile/`
 
 Top-level docs:
 - `README.md`
@@ -122,7 +124,8 @@ Supporting tables:
 `GET /manager/sessions/{id}/replay` currently returns:
 - full transcript turns
 - objection timeline
-- audio artifact metadata + signed URL placeholder
+- interruption timeline
+- audio artifact metadata + signed URL
 - scorecard details + evidence turn references
 
 `PATCH /manager/scorecards/{id}` supports:
@@ -186,6 +189,15 @@ Supporting tables:
   - `dashboard/src/components/RepPanel.tsx`
   - `dashboard/src/components/ReplayPanel.tsx`
   - `dashboard/src/lib/api.ts`
+- Mobile:
+  - `mobile/App.tsx`
+  - `mobile/src/navigation/AppNavigator.tsx`
+  - `mobile/src/screens/LoginScreen.tsx`
+  - `mobile/src/screens/AssignmentsScreen.tsx`
+  - `mobile/src/screens/SessionScreen.tsx`
+  - `mobile/src/screens/ScoreScreen.tsx`
+  - `mobile/src/services/api.ts`
+  - `mobile/src/services/websocket.ts`
 
 ## How to Run
 
@@ -247,9 +259,9 @@ Stubbed integrations:
    - next: test event loss guarantees and reconnect behavior under network churn
 
 6. Frontend integration
-   - manager UI: feed, replay, override, analytics, action timeline implemented in scaffold
-   - rep UI: assignments + session start + score fetch + live WS drill console implemented
-   - next: microphone capture/streaming UX + auth/session hardening
+   - mobile-first rep UI (iOS/Android): login, assignments, session start, live WS drill, score fetch implemented
+   - manager web UI: feed, replay, override, analytics, action timeline implemented in scaffold
+   - next: microphone capture/streaming UX + auth/session hardening on mobile
 
 ## Non-Negotiable Product Requirements
 

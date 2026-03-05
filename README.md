@@ -85,3 +85,15 @@ A manager web scaffold has been implemented in [`dashboard/`](./dashboard):
 - Analytics + rep progress panel (`/manager/analytics`, `/manager/reps/{id}/progress`)
 - Manager action timeline (`/manager/actions`)
 - Rep mode live drill console (session WS connect, turn send, live event stream, score refresh)
+
+## Mobile Progress (iOS + Android)
+
+A mobile-first Expo React Native app has been added in [`mobile/`](./mobile):
+
+- Rep login bootstrap
+- Assignment list + start session
+- Live drill session screen using websocket contract (`WS /ws/sessions/{id}`)
+- Scorecard feedback screen
+- Service layer for REST + websocket backend integration
+
+This is the active client direction for v1 delivery.
