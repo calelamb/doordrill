@@ -3,10 +3,12 @@ import { useEffect, useState } from "react";
 import { FeedList } from "./components/FeedList";
 import { PerformancePanel } from "./components/PerformancePanel";
 import { ReplayPanel } from "./components/ReplayPanel";
+import { RepPanel } from "./components/RepPanel";
 import { fetchManagerActions, fetchManagerAnalytics, fetchManagerFeed, fetchReplay, fetchRepProgress } from "./lib/api";
 import type { FeedItem, ManagerActionLog, ManagerAnalytics, ReplayResponse, RepProgress } from "./lib/types";
 
 export function App() {
+  const [mode, setMode] = useState<"manager" | "rep">("manager");
   const [managerId, setManagerId] = useState("");
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -64,14 +66,35 @@ export function App() {
   }
 
   useEffect(() => {
-    if (activeSessionId) {
+    if (mode === "manager" && activeSessionId) {
       void refreshReplay(activeSessionId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId]);
+  }, [activeSessionId, mode]);
+
+  if (mode === "rep") {
+    return (
+      <>
+        <div className="mode-switch">
+          <button onClick={() => setMode("manager")} className="ghost-btn">
+            Manager Mode
+          </button>
+          <button className="active-btn">Rep Mode</button>
+        </div>
+        <RepPanel />
+      </>
+    );
+  }
 
   return (
     <main className="app-shell">
+      <div className="mode-switch">
+        <button className="active-btn">Manager Mode</button>
+        <button onClick={() => setMode("rep")} className="ghost-btn">
+          Rep Mode
+        </button>
+      </div>
+
       <header className="topbar">
         <h1>DoorDrill Manager Console</h1>
         <div className="toolbar">

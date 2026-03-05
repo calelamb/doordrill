@@ -8,6 +8,7 @@ Vite + React manager console scaffold for:
 - manager analytics
 - rep progress snapshot
 - manager action timeline
+- rep mode (assignment list + session start + score fetch)
 
 ## Run
 

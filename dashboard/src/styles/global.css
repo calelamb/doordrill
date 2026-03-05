@@ -25,6 +25,24 @@ body {
   padding: 24px;
 }
 
+.mode-switch {
+  max-width: 1280px;
+  margin: 12px auto 0;
+  padding: 0 24px;
+  display: flex;
+  gap: 8px;
+}
+
+.active-btn {
+  background: var(--accent);
+  color: #fff;
+}
+
+.ghost-btn {
+  background: transparent;
+  color: var(--ink);
+}
+
 .topbar {
   display: flex;
   gap: 16px;
@@ -237,6 +255,7 @@ button:disabled {
 .mini-list li {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   border-bottom: 1px solid var(--line);
   padding: 6px 0;
 }

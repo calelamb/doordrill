@@ -1,10 +1,16 @@
-import type { FeedItem, ManagerActionLog, ManagerAnalytics, ReplayResponse, RepProgress } from "./types";
+import type { FeedItem, ManagerActionLog, ManagerAnalytics, ReplayResponse, RepAssignment, RepProgress, RepSessionDetail } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 const managerHeaders = (managerId: string) => ({
   "x-user-id": managerId,
   "x-user-role": "manager",
+  "content-type": "application/json"
+});
+
+const repHeaders = (repId: string) => ({
+  "x-user-id": repId,
+  "x-user-role": "rep",
   "content-type": "application/json"
 });
 
@@ -94,4 +100,44 @@ export async function fetchManagerActions(managerId: string, limit = 25): Promis
   }
   const body = await response.json();
   return body.items ?? [];
+}
+
+export async function fetchRepAssignments(repId: string): Promise<RepAssignment[]> {
+  const response = await fetch(`${API_BASE}/rep/assignments?rep_id=${encodeURIComponent(repId)}`, {
+    headers: repHeaders(repId)
+  });
+  if (!response.ok) {
+    throw new Error(`rep assignments request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function createRepSession(
+  repId: string,
+  assignmentId: string,
+  scenarioId: string
+): Promise<{ id: string }> {
+  const response = await fetch(`${API_BASE}/rep/sessions`, {
+    method: "POST",
+    headers: repHeaders(repId),
+    body: JSON.stringify({
+      assignment_id: assignmentId,
+      rep_id: repId,
+      scenario_id: scenarioId
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`create rep session request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchRepSession(repId: string, sessionId: string): Promise<RepSessionDetail> {
+  const response = await fetch(`${API_BASE}/rep/sessions/${encodeURIComponent(sessionId)}`, {
+    headers: repHeaders(repId)
+  });
+  if (!response.ok) {
+    throw new Error(`rep session request failed: ${response.status}`);
+  }
+  return response.json();
 }
