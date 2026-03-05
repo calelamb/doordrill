@@ -1,27 +1,23 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { Audio } from "expo-av";
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Animated, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
+import { Activity, Home, Mic, MicOff, Volume2, WifiOff } from "lucide-react-native";
 
 import { RootStackParamList } from "../navigation/types";
-import { fetchRepSession } from "../services/api";
 import { AudioCaptureService } from "../services/audio";
 import { SessionWsClient } from "../services/websocket";
-import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
 import { WsInboundEvent } from "../types";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Session">;
-type TimelineEvent = {
-  id: number;
-  type: string;
-  at: string;
-  note: string;
-};
 
-const MAX_EVENTS = 120;
+const RECONNECT_DELAYS_MS = [500, 1000, 2000];
+const HOLD_END_MS = 500;
+const NUDGE_DELAY_MS = 4000;
 const INTERRUPT_BANNER_MS = 2200;
+const WAVE_BAR_COUNT = 12;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -29,13 +25,8 @@ function clamp(value: number, min: number, max: number): number {
 
 function meterToPercent(db: number): number {
   const floor = -70;
-  const ceiling = -10;
+  const ceiling = -8;
   return clamp((db - floor) / (ceiling - floor), 0, 1);
-}
-
-function payloadPreview(payload: Record<string, unknown>): string {
-  const preview = JSON.stringify(payload);
-  return preview.length > 120 ? `${preview.slice(0, 120)}...` : preview;
 }
 
 function extForCodec(codec: string): string {
@@ -48,45 +39,103 @@ function extForCodec(codec: string): string {
   return "m4a";
 }
 
+function formatTimer(seconds: number): string {
+  const minutes = Math.floor(seconds / 60)
+    .toString()
+    .padStart(2, "0");
+  const remainder = (seconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${remainder}`;
+}
+
+async function configurePlaybackAudioMode(): Promise<void> {
+  await Audio.setAudioModeAsync({
+    allowsRecordingIOS: false,
+    interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+    playsInSilentModeIOS: true,
+    staysActiveInBackground: false,
+    shouldDuckAndroid: true,
+    interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+    playThroughEarpieceAndroid: false,
+  });
+}
+
 export function SessionScreen({ route, navigation }: Props) {
-  const { repId } = useSession();
+  const { sessionId } = route.params;
+
   const wsClientRef = useRef<SessionWsClient | null>(null);
   const audioCaptureRef = useRef<AudioCaptureService | null>(null);
-  const eventIdRef = useRef(1);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const waitingNudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const interruptionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
+  const currentSoundRef = useRef<Audio.Sound | null>(null);
   const audioQueueRef = useRef<Array<{ payload: string; codec: string }>>([]);
-  const audioDrainRef = useRef(false);
+  const drainingAudioRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const recordingRef = useRef(false);
+  const ignoreNextCloseRef = useRef(false);
+  const manualCloseRef = useRef(false);
+  const speechDetectedRef = useRef(false);
+  const endHoldProgress = useRef(new Animated.Value(0)).current;
 
   const [connected, setConnected] = useState(false);
-  const [stateLabel, setStateLabel] = useState("idle");
-  const [hintText, setHintText] = useState("");
-  const [lastTranscript, setLastTranscript] = useState("--");
-  const [aiStream, setAiStream] = useState("--");
-  const [events, setEvents] = useState<TimelineEvent[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [repSpeaking, setRepSpeaking] = useState(false);
-  const [meterDb, setMeterDb] = useState(-70);
   const [aiSpeaking, setAiSpeaking] = useState(false);
   const [playingAudio, setPlayingAudio] = useState(false);
+  const [meterDb, setMeterDb] = useState(-70);
+  const [sessionSeconds, setSessionSeconds] = useState(0);
+  const [statusLabel, setStatusLabel] = useState("Connecting...");
+  const [error, setError] = useState<string | null>(null);
+  const [liveTranscript, setLiveTranscript] = useState("Press and hold the mic to start.");
+  const [homeownerPreview, setHomeownerPreview] = useState("");
   const [interruptionCue, setInterruptionCue] = useState<string | null>(null);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [showSavePartial, setShowSavePartial] = useState(false);
+  const [showWaitingNudge, setShowWaitingNudge] = useState(false);
+  const [endingSession, setEndingSession] = useState(false);
 
-  const sessionId = route.params.sessionId;
-  const meterWidth = useMemo(() => meterToPercent(meterDb), [meterDb]);
+  const meterPercent = useMemo(() => meterToPercent(meterDb), [meterDb]);
+  const waveHeights = useMemo(
+    () =>
+      Array.from({ length: WAVE_BAR_COUNT }, (_, index) => {
+        const centerOffset = Math.abs(index - (WAVE_BAR_COUNT - 1) / 2);
+        const falloff = 1 - centerOffset / ((WAVE_BAR_COUNT - 1) / 2 + 0.5);
+        const activeHeight = 16 + meterPercent * 96 * Math.max(0.18, falloff);
+        return repSpeaking || recording ? activeHeight : 10 + (index % 3) * 3;
+      }),
+    [meterPercent, recording, repSpeaking]
+  );
 
-  function addEvent(event: WsInboundEvent) {
-    setEvents((items) =>
-      [
-        {
-          id: eventIdRef.current++,
-          type: event.type,
-          at: new Date().toISOString(),
-          note: payloadPreview(event.payload)
-        },
-        ...items
-      ].slice(0, MAX_EVENTS)
-    );
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setSessionSeconds((current) => current + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  function clearReconnectTimer() {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }
+
+  function clearWaitingNudgeTimer() {
+    if (waitingNudgeTimerRef.current) {
+      clearTimeout(waitingNudgeTimerRef.current);
+      waitingNudgeTimerRef.current = null;
+    }
+    setShowWaitingNudge(false);
+  }
+
+  function scheduleWaitingNudge() {
+    clearWaitingNudgeTimer();
+    if (!connected || recordingRef.current || repSpeaking || aiSpeaking || playingAudio || showSavePartial || endingSession) {
+      return;
+    }
+    waitingNudgeTimerRef.current = setTimeout(() => {
+      setShowWaitingNudge(true);
+    }, NUDGE_DELAY_MS);
   }
 
   function showInterruptCue(label: string) {
@@ -100,21 +149,52 @@ export function SessionScreen({ route, navigation }: Props) {
     }, INTERRUPT_BANNER_MS);
   }
 
-  async function playAudioChunk(payload: string, codec: string): Promise<void> {
-    const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
-    if (!baseDir) {
+  async function stopCurrentSound() {
+    const currentSound = currentSoundRef.current;
+    currentSoundRef.current = null;
+    if (!currentSound) {
       return;
     }
+    try {
+      await currentSound.stopAsync();
+    } catch {
+      // Ignore stop failures for best-effort barge-in behavior.
+    }
+    try {
+      await currentSound.unloadAsync();
+    } catch {
+      // Ignore unload failures.
+    }
+  }
+
+  async function cancelAudioPlayback() {
+    audioQueueRef.current = [];
+    await stopCurrentSound();
+    drainingAudioRef.current = false;
+    setPlayingAudio(false);
+  }
+
+  async function playAudioChunk(payload: string, codec: string): Promise<void> {
+    const baseDir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+    if (!baseDir || !payload) {
+      return;
+    }
+
     const extension = extForCodec(codec);
     const filePath = `${baseDir}doordrill-ai-${Date.now()}-${Math.random().toString(16).slice(2)}.${extension}`;
 
     try {
+      await configurePlaybackAudioMode();
       await FileSystem.writeAsStringAsync(filePath, payload, {
-        encoding: FileSystem.EncodingType.Base64
+        encoding: FileSystem.EncodingType.Base64,
       });
 
-      const sound = new Audio.Sound();
-      await sound.loadAsync({ uri: filePath }, { shouldPlay: true, volume: 1.0 });
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: filePath },
+        { shouldPlay: true, volume: 1.0 }
+      );
+      currentSoundRef.current = sound;
+
       await new Promise<void>((resolve) => {
         sound.setOnPlaybackStatusUpdate((status) => {
           if (!status.isLoaded || status.didJustFinish) {
@@ -122,31 +202,31 @@ export function SessionScreen({ route, navigation }: Props) {
           }
         });
       });
-      await sound.unloadAsync();
     } catch {
-      // Best-effort playback to keep turn loop moving even if chunk decode fails.
+      // Best-effort playback only.
     } finally {
+      await stopCurrentSound();
       await FileSystem.deleteAsync(filePath, { idempotent: true }).catch(() => undefined);
     }
   }
 
   async function drainAudioQueue() {
-    if (audioDrainRef.current) {
+    if (drainingAudioRef.current) {
       return;
     }
 
-    audioDrainRef.current = true;
+    drainingAudioRef.current = true;
     setPlayingAudio(true);
 
     while (audioQueueRef.current.length > 0) {
-      const next = audioQueueRef.current.shift();
-      if (!next) {
+      const nextChunk = audioQueueRef.current.shift();
+      if (!nextChunk) {
         continue;
       }
-      await playAudioChunk(next.payload, next.codec);
+      await playAudioChunk(nextChunk.payload, nextChunk.codec);
     }
 
-    audioDrainRef.current = false;
+    drainingAudioRef.current = false;
     setPlayingAudio(false);
   }
 
@@ -158,43 +238,122 @@ export function SessionScreen({ route, navigation }: Props) {
     void drainAudioQueue();
   }
 
-  function handleInboundEvent(event: WsInboundEvent) {
-    addEvent(event);
+  function scheduleReconnect(message: string) {
+    if (manualCloseRef.current || reconnectTimerRef.current || showSavePartial || endingSession) {
+      return;
+    }
 
+    const nextAttempt = reconnectAttemptRef.current + 1;
+    if (nextAttempt > RECONNECT_DELAYS_MS.length) {
+      setConnected(false);
+      setStatusLabel("Connection lost");
+      setError("Connection lost. Save your partial session and finish later.");
+      setShowSavePartial(true);
+      clearWaitingNudgeTimer();
+      return;
+    }
+
+    reconnectAttemptRef.current = nextAttempt;
+    setReconnectAttempt(nextAttempt);
+    setConnected(false);
+    setStatusLabel(`Reconnecting (${nextAttempt}/3)...`);
+    setError(message);
+    clearWaitingNudgeTimer();
+    void cancelAudioPlayback();
+
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      void connectSocket();
+    }, RECONNECT_DELAYS_MS[nextAttempt - 1]);
+  }
+
+  function handleSocketClosed() {
+    if (ignoreNextCloseRef.current) {
+      ignoreNextCloseRef.current = false;
+      return;
+    }
+    if (manualCloseRef.current) {
+      return;
+    }
+    scheduleReconnect("Connection dropped. Attempting to reconnect...");
+  }
+
+  function handleInboundEvent(event: WsInboundEvent) {
     if (event.type === "server.session.state") {
-      const nextState = String(event.payload.state ?? "running");
-      setStateLabel(nextState);
+      const nextState = String(event.payload.state ?? "");
+
+      if (nextState === "connected") {
+        setConnected(true);
+        setStatusLabel("Listening...");
+        setError(null);
+        setShowSavePartial(false);
+        reconnectAttemptRef.current = 0;
+        setReconnectAttempt(0);
+        scheduleWaitingNudge();
+        return;
+      }
 
       if (nextState === "ai_speaking") {
         setAiSpeaking(true);
-        setAiStream("");
+        setStatusLabel("AI is responding...");
+        setHomeownerPreview("");
+        clearWaitingNudgeTimer();
+        return;
       }
+
       if (nextState === "ai_idle") {
         setAiSpeaking(false);
+        setStatusLabel("Listening...");
+        scheduleWaitingNudge();
+        return;
       }
+
+      if (nextState === "rep_speaking") {
+        setStatusLabel("Listening...");
+        clearWaitingNudgeTimer();
+        return;
+      }
+
+      if (nextState === "rep_idle") {
+        setStatusLabel("Listening...");
+        scheduleWaitingNudge();
+        return;
+      }
+
       if (nextState === "barge_in_detected") {
-        const reason = String(event.payload.reason ?? "interruption");
-        showInterruptCue(`You interrupted AI (${reason})`);
+        showInterruptCue("You interrupted the homeowner");
+        void cancelAudioPlayback();
+        return;
       }
     }
 
-    if (event.type === "server.stt.final") {
-      const next = String(event.payload.text ?? "").trim();
-      if (next) {
-        setLastTranscript(next);
+    if (event.type === "server.stt.partial") {
+      const partialText = String(event.payload.text ?? "").trim();
+      if (partialText) {
+        setLiveTranscript(partialText);
       }
+      return;
+    }
+
+    if (event.type === "server.stt.final") {
+      const finalText = String(event.payload.text ?? "").trim();
+      if (finalText) {
+        setLiveTranscript(finalText);
+      }
+      return;
     }
 
     if (event.type === "server.ai.text.delta") {
       const token = String(event.payload.token ?? "");
-      if (!token) {
-        return;
+      if (token) {
+        setHomeownerPreview((current) => `${current}${token}`.trimStart());
       }
-      setAiStream((current) => (current === "--" ? token : `${current}${token}`));
+      return;
     }
 
     if (event.type === "server.ai.audio.chunk") {
       enqueueAudio(String(event.payload.payload ?? ""), String(event.payload.codec ?? "mp3"));
+      return;
     }
 
     if (event.type === "server.error") {
@@ -202,14 +361,19 @@ export function SessionScreen({ route, navigation }: Props) {
     }
   }
 
-  async function connect() {
+  async function connectSocket() {
+    if (manualCloseRef.current) {
+      return;
+    }
+
+    clearReconnectTimer();
     if (wsClientRef.current) {
+      ignoreNextCloseRef.current = true;
       wsClientRef.current.close();
     }
 
     const client = new SessionWsClient(sessionId);
     wsClientRef.current = client;
-    setError(null);
 
     try {
       await client.connect(
@@ -217,207 +381,287 @@ export function SessionScreen({ route, navigation }: Props) {
           handleInboundEvent(event);
         },
         () => {
-          setConnected(false);
-          setStateLabel("disconnected");
+          handleSocketClosed();
         }
       );
       setConnected(true);
-      setStateLabel("connected");
+      setError(null);
+      setStatusLabel(aiSpeaking || playingAudio ? "AI is responding..." : "Listening...");
+      setShowSavePartial(false);
+      reconnectAttemptRef.current = 0;
+      setReconnectAttempt(0);
+      scheduleWaitingNudge();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to connect");
-      setConnected(false);
-      setStateLabel("error");
+      scheduleReconnect(err instanceof Error ? err.message : "Failed to reconnect");
     }
   }
 
   async function startRecording() {
-    if (!connected || recording) {
+    if (endingSession || showSavePartial) {
       return;
     }
-    const client = wsClientRef.current;
-    const audioCapture = audioCaptureRef.current;
-    if (!client || !audioCapture) {
+    if (!connected) {
+      setError("Connection unavailable. Reconnecting now...");
+      scheduleReconnect("Connection unavailable. Reconnecting now...");
       return;
     }
 
+    const audioCapture = audioCaptureRef.current;
+    if (!audioCapture || recordingRef.current) {
+      return;
+    }
+
+    speechDetectedRef.current = false;
     setError(null);
-    if (aiSpeaking) {
-      showInterruptCue("You interrupted AI");
+    clearWaitingNudgeTimer();
+    if (aiSpeaking || playingAudio) {
+      showInterruptCue("You interrupted the homeowner");
+      await cancelAudioPlayback();
     }
 
     try {
-      client.sendVadState(true);
       await audioCapture.start();
+      recordingRef.current = true;
       setRecording(true);
+      setStatusLabel("Listening...");
     } catch (err) {
-      client.sendVadState(false);
-      setRecording(false);
       setError(err instanceof Error ? err.message : "Failed to start microphone capture");
+      recordingRef.current = false;
+      setRecording(false);
     }
   }
 
   async function stopRecordingAndSend() {
-    if (!recording) {
+    if (!recordingRef.current) {
       return;
     }
 
     const client = wsClientRef.current;
     const audioCapture = audioCaptureRef.current;
-    if (!client || !audioCapture) {
-      setRecording(false);
+    recordingRef.current = false;
+    setRecording(false);
+
+    if (!audioCapture) {
       return;
     }
 
     try {
       const chunk = await audioCapture.stop();
-      client.sendVadState(false);
-      if (chunk) {
-        client.sendAudioChunk(chunk, hintText);
+      if (chunk && speechDetectedRef.current && client?.isConnected()) {
+        client.sendAudioChunk(chunk);
+        setStatusLabel("AI is responding...");
+      } else if (!speechDetectedRef.current) {
+        setError("No speech detected. Hold the mic and speak clearly.");
+        scheduleWaitingNudge();
       }
     } catch (err) {
-      client.sendVadState(false);
       setError(err instanceof Error ? err.message : "Failed to send captured audio");
-    } finally {
-      setRecording(false);
     }
   }
 
-  async function endSession() {
-    try {
-      if (recording) {
-        await stopRecordingAndSend();
-      }
-
-      const client = wsClientRef.current;
-      if (client) {
-        client.endSession();
-        client.close();
-        wsClientRef.current = null;
-      }
-
-      setConnected(false);
-      setStateLabel("ending");
-
-      if (repId) {
-        const detail = await fetchRepSession(repId, sessionId);
-        navigation.replace("Score", { sessionId: detail.session.id });
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to end session");
+  async function completeSessionFlow() {
+    setEndingSession(true);
+    manualCloseRef.current = true;
+    clearReconnectTimer();
+    clearWaitingNudgeTimer();
+    if (recordingRef.current) {
+      await stopRecordingAndSend();
     }
+    try {
+      wsClientRef.current?.endSession();
+    } catch {
+      // Ignore send failures during shutdown.
+    }
+    ignoreNextCloseRef.current = true;
+    wsClientRef.current?.close();
+    wsClientRef.current = null;
+    await cancelAudioPlayback();
+    navigation.replace("Score", { sessionId });
+  }
+
+  async function savePartialSession() {
+    setEndingSession(true);
+    manualCloseRef.current = true;
+    clearReconnectTimer();
+    clearWaitingNudgeTimer();
+    ignoreNextCloseRef.current = true;
+    wsClientRef.current?.close();
+    wsClientRef.current = null;
+    await cancelAudioPlayback();
+    navigation.replace("Score", { sessionId });
   }
 
   useEffect(() => {
     const audioCapture = new AudioCaptureService();
-    audioCapture.onVadChange((speaking) => setRepSpeaking(speaking));
     audioCapture.onMeter((db) => setMeterDb(db));
+    audioCapture.onVadChange((speaking) => {
+      setRepSpeaking(speaking);
+      if (!recordingRef.current) {
+        return;
+      }
+      if (speaking) {
+        speechDetectedRef.current = true;
+        setShowWaitingNudge(false);
+      }
+      wsClientRef.current?.sendVadState(speaking);
+    });
     audioCaptureRef.current = audioCapture;
 
-    void connect();
+    void configurePlaybackAudioMode();
+    void connectSocket();
 
     return () => {
+      manualCloseRef.current = true;
+      clearReconnectTimer();
+      clearWaitingNudgeTimer();
       if (interruptionTimerRef.current) {
         clearTimeout(interruptionTimerRef.current);
       }
+      ignoreNextCloseRef.current = true;
       wsClientRef.current?.close();
       wsClientRef.current = null;
+      void cancelAudioPlayback();
       void audioCaptureRef.current?.stop().catch(() => undefined);
       audioCaptureRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  const statusTone = !connected || reconnectAttempt > 0 ? styles.statusWarn : aiSpeaking || playingAudio ? styles.statusHot : styles.statusCool;
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
-        <View style={styles.headerRow}>
+        <View style={styles.topBar}>
           <View>
-            <Text style={styles.title}>Live Roleplay</Text>
-            <Text style={styles.subtitle}>Session {sessionId.slice(0, 8)}</Text>
+            <Text style={styles.topLabel}>Live Drill</Text>
+            <Text style={[styles.statusLabel, statusTone]}>{statusLabel}</Text>
           </View>
-          <Pressable style={styles.reconnect} onPress={() => void connect()}>
-            <Text style={styles.reconnectLabel}>Reconnect</Text>
-          </Pressable>
+          <Text style={styles.timer}>{formatTimer(sessionSeconds)}</Text>
         </View>
 
-        <View style={styles.statusRow}>
-          <View style={[styles.statusChip, connected ? styles.statusConnected : styles.statusDisconnected]}>
-            <Text style={styles.statusChipLabel}>{connected ? "Connected" : "Offline"}</Text>
+        <View style={styles.centerStage}>
+          {interruptionCue ? (
+            <View style={styles.interruptionBanner}>
+              <Text style={styles.interruptionText}>{interruptionCue}</Text>
+            </View>
+          ) : null}
+
+          <View style={styles.orbShell}>
+            <View style={[styles.orbRing, aiSpeaking || playingAudio ? styles.orbRingActive : null]} />
+            <View style={[styles.orb, aiSpeaking || playingAudio ? styles.orbHot : repSpeaking || recording ? styles.orbCool : null]}>
+              {reconnectAttempt > 0 ? (
+                <WifiOff color={colors.ink} size={28} />
+              ) : repSpeaking || recording ? (
+                <Mic color="#fff" size={30} />
+              ) : aiSpeaking || playingAudio ? (
+                <Activity color="#fff" size={30} />
+              ) : (
+                <Home color={colors.ink} size={30} />
+              )}
+            </View>
           </View>
-          <View style={[styles.statusChip, aiSpeaking ? styles.statusAiSpeaking : styles.statusIdle]}>
-            <Text style={styles.statusChipLabel}>State {stateLabel}</Text>
+
+          <View style={styles.waveformRow}>
+            {waveHeights.map((height, index) => (
+              <View key={index} style={[styles.waveBar, { height }]} />
+            ))}
           </View>
-          <View style={[styles.statusChip, repSpeaking ? styles.statusRepSpeaking : styles.statusIdle]}>
-            <Text style={styles.statusChipLabel}>{repSpeaking ? "Rep speaking" : "Rep idle"}</Text>
-          </View>
+
+          <Text style={styles.waveformHint}>Mic level reacts only when you speak.</Text>
         </View>
 
-        {error ? <Text style={styles.error}>{error}</Text> : null}
-        {interruptionCue ? <Text style={styles.interrupt}>{interruptionCue}</Text> : null}
-
-        <View style={styles.meterCard}>
-          <View style={styles.meterHeader}>
-            <Text style={styles.meterTitle}>Microphone level</Text>
-            <Text style={styles.meterDb}>{meterDb.toFixed(0)} dB</Text>
-          </View>
-          <View style={styles.meterTrack}>
-            <View style={[styles.meterFill, { width: `${Math.round(meterWidth * 100)}%` }]} />
-          </View>
+        <View style={styles.captionCard}>
+          <Text style={styles.captionLabel}>Live Transcript</Text>
+          <Text style={styles.captionText} numberOfLines={3}>
+            {liveTranscript}
+          </Text>
+          {homeownerPreview ? (
+            <View style={styles.homeownerPreview}>
+              <Volume2 color={colors.accent} size={14} />
+              <Text style={styles.homeownerPreviewText} numberOfLines={2}>
+                {homeownerPreview}
+              </Text>
+            </View>
+          ) : null}
+          {showWaitingNudge ? <Text style={styles.waitingNudge}>The homeowner is waiting...</Text> : null}
+          {error ? <Text style={styles.errorText}>{error}</Text> : null}
         </View>
 
-        <View style={styles.inputCard}>
-          <Text style={styles.inputLabel}>Optional hint</Text>
-          <TextInput
-            style={styles.input}
-            value={hintText}
-            onChangeText={setHintText}
-            placeholder="Optional transcript cue for STT fallback"
-            placeholderTextColor={colors.muted}
-          />
-        </View>
+        {showSavePartial ? (
+          <View style={styles.savePartialCard}>
+            <Text style={styles.savePartialTitle}>Connection not recovered</Text>
+            <Text style={styles.savePartialBody}>We tried three reconnect attempts. Save the partial session and review what was captured.</Text>
+            <View style={styles.savePartialActions}>
+              <Pressable
+                style={styles.retryNowButton}
+                onPress={() => {
+                  setShowSavePartial(false);
+                  reconnectAttemptRef.current = 0;
+                  setReconnectAttempt(0);
+                  setError(null);
+                  void connectSocket();
+                }}
+              >
+                <Text style={styles.retryNowLabel}>Retry now</Text>
+              </Pressable>
+              <Pressable style={styles.savePartialButton} onPress={() => void savePartialSession()}>
+                <Text style={styles.savePartialLabel}>Save partial session</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
 
-        <View style={styles.actionRow}>
+        <View style={styles.bottomBar}>
           <Pressable
-            style={[styles.talkButton, (!connected || recording) && styles.disabled]}
-            disabled={!connected}
+            disabled={!connected || endingSession || showSavePartial}
             onPressIn={() => {
               void startRecording();
             }}
             onPressOut={() => {
               void stopRecordingAndSend();
             }}
+            style={[styles.micButton, (!connected || endingSession || showSavePartial) && styles.micButtonDisabled, recording && styles.micButtonActive]}
           >
-            <Text style={styles.talkButtonLabel}>{recording ? "Release to send" : "Hold to talk"}</Text>
+            {connected ? <Mic color="#fff" size={32} /> : <MicOff color={colors.muted} size={32} />}
           </Pressable>
 
-          <Pressable style={styles.endBtn} onPress={() => void endSession()}>
-            <Text style={styles.endLabel}>End</Text>
+          <Pressable
+            disabled={endingSession}
+            delayLongPress={HOLD_END_MS}
+            onLongPress={() => {
+              void completeSessionFlow();
+            }}
+            onPressIn={() => {
+              Animated.timing(endHoldProgress, {
+                toValue: 1,
+                duration: HOLD_END_MS,
+                useNativeDriver: false,
+              }).start();
+            }}
+            onPressOut={() => {
+              Animated.timing(endHoldProgress, {
+                toValue: 0,
+                duration: 120,
+                useNativeDriver: false,
+              }).start();
+            }}
+            style={styles.endButton}
+          >
+            <Animated.View
+              style={[
+                styles.endButtonFill,
+                {
+                  width: endHoldProgress.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: ["0%", "100%"],
+                  }),
+                },
+              ]}
+            />
+            <Text style={styles.endButtonLabel}>{endingSession ? "Saving..." : "Press and hold to end"}</Text>
           </Pressable>
         </View>
-
-        <View style={styles.livePane}>
-          <Text style={styles.paneTitle}>Rep Transcript</Text>
-          <Text style={styles.paneText}>{lastTranscript}</Text>
-        </View>
-
-        <View style={styles.livePane}>
-          <View style={styles.paneHeader}>
-            <Text style={styles.paneTitle}>Homeowner Response</Text>
-            <Text style={styles.playbackLabel}>{playingAudio ? "Audio playing" : "Audio idle"}</Text>
-          </View>
-          <Text style={styles.paneText}>{aiStream}</Text>
-        </View>
-
-        <Text style={styles.timelineTitle}>Event Stream</Text>
-        <ScrollView contentContainerStyle={styles.timeline}>
-          {events.length === 0 ? <Text style={styles.empty}>No events yet.</Text> : null}
-          {events.map((event) => (
-            <View key={event.id} style={styles.eventRow}>
-              <Text style={styles.eventType}>{event.type}</Text>
-              <Text style={styles.eventNote}>{event.note}</Text>
-            </View>
-          ))}
-        </ScrollView>
       </View>
     </SafeAreaView>
   );
@@ -425,120 +669,199 @@ export function SessionScreen({ route, navigation }: Props) {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.bg },
-  container: { flex: 1, padding: 18, gap: 10 },
-  headerRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  title: { fontSize: 28, fontWeight: "800", color: colors.ink },
-  subtitle: { color: colors.muted },
-  reconnect: {
-    borderColor: colors.line,
-    borderWidth: 1,
-    borderRadius: 999,
-    backgroundColor: colors.panel,
-    paddingVertical: 8,
-    paddingHorizontal: 14
+  container: { flex: 1, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 20 },
+  topBar: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
   },
-  reconnectLabel: { color: colors.ink, fontWeight: "700", fontSize: 12 },
-  statusRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
-  statusChip: {
-    borderRadius: 999,
-    paddingVertical: 6,
-    paddingHorizontal: 10
+  topLabel: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
   },
-  statusConnected: { backgroundColor: "#D9F4E7" },
-  statusDisconnected: { backgroundColor: "#F4DBD6" },
-  statusAiSpeaking: { backgroundColor: "#FFE4C8" },
-  statusRepSpeaking: { backgroundColor: "#E4E9FF" },
-  statusIdle: { backgroundColor: colors.accentSoft },
-  statusChipLabel: { color: colors.ink, fontSize: 11, fontWeight: "700" },
-  error: { color: "#AF2D18", fontWeight: "600" },
-  interrupt: {
-    color: "#AF2D18",
-    fontWeight: "700",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#E8B9B0",
-    backgroundColor: "#F8E4E0",
-    paddingHorizontal: 10,
-    paddingVertical: 8
+  statusLabel: {
+    marginTop: 8,
+    fontSize: 22,
+    fontWeight: "800",
   },
-  meterCard: {
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.panel,
-    padding: 10,
-    gap: 6
-  },
-  meterHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  meterTitle: { color: colors.muted, fontSize: 12, fontWeight: "700", textTransform: "uppercase" },
-  meterDb: { color: colors.ink, fontSize: 12, fontWeight: "600" },
-  meterTrack: {
-    width: "100%",
-    height: 8,
-    borderRadius: 999,
-    backgroundColor: "#EEE2D3",
-    overflow: "hidden"
-  },
-  meterFill: { height: "100%", borderRadius: 999, backgroundColor: colors.accent },
-  inputCard: {
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.panel,
-    padding: 10,
-    gap: 5
-  },
-  inputLabel: { color: colors.muted, fontSize: 12, fontWeight: "700", textTransform: "uppercase" },
-  input: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: "#FFF8ED",
+  statusCool: { color: colors.ink },
+  statusHot: { color: colors.accent },
+  statusWarn: { color: "#8D5D1B" },
+  timer: {
     color: colors.ink,
-    paddingHorizontal: 10,
-    paddingVertical: 9
+    fontSize: 18,
+    fontWeight: "800",
+    fontVariant: ["tabular-nums"],
   },
-  actionRow: { flexDirection: "row", gap: 10 },
-  talkButton: {
+  centerStage: {
     flex: 1,
-    borderRadius: 12,
-    backgroundColor: colors.accent,
-    alignItems: "center",
-    paddingVertical: 13
-  },
-  talkButtonLabel: { color: "white", fontWeight: "800", fontSize: 15 },
-  endBtn: {
-    borderRadius: 12,
-    backgroundColor: "#222",
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 18
+    gap: 22,
   },
-  endLabel: { color: "white", fontWeight: "700" },
-  disabled: { opacity: 0.45 },
-  livePane: {
-    borderRadius: 12,
+  interruptionBanner: {
+    position: "absolute",
+    top: 20,
+    borderRadius: 999,
+    backgroundColor: "#FFF2E4",
+    borderWidth: 1,
+    borderColor: "#E7C39B",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  interruptionText: { color: "#8D5D1B", fontSize: 13, fontWeight: "700" },
+  orbShell: {
+    width: 224,
+    height: 224,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  orbRing: {
+    position: "absolute",
+    width: 224,
+    height: 224,
+    borderRadius: 112,
+    borderWidth: 1,
+    borderColor: "#E9D7C7",
+  },
+  orbRingActive: {
+    borderColor: "rgba(200,81,42,0.3)",
+  },
+  orb: {
+    width: 152,
+    height: 152,
+    borderRadius: 76,
+    backgroundColor: colors.panel,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: colors.ink,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    elevation: 4,
+  },
+  orbCool: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  orbHot: {
+    backgroundColor: "#A74223",
+    borderColor: "#A74223",
+  },
+  waveformRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 8,
+    height: 110,
+  },
+  waveBar: {
+    width: 8,
+    borderRadius: 999,
+    backgroundColor: colors.accent,
+    opacity: 0.88,
+  },
+  waveformHint: { color: colors.muted, fontSize: 12, fontWeight: "600" },
+  captionCard: {
+    borderRadius: 22,
     borderWidth: 1,
     borderColor: colors.line,
     backgroundColor: colors.panel,
-    padding: 10,
-    gap: 5
+    padding: 18,
+    gap: 10,
   },
-  paneHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  paneTitle: { color: colors.muted, fontSize: 12, fontWeight: "700", textTransform: "uppercase" },
-  playbackLabel: { color: colors.accent, fontSize: 11, fontWeight: "700" },
-  paneText: { color: colors.ink, fontSize: 13 },
-  timelineTitle: { color: colors.ink, fontWeight: "700", marginTop: 2 },
-  timeline: { gap: 8, paddingBottom: 30 },
-  eventRow: {
-    borderRadius: 10,
+  captionLabel: { color: colors.muted, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 },
+  captionText: { color: colors.ink, fontSize: 18, fontWeight: "700", lineHeight: 24 },
+  homeownerPreview: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderRadius: 14,
+    backgroundColor: colors.accentSoft,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  homeownerPreviewText: { flex: 1, color: colors.accent, fontSize: 14, lineHeight: 20, fontWeight: "600" },
+  waitingNudge: { color: colors.muted, fontSize: 13, fontStyle: "italic" },
+  errorText: { color: "#AF2D18", fontSize: 13, fontWeight: "700", lineHeight: 19 },
+  savePartialCard: {
+    marginTop: 14,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "#E2C9B3",
+    backgroundColor: "#FFF5EA",
+    padding: 18,
+    gap: 10,
+  },
+  savePartialTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
+  savePartialBody: { color: colors.muted, fontSize: 14, lineHeight: 20 },
+  savePartialActions: { flexDirection: "row", gap: 10 },
+  retryNowButton: {
+    flex: 1,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.line,
     backgroundColor: colors.panel,
-    padding: 10,
-    gap: 3
+    paddingVertical: 14,
+    alignItems: "center",
   },
-  eventType: { color: colors.accent, fontWeight: "700", fontSize: 12 },
-  eventNote: { color: colors.muted, fontSize: 11 },
-  empty: { color: colors.muted }
+  retryNowLabel: { color: colors.ink, fontWeight: "700" },
+  savePartialButton: {
+    flex: 1,
+    borderRadius: 14,
+    backgroundColor: colors.accent,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  savePartialLabel: { color: "#fff", fontWeight: "800" },
+  bottomBar: {
+    paddingTop: 18,
+    alignItems: "center",
+    gap: 16,
+  },
+  micButton: {
+    width: 108,
+    height: 108,
+    borderRadius: 54,
+    backgroundColor: colors.accent,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.28,
+    shadowRadius: 18,
+  },
+  micButtonActive: {
+    backgroundColor: "#A74223",
+  },
+  micButtonDisabled: {
+    backgroundColor: "#E7DDD2",
+    shadowOpacity: 0,
+  },
+  endButton: {
+    width: "100%",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.panel,
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 54,
+  },
+  endButtonFill: {
+    ...StyleSheet.absoluteFillObject,
+    width: "0%",
+    backgroundColor: "rgba(200,81,42,0.16)",
+  },
+  endButtonLabel: {
+    color: colors.ink,
+    fontSize: 14,
+    fontWeight: "800",
+    paddingVertical: 16,
+  },
 });

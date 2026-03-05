@@ -76,7 +76,6 @@ export class AudioCaptureService {
     await recording.startAsync();
     this.recording = recording;
     this.startedAtMs = Date.now();
-    this.updateSpeaking(true);
   }
 
   async stop(): Promise<AudioChunk | null> {
@@ -96,6 +95,15 @@ export class AudioCaptureService {
 
     const uri = active.getURI();
     this.updateSpeaking(false);
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
+      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+      playThroughEarpieceAndroid: false
+    });
     if (!uri) {
       return null;
     }
