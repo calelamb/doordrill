@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import func, select
 
-from app.core.auth import resolve_ws_actor
+from app.core.auth import resolve_ws_actor_with_query
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.assignment import Assignment
@@ -88,21 +88,28 @@ def _should_flush_tts_segment(buffer: str) -> bool:
 @router.websocket("/ws/sessions/{session_id}")
 @router.websocket("/ws/session/{session_id}")
 async def session_ws(websocket: WebSocket, session_id: str) -> None:
-    actor = resolve_ws_actor(websocket.headers)
+    db = SessionLocal()
+    actor = resolve_ws_actor_with_query(websocket.headers, websocket.query_params, db)
     if actor is None:
         await websocket.close(code=4401)
+        db.close()
+        return
+    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+    if session is None:
+        await websocket.close(code=4404)
+        db.close()
+        return
+    if actor.role == "rep" and actor.user_id and actor.user_id != session.rep_id:
+        await websocket.close(code=4403)
+        db.close()
+        return
+    if actor.role == "manager":
+        await websocket.close(code=4403)
+        db.close()
         return
 
     await websocket.accept()
     ws_trace_id = _resolve_trace_id(websocket.headers)
-
-    db = SessionLocal()
-    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
-    if session is None:
-        await websocket.send_json({"type": "server.error", "payload": {"code": "not_found", "message": "session not found"}})
-        await websocket.close(code=4404)
-        db.close()
-        return
 
     scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
     orchestrator.bind_session_context(

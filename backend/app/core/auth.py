@@ -154,6 +154,43 @@ def resolve_ws_actor(headers) -> Actor:
     return Actor(user_id=resolved_user_id, role=resolved_role, org_id=None, team_id=None)
 
 
+def resolve_ws_actor_with_query(headers, query_params, db: Session) -> Actor | None:
+    settings = get_settings()
+    authorization = headers.get("authorization")
+    if not authorization:
+        access_token = str(query_params.get("access_token") or "").strip()
+        if access_token:
+            authorization = f"Bearer {access_token}"
+
+    x_user_id = headers.get("x-user-id")
+    x_user_role = headers.get("x-user-role")
+    try:
+        resolved_user_id, resolved_role = _resolve_identity(
+            x_user_id=x_user_id,
+            x_user_role=x_user_role,
+            authorization=authorization,
+        )
+    except HTTPException:
+        return None
+
+    if not resolved_user_id and not resolved_role:
+        if settings.auth_required:
+            return None
+        return Actor(user_id=None, role="admin", org_id=None, team_id=None)
+
+    if not resolved_user_id or not resolved_role:
+        return None
+    if resolved_role not in ALLOWED_ROLES:
+        return None
+
+    user = db.scalar(select(User).where(User.id == resolved_user_id))
+    if user is None:
+        return None
+    if user.role.value != resolved_role and resolved_role != "admin":
+        return None
+    return Actor(user_id=user.id, role=resolved_role, org_id=user.org_id, team_id=user.team_id)
+
+
 def require_manager(actor: Actor = Depends(get_actor)) -> Actor:
     if actor.role not in {"manager", "admin"}:
         raise HTTPException(status_code=403, detail="manager role required")

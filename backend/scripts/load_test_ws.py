@@ -46,6 +46,8 @@ async def create_session(
     manager_id: str,
     rep_id: str,
     scenario_id: str,
+    manager_headers: dict[str, str] | None = None,
+    rep_headers: dict[str, str] | None = None,
 ) -> str:
     assignment_resp = await client.post(
         "/manager/assignments",
@@ -55,7 +57,7 @@ async def create_session(
             "assigned_by": manager_id,
             "retry_policy": {"max_attempts": 1},
         },
-        headers={"x-user-id": manager_id, "x-user-role": "manager"},
+        headers=manager_headers or {"x-user-id": manager_id, "x-user-role": "manager"},
     )
     assignment_resp.raise_for_status()
     assignment_id = assignment_resp.json()["id"]
@@ -67,10 +69,16 @@ async def create_session(
             "rep_id": rep_id,
             "scenario_id": scenario_id,
         },
-        headers={"x-user-id": rep_id, "x-user-role": "rep"},
+        headers=rep_headers or {"x-user-id": rep_id, "x-user-role": "rep"},
     )
     session_resp.raise_for_status()
     return session_resp.json()["id"]
+
+
+async def login_for_token(client: httpx.AsyncClient, *, email: str, password: str) -> str:
+    response = await client.post("/auth/login", json={"email": email, "password": password})
+    response.raise_for_status()
+    return response.json()["access_token"]
 
 
 async def run_worker(
@@ -83,6 +91,9 @@ async def run_worker(
     scenario_id: str,
     verify_replay: bool,
     trigger_barge_in: bool,
+    manager_headers: dict[str, str] | None = None,
+    rep_headers: dict[str, str] | None = None,
+    rep_access_token: str | None = None,
 ) -> WorkerResult:
     try:
         async with httpx.AsyncClient(base_url=api_base, timeout=15.0) as client:
@@ -91,13 +102,22 @@ async def run_worker(
                 manager_id=manager_id,
                 rep_id=rep_id,
                 scenario_id=scenario_id,
+                manager_headers=manager_headers,
+                rep_headers=rep_headers,
             )
 
         ws_url = f"{ws_base}/ws/sessions/{session_id}"
+        if rep_access_token:
+            separator = "&" if "?" in ws_url else "?"
+            ws_url = f"{ws_url}{separator}access_token={rep_access_token}"
         committed_rep_turn_id = None
         committed_ai_turn_id = None
 
-        async with websockets.connect(ws_url, max_size=2_000_000) as ws:
+        ws_headers = {}
+        if rep_headers and "Authorization" in rep_headers:
+            ws_headers["Authorization"] = rep_headers["Authorization"]
+
+        async with websockets.connect(ws_url, max_size=2_000_000, additional_headers=ws_headers or None) as ws:
             await ws.recv()  # connected state
 
             start = time.perf_counter()
@@ -154,7 +174,7 @@ async def run_worker(
             async with httpx.AsyncClient(base_url=api_base, timeout=15.0) as client:
                 replay_resp = await client.get(
                     f"/manager/sessions/{session_id}/replay",
-                    headers={"x-user-id": manager_id, "x-user-role": "manager"},
+                    headers=manager_headers or {"x-user-id": manager_id, "x-user-role": "manager"},
                 )
                 replay_resp.raise_for_status()
                 replay = replay_resp.json()
@@ -218,6 +238,19 @@ def parse_ramp(raw: str | None, fallback: int) -> list[int]:
 
 
 async def run_stage(args: argparse.Namespace, concurrency: int) -> dict:
+    manager_headers = {"x-user-id": args.manager_id, "x-user-role": "manager"}
+    rep_headers = {"x-user-id": args.rep_id, "x-user-role": "rep"}
+    rep_access_token = None
+
+    if args.auth_required:
+        if not all([args.manager_email, args.manager_password, args.rep_email, args.rep_password]):
+            raise ValueError("JWT auth load runs require manager/rep email and password arguments")
+        async with httpx.AsyncClient(base_url=args.api_base, timeout=15.0) as client:
+            manager_token = await login_for_token(client, email=args.manager_email, password=args.manager_password)
+            rep_access_token = await login_for_token(client, email=args.rep_email, password=args.rep_password)
+        manager_headers = {"Authorization": f"Bearer {manager_token}"}
+        rep_headers = {"Authorization": f"Bearer {rep_access_token}"}
+
     jobs = [
         run_worker(
             i,
@@ -228,6 +261,9 @@ async def run_stage(args: argparse.Namespace, concurrency: int) -> dict:
             scenario_id=args.scenario_id,
             verify_replay=args.verify_replay,
             trigger_barge_in=args.trigger_barge_in,
+            manager_headers=manager_headers,
+            rep_headers=rep_headers,
+            rep_access_token=rep_access_token,
         )
         for i in range(concurrency)
     ]
@@ -364,6 +400,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verify-replay", action="store_true", help="Verify replay turn capture after each worker run")
     parser.add_argument("--trigger-barge-in", action="store_true", help="Send a VAD barge-in during AI audio")
     parser.add_argument("--report-json", default="", help="Write stage results to JSON report path")
+    parser.add_argument("--auth-required", action="store_true", help="Authenticate REST and WS traffic with JWTs")
+    parser.add_argument("--manager-email", default="", help="Manager login email for JWT-enabled runs")
+    parser.add_argument("--manager-password", default="", help="Manager login password for JWT-enabled runs")
+    parser.add_argument("--rep-email", default="", help="Rep login email for JWT-enabled runs")
+    parser.add_argument("--rep-password", default="", help="Rep login password for JWT-enabled runs")
     return parser.parse_args()
 
 
