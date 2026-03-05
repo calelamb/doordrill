@@ -21,6 +21,8 @@ Core moat:
 
 The backend foundation is implemented under:
 - `backend/`
+The manager dashboard scaffold is implemented under:
+- `dashboard/`
 
 Top-level docs:
 - `README.md`
@@ -147,16 +149,23 @@ Supporting tables:
   - `backend/app/voice/ws.py`
 - Core services:
   - `backend/app/services/conversation_orchestrator.py`
-- Migrations:
-  - `backend/alembic/`
-  - `backend/alembic/versions/20260305_0001_initial_schema.py`
   - `backend/app/services/ledger_buffer.py`
   - `backend/app/services/ledger_service.py`
   - `backend/app/services/grading_service.py`
   - `backend/app/services/manager_feed_service.py`
   - `backend/app/services/storage_service.py`
+- Migrations:
+  - `backend/alembic/`
+  - `backend/alembic/versions/20260305_0001_initial_schema.py`
+  - `backend/alembic/versions/20260305_0002_scorecard_weakness_tags.py`
 - Tests:
   - `backend/tests/test_manager_rep_flow.py`
+  - `backend/tests/test_auth_rbac.py`
+- Dashboard:
+  - `dashboard/src/App.tsx`
+  - `dashboard/src/components/FeedList.tsx`
+  - `dashboard/src/components/ReplayPanel.tsx`
+  - `dashboard/src/lib/api.ts`
 
 ## How to Run
 
@@ -173,7 +182,7 @@ pytest
 ```
 
 Current status:
-- tests pass (`4 passed`)
+- tests pass (`8 passed`)
 
 ## What Is Stubbed vs Production-Ready
 
@@ -217,7 +226,7 @@ Stubbed integrations:
    - test event loss guarantees and reconnect behavior
 
 6. Frontend integration
-   - manager UI: feed, replay, override
+   - manager UI: feed, replay, override (implemented scaffold in `dashboard/`; hardening and auth/session UX still pending)
    - rep UI: assignments, live drill, scorecard view
 
 ## Non-Negotiable Product Requirements

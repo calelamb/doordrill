@@ -64,3 +64,12 @@ The initial FastAPI backend foundation has been implemented in [`backend/`](./ba
 - Immutable session interaction ledger
 - Post-session grading + manager override workflow
 - Manager replay endpoint with transcript + artifact links
+
+## Dashboard Progress
+
+A manager web scaffold has been implemented in [`dashboard/`](./dashboard):
+
+- Feed view (`/manager/feed`)
+- Session replay detail (`/manager/sessions/{id}/replay`)
+- Score override action (`PATCH /manager/scorecards/{id}`)
+- Follow-up assignment action (`POST /manager/scorecards/{id}/followup-assignment`)
