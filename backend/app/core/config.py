@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     ws_flush_interval_ms: int = Field(default=350, alias="WS_FLUSH_INTERVAL_MS")
     max_ws_event_batch: int = Field(default=200, alias="MAX_WS_EVENT_BATCH")
 
+    stt_provider: str = Field(default="mock", alias="STT_PROVIDER")
+    llm_provider: str = Field(default="mock", alias="LLM_PROVIDER")
+    tts_provider: str = Field(default="mock", alias="TTS_PROVIDER")
+
+    deepgram_api_key: str | None = Field(default=None, alias="DEEPGRAM_API_KEY")
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    elevenlabs_api_key: str | None = Field(default=None, alias="ELEVENLABS_API_KEY")
+    elevenlabs_voice_id: str | None = Field(default=None, alias="ELEVENLABS_VOICE_ID")
+
 
 @lru_cache
 def get_settings() -> Settings:

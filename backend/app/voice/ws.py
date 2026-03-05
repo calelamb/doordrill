@@ -19,6 +19,7 @@ from app.services.conversation_orchestrator import ConversationOrchestrator
 from app.services.grading_service import GradingService
 from app.services.ledger_buffer import InMemoryEventBuffer, RedisEventBuffer
 from app.services.ledger_service import SessionLedgerService
+from app.services.provider_clients import ProviderSuite
 
 router = APIRouter(tags=["voice"])
 settings = get_settings()
@@ -33,6 +34,7 @@ except Exception:
 ledger = SessionLedgerService(buffer=event_buffer)
 orchestrator = ConversationOrchestrator()
 grading_service = GradingService()
+providers = ProviderSuite.from_settings(settings)
 
 
 async def _send_event(websocket: WebSocket, event_type: str, payload: dict[str, Any], sequence: int) -> None:
@@ -60,6 +62,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
     server_sequence = 0
     last_flush = time.monotonic()
+    audio_frame_count = 0
+    total_audio_duration_ms = 0
 
     async def maybe_flush(force: bool = False) -> None:
         nonlocal last_flush
@@ -138,90 +142,140 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             if msg.type == "client.session.end":
                 break
 
-            rep_text = str(msg.payload.get("transcript_hint", "")).strip()
+            stt_result = await providers.stt.finalize_utterance(msg.payload)
+            rep_text = stt_result.text
             if not rep_text:
                 server_sequence += 1
                 await _send_event(
                     websocket,
                     "server.stt.partial",
-                    {"text": "", "confidence": 0.0, "message": "awaiting transcript"},
+                    {
+                        "text": "",
+                        "confidence": 0.0,
+                        "message": "awaiting transcript",
+                        "provider": providers.stt.provider_name,
+                    },
                     server_sequence,
                 )
                 continue
 
+            plan = orchestrator.prepare_rep_turn(session_id=session_id, rep_text=rep_text)
             now = datetime.now(timezone.utc)
             next_turn_index = (db.scalar(select(func.count(SessionTurn.id)).where(SessionTurn.session_id == session_id)) or 0) + 1
+
             rep_turn = ledger.commit_turn(
                 db,
                 session_id=session_id,
                 turn_index=next_turn_index,
                 speaker=TurnSpeaker.REP,
                 text=rep_text,
-                stage=orchestrator.get_state(session_id).stage,
+                stage=plan.stage_after,
                 started_at=now,
                 ended_at=now,
-                objection_tags=["price"] if "price" in rep_text.lower() else [],
+                objection_tags=plan.objection_tags,
             )
 
             server_sequence += 1
-            await _send_event(websocket, "server.stt.final", {"text": rep_text, "turn_id": rep_turn.id}, server_sequence)
+            stt_final_payload = {
+                "text": rep_text,
+                "turn_id": rep_turn.id,
+                "confidence": stt_result.confidence,
+                "provider": stt_result.source,
+            }
+            await _send_event(websocket, "server.stt.final", stt_final_payload, server_sequence)
             await ledger.buffer_event(
                 session_id=session_id,
                 event={
                     "type": "server.stt.final",
                     "direction": EventDirection.SERVER.value,
                     "sequence": server_sequence,
-                    "payload": {"text": rep_text, "turn_id": rep_turn.id},
+                    "payload": stt_final_payload,
                 },
             )
             await maybe_flush()
 
-            ai_chunks = await orchestrator.generate_ai_response(session_id, rep_text)
+            if plan.stage_changed:
+                server_sequence += 1
+                stage_payload = {
+                    "state": plan.stage_after,
+                    "transition": {"from": plan.stage_before, "to": plan.stage_after},
+                    "session_id": session_id,
+                }
+                await _send_event(websocket, "server.session.state", stage_payload, server_sequence)
+                await ledger.buffer_event(
+                    session_id=session_id,
+                    event={
+                        "type": "server.session.state",
+                        "direction": EventDirection.SERVER.value,
+                        "sequence": server_sequence,
+                        "payload": stage_payload,
+                    },
+                )
+                await maybe_flush()
+
             ai_text_parts: list[str] = []
-            for chunk in ai_chunks:
+            async for chunk in providers.llm.stream_reply(
+                rep_text=rep_text,
+                stage=plan.stage_after,
+                system_prompt=plan.system_prompt,
+            ):
                 if not chunk:
                     continue
                 ai_text_parts.append(chunk)
 
                 server_sequence += 1
-                await _send_event(websocket, "server.ai.text.delta", {"token": chunk}, server_sequence)
+                ai_text_payload = {
+                    "token": chunk,
+                    "provider": providers.llm.provider_name,
+                    "stage": plan.stage_after,
+                }
+                await _send_event(websocket, "server.ai.text.delta", ai_text_payload, server_sequence)
                 await ledger.buffer_event(
                     session_id=session_id,
                     event={
                         "type": "server.ai.text.delta",
                         "direction": EventDirection.SERVER.value,
                         "sequence": server_sequence,
-                        "payload": {"token": chunk},
+                        "payload": ai_text_payload,
                     },
                 )
 
-                server_sequence += 1
-                await _send_event(
-                    websocket,
-                    "server.ai.audio.chunk",
-                    {"codec": "pcm16", "payload": "UklGRiQAAABXQVZFZm10"},
-                    server_sequence,
-                )
-                await ledger.buffer_event(
-                    session_id=session_id,
-                    event={
-                        "type": "server.ai.audio.chunk",
-                        "direction": EventDirection.SERVER.value,
-                        "sequence": server_sequence,
-                        "payload": {"codec": "pcm16", "payload": "UklGRiQAAABXQVZFZm10"},
-                    },
-                )
+                async for audio_chunk in providers.tts.stream_audio(chunk):
+                    audio_frame_count += 1
+                    total_audio_duration_ms += int(audio_chunk.get("duration_ms", 0))
+
+                    server_sequence += 1
+                    ai_audio_payload = {
+                        "codec": audio_chunk.get("codec", "pcm16"),
+                        "payload": audio_chunk.get("payload", ""),
+                        "provider": audio_chunk.get("provider", providers.tts.provider_name),
+                        "duration_ms": int(audio_chunk.get("duration_ms", 0)),
+                    }
+                    await _send_event(websocket, "server.ai.audio.chunk", ai_audio_payload, server_sequence)
+                    await ledger.buffer_event(
+                        session_id=session_id,
+                        event={
+                            "type": "server.ai.audio.chunk",
+                            "direction": EventDirection.SERVER.value,
+                            "sequence": server_sequence,
+                            "payload": ai_audio_payload,
+                        },
+                    )
+
                 await maybe_flush()
 
+            ai_text = "".join(ai_text_parts).strip()
+            orchestrator.mark_ai_turn(session_id=session_id)
+            ai_now = datetime.now(timezone.utc)
             ai_turn = ledger.commit_turn(
                 db,
                 session_id=session_id,
                 turn_index=next_turn_index + 1,
                 speaker=TurnSpeaker.AI,
-                text="".join(ai_text_parts).strip(),
-                stage=orchestrator.get_state(session_id).stage,
-                started_at=datetime.now(timezone.utc),
-                ended_at=datetime.now(timezone.utc),
+                text=ai_text,
+                stage=plan.stage_after,
+                started_at=ai_now,
+                ended_at=ai_now,
                 objection_tags=[],
             )
 
@@ -230,7 +284,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "rep_turn_id": rep_turn.id,
                 "ai_turn_id": ai_turn.id,
                 "session_id": session_id,
-                "stage": orchestrator.get_state(session_id).stage,
+                "stage": plan.stage_after,
+                "objection_tags": plan.objection_tags,
             }
             await _send_event(websocket, "server.turn.committed", turn_payload, server_sequence)
             await ledger.buffer_event(
@@ -249,14 +304,20 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     finally:
         try:
             await maybe_flush(force=True)
-            ledger.compact_session(db, session_id)
+            transcript_artifact = ledger.compact_session(db, session_id)
 
             db.add(
                 SessionArtifact(
                     session_id=session_id,
                     artifact_type="audio",
                     storage_key=f"sessions/{session_id}/session_audio.opus",
-                    metadata_json={"codec": "opus", "channels": 1},
+                    metadata_json={
+                        "codec": "opus",
+                        "channels": 1,
+                        "frame_count": audio_frame_count,
+                        "duration_ms": total_audio_duration_ms,
+                        "provider": providers.tts.provider_name,
+                    },
                 )
             )
 
@@ -278,6 +339,15 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
             if session is not None:
                 await grading_service.grade_session(db, session_id=session_id)
+
+            logger.info(
+                "Session finalized",
+                extra={
+                    "session_id": session_id,
+                    "transcript_artifact": transcript_artifact.storage_key,
+                    "audio_frames": audio_frame_count,
+                },
+            )
         except Exception:  # pragma: no cover
             logger.exception("Failed to finalize websocket session", extra={"session_id": session_id})
             db.rollback()
