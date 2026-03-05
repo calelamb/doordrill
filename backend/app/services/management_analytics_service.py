@@ -52,6 +52,8 @@ class SessionRecord:
     latest_coaching_note_preview: str | None
     assignment_status: str
     session_status: str
+    focus_turn_id: str | None
+    evidence_turn_ids: list[str]
 
 
 def _normalize_dt(value: datetime | None) -> datetime | None:
@@ -120,6 +122,17 @@ def _category_scores_from_fact(row: Any) -> dict[str, Any]:
     return payload
 
 
+def _focus_turn_id(highlights: list[dict[str, Any]] | None, evidence_turn_ids: list[str] | None) -> str | None:
+    for turn_id in evidence_turn_ids or []:
+        if turn_id:
+            return turn_id
+    for item in highlights or []:
+        turn_id = item.get("turn_id")
+        if turn_id:
+            return turn_id
+    return None
+
+
 class ManagementAnalyticsService:
     def _load_sessions(
         self,
@@ -157,6 +170,7 @@ class ManagementAnalyticsService:
                 AnalyticsFactSession.professionalism_score.label("professionalism_score"),
                 AnalyticsFactSession.weakness_tags_json.label("weakness_tags"),
                 Scorecard.highlights.label("highlights"),
+                Scorecard.evidence_turn_ids.label("evidence_turn_ids"),
                 AnalyticsFactSession.manager_reviewed.label("manager_reviewed"),
                 AnalyticsFactSession.latest_reviewed_at.label("latest_reviewed_at"),
                 latest_coaching_note.label("latest_coaching_note_preview"),
@@ -196,6 +210,8 @@ class ManagementAnalyticsService:
                 latest_coaching_note_preview=row["latest_coaching_note_preview"],
                 assignment_status=_enum_value(row["assignment_status"]),
                 session_status=_enum_value(row["session_status"]),
+                focus_turn_id=_focus_turn_id(row["highlights"] or [], row["evidence_turn_ids"] or []),
+                evidence_turn_ids=list(row["evidence_turn_ids"] or []),
             )
             for row in rows
         ]
