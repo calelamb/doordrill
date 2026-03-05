@@ -50,6 +50,7 @@ The platform consists of three main pieces:
 **Manager dashboard** (web) — where managers assign scenarios, review sessions, track team progress, and provide manual feedback.
 
 See `architecture.md` for the full system design, data model, API specification, cost analysis, and implementation roadmap.
+See `ARCHITECTURE_CONFORMANCE.md` for current backend endpoint/service parity tracking.
 
 ## Status
 
@@ -60,9 +61,12 @@ Early stage. Currently in design and prototyping.
 The initial FastAPI backend foundation has been implemented in [`backend/`](./backend):
 
 - Assignment workflow (`manager -> rep`)
+- Auth endpoint contract (`/auth/register`, `/auth/login`, `/auth/refresh`)
+- Scenario CRUD contract (`/scenarios`)
 - Realtime WebSocket voice session contract
 - Immutable session interaction ledger
 - Post-session grading + manager override workflow
+- Manager/rep listing contracts (`/manager/team`, `/manager/assignments`, `/manager/sessions`, `/rep/sessions`, `/rep/progress`)
 - Manager replay endpoint with transcript + artifact links
 - Manager analytics + rep progress endpoints
 - Manager action audit logging (`manager_action_logs`)
@@ -73,6 +77,7 @@ The initial FastAPI backend foundation has been implemented in [`backend/`](./ba
 - Structured tracing logs with request/session correlation IDs
 - Ramp/SLO websocket load harness (`backend/scripts/load_test_ws.py`)
 - External IdP JWT readiness via JWKS (`JWT_JWKS_URL`)
+- Celery post-session task scaffolding (cleanup, grading, manager notification)
 
 ## Dashboard Progress
 

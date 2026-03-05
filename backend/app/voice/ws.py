@@ -69,6 +69,7 @@ async def _send_event(websocket: WebSocket, event_type: str, payload: dict[str, 
 
 
 @router.websocket("/ws/sessions/{session_id}")
+@router.websocket("/ws/session/{session_id}")
 async def session_ws(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
     ws_trace_id = _resolve_trace_id(websocket.headers)

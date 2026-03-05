@@ -10,6 +10,7 @@ FastAPI backend implementing the AI trainer core loop with an immutable interact
 - `session-ledger-service`: buffered event capture + batched persistence.
 - `grading-service`: async scorecard generation with evidence turn linking.
 - `manager-feed-service`: manager timeline with replay and review visibility.
+- `postprocess-service`: transcript cleanup + grading + manager notifications (inline or Celery queued).
 
 ## Data Model
 
@@ -28,20 +29,35 @@ Plus org/user/team/scenario tables.
 ## API Surface
 
 REST:
+- `POST /auth/register`
+- `POST /auth/login`
+- `POST /auth/refresh`
+- `GET /scenarios`
+- `POST /scenarios`
+- `GET /scenarios/{scenario_id}`
+- `PUT /scenarios/{scenario_id}`
+- `GET /manager/team?manager_id=...`
 - `POST /manager/assignments`
+- `GET /manager/assignments?manager_id=...`
 - `POST /manager/scorecards/{scorecard_id}/followup-assignment`
 - `GET /manager/feed?manager_id=...`
 - `GET /manager/reps/{rep_id}/progress?manager_id=...`
 - `GET /manager/analytics?manager_id=...`
 - `GET /manager/actions?manager_id=...`
+- `GET /manager/sessions?manager_id=...`
+- `GET /manager/sessions/{session_id}`
+- `GET /manager/sessions/{session_id}/audio`
 - `GET /manager/sessions/{session_id}/replay`
 - `PATCH /manager/scorecards/{scorecard_id}`
 - `GET /rep/assignments?rep_id=...`
 - `POST /rep/sessions`
+- `GET /rep/sessions?rep_id=...`
 - `GET /rep/sessions/{session_id}`
+- `GET /rep/progress?rep_id=...`
 
 WebSocket:
 - `WS /ws/sessions/{session_id}`
+- `WS /ws/session/{session_id}` (architecture alias)
 
 Supported client events:
 - `client.audio.chunk`
@@ -75,6 +91,7 @@ Replay additions:
 - Manager and rep endpoints enforce role- and org-aware access checks.
 - Scorecards now include `weakness_tags`, and follow-up assignments can embed those tags into retry policy metadata.
 - Manager mutation workflows write audit events to `manager_action_logs`.
+- Local auth endpoints issue JWT access/refresh tokens; JWKS verification remains supported for external IdPs.
 
 ## Run
 
@@ -118,7 +135,9 @@ python scripts/load_test_ws.py \
 ## Notes
 
 - Redis buffering is enabled automatically if `REDIS_URL` is provided.
+- Post-session workflow can run via Celery (`USE_CELERY=true`) with Redis broker/backend.
 - Storage URLs now support S3/R2 presigning when object storage credentials are configured; otherwise fallback URLs are returned for local dev.
 - Provider adapters for Deepgram/OpenAI/ElevenLabs are wired with real API paths plus mock fallback behavior to keep local development deterministic.
 - Grading uses OpenAI judge mode when API credentials are present, with normalized JSON output and deterministic fallback scoring.
+- Whisper transcript cleanup hook is implemented and runs when `WHISPER_CLEANUP_ENABLED=true`.
 - Structured JSON logs now include request/session trace fields (`trace_id`, `request_id`) for HTTP and websocket flows.

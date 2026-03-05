@@ -41,6 +41,9 @@ Top-level docs:
 4. Session ledger service (buffer + batched event persistence)
 5. Grading service (async scorecard generation + evidence turn IDs)
 6. Manager feed service (timeline for review workflows)
+7. Auth service (local register/login/refresh + JWT issuance)
+8. Scenario service (manager CRUD + org-scoped visibility)
+9. Post-session workflow service (cleanup, grading, notification; inline or Celery)
 
 ### Data model implemented
 
@@ -64,22 +67,37 @@ Supporting tables:
 
 ### REST endpoints
 
+- `POST /auth/register`
+- `POST /auth/login`
+- `POST /auth/refresh`
+- `GET /scenarios`
+- `POST /scenarios`
+- `GET /scenarios/{scenario_id}`
+- `PUT /scenarios/{scenario_id}`
+- `GET /manager/team?manager_id=...`
 - `POST /manager/assignments`
+- `GET /manager/assignments?manager_id=...`
 - `POST /manager/scorecards/{scorecard_id}/followup-assignment`
 - `GET /manager/feed?manager_id=...`
 - `GET /manager/reps/{rep_id}/progress?manager_id=...`
 - `GET /manager/analytics?manager_id=...`
 - `GET /manager/actions?manager_id=...`
+- `GET /manager/sessions?manager_id=...`
+- `GET /manager/sessions/{session_id}`
+- `GET /manager/sessions/{session_id}/audio`
 - `GET /manager/sessions/{session_id}/replay`
 - `PATCH /manager/scorecards/{scorecard_id}`
 - `GET /rep/assignments?rep_id=...`
 - `POST /rep/sessions`
+- `GET /rep/sessions?rep_id=...`
 - `GET /rep/sessions/{session_id}`
+- `GET /rep/progress?rep_id=...`
 - `GET /health`
 
 ### WebSocket endpoint
 
 - `WS /ws/sessions/{session_id}`
+- `WS /ws/session/{session_id}` (alias for architecture path conformance)
 
 #### Supported client events
 - `client.audio.chunk`
@@ -159,8 +177,10 @@ Supporting tables:
 - Schemas/contracts:
   - `backend/app/schemas/`
 - REST APIs:
+  - `backend/app/api/auth.py`
   - `backend/app/api/manager.py`
   - `backend/app/api/rep.py`
+  - `backend/app/api/scenarios.py`
 - Realtime WS flow:
   - `backend/app/voice/ws.py`
 - Core services:
@@ -171,13 +191,22 @@ Supporting tables:
   - `backend/app/services/grading_service.py`
   - `backend/app/services/manager_feed_service.py`
   - `backend/app/services/manager_action_service.py`
+  - `backend/app/services/auth_service.py`
+  - `backend/app/services/transcript_cleanup_service.py`
+  - `backend/app/services/notification_service.py`
+  - `backend/app/services/session_postprocess_service.py`
   - `backend/app/services/storage_service.py`
+- Async tasks:
+  - `backend/app/tasks/celery_app.py`
+  - `backend/app/tasks/post_session_tasks.py`
 - Migrations:
   - `backend/alembic/`
   - `backend/alembic/versions/20260305_0001_initial_schema.py`
   - `backend/alembic/versions/20260305_0002_scorecard_weakness_tags.py`
   - `backend/alembic/versions/20260305_0003_org_audit_and_indexes.py`
+  - `backend/alembic/versions/20260305_0004_auth_fields_and_indexes.py`
 - Tests:
+  - `backend/tests/test_endpoint_conformance.py`
   - `backend/tests/test_manager_rep_flow.py`
   - `backend/tests/test_auth_rbac.py`
   - `backend/tests/test_org_data_guardrails.py`
@@ -214,7 +243,7 @@ pytest
 ```
 
 Current status:
-- tests pass (`17 passed`)
+- tests pass (`20 passed`)
 
 ## What Is Stubbed vs Production-Ready
 
@@ -230,6 +259,8 @@ Stubbed integrations:
 - Deepgram STT (real API path implemented with mock fallback)
 - LLM conversation provider (OpenAI streaming path implemented with mock fallback)
 - ElevenLabs TTS (streaming path implemented with mock fallback)
+- manager notifications (service hook implemented; delivery currently log/email-flag mode)
+- Whisper cleanup (hook implemented; provider execution gated by config + retrievable audio path)
 
 ## Required Next Steps (Priority Order)
 
@@ -243,20 +274,26 @@ Stubbed integrations:
    - next: benchmark barge-in cancel latency against <=150ms target with provider-backed runs
 
 3. Auth and authorization
+   - local auth endpoints implemented (`/auth/register`, `/auth/login`, `/auth/refresh`)
    - header + JWT actor resolution implemented
    - org-level endpoint guards implemented
    - external IdP validation baseline implemented (`JWT_JWKS_URL`)
    - next: finalize provider-specific token lifecycle (rotation, tenant issuer policy)
 
 4. Infra readiness
-   - add Alembic migrations (implemented through rev `20260305_0003`)
+   - add Alembic migrations (implemented through rev `20260305_0004`)
    - structured logging + tracing implemented (JSON logs, request/session trace IDs)
-   - configure Redis + Postgres + object storage in deployment
+   - Celery task scaffolding implemented for post-session workflows
+   - next: configure Redis + Postgres + object storage + worker deployment in staging
 
 5. Performance and reliability
    - load test ramp harness implemented (`50,100,200` stages, SLO gates, JSON reports)
    - next: run staged benchmarks in deployed env and enforce CI gating on SLO failures
    - next: test event loss guarantees and reconnect behavior under network churn
+
+7. Notification delivery
+   - manager notification service hook implemented (post-session)
+   - next: wire actual email/push providers (SES/SendGrid + FCM/APNs) with retry/backoff
 
 6. Frontend integration
    - mobile-first rep UI (iOS/Android): login, assignments, session start, live WS drill, score fetch implemented
