@@ -1,3 +1,5 @@
+import time
+
 from sqlalchemy import select
 
 from app.db.session import SessionLocal
@@ -17,7 +19,7 @@ def _create_assignment(client, seed_org: dict[str, str]) -> dict:
     return response.json()
 
 
-def _run_session(client, seed_org: dict[str, str], assignment_id: str) -> str:
+def _run_session(client, seed_org: dict[str, str], assignment_id: str, *, trigger_barge_in: bool = False) -> str:
     session_resp = client.post(
         "/rep/sessions",
         json={
@@ -43,8 +45,12 @@ def _run_session(client, seed_org: dict[str, str], assignment_id: str) -> str:
         )
 
         saw_commit = False
-        for _ in range(30):
+        barge_in_sent = False
+        for _ in range(80):
             msg = ws.receive_json()
+            if trigger_barge_in and not barge_in_sent and msg["type"] == "server.ai.audio.chunk":
+                ws.send_json({"type": "client.vad.state", "sequence": 2, "payload": {"speaking": True}})
+                barge_in_sent = True
             if msg["type"] == "server.turn.committed":
                 saw_commit = True
                 break
@@ -67,7 +73,7 @@ def test_assignment_visibility_for_rep(client, seed_org):
 
 def test_ws_ledger_replay_and_feed(client, seed_org):
     assignment = _create_assignment(client, seed_org)
-    session_id = _run_session(client, seed_org, assignment["id"])
+    session_id = _run_session(client, seed_org, assignment["id"], trigger_barge_in=True)
 
     replay_resp = client.get(f"/manager/sessions/{session_id}/replay")
     assert replay_resp.status_code == 200
@@ -79,6 +85,8 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     assert replay["transport_metrics"]["audio_frame_count"] > 0
     assert replay["scorecard"] is not None
     assert "weakness_tags" in replay["scorecard"]
+    assert replay["transport_metrics"]["barge_in_count"] >= 1
+    assert replay["interruption_timeline"]
 
     feed_resp = client.get("/manager/feed", params={"manager_id": seed_org["manager_id"]})
     assert feed_resp.status_code == 200
@@ -137,9 +145,14 @@ def test_event_persistence_integrity(client, seed_org):
     assignment = _create_assignment(client, seed_org)
     session_id = _run_session(client, seed_org, assignment["id"])
 
-    db = SessionLocal()
-    events = db.scalars(select(SessionEvent).where(SessionEvent.session_id == session_id)).all()
-    db.close()
+    events = []
+    for _ in range(20):
+        db = SessionLocal()
+        events = db.scalars(select(SessionEvent).where(SessionEvent.session_id == session_id)).all()
+        db.close()
+        if events:
+            break
+        time.sleep(0.02)
 
     assert len(events) > 0
     event_ids = {event.event_id for event in events}

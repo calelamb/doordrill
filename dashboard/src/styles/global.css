@@ -150,7 +150,7 @@ button:disabled {
 .metrics-row {
   margin-top: 12px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -274,6 +274,10 @@ button:disabled {
   }
 
   .metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .metrics-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

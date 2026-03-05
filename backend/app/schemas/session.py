@@ -28,6 +28,7 @@ class SessionReplayResponse(BaseModel):
     audio_artifacts: list[dict[str, Any]]
     transcript_turns: list[dict[str, Any]]
     objection_timeline: list[dict[str, Any]]
+    interruption_timeline: list[dict[str, Any]] = Field(default_factory=list)
     stage_timeline: list[dict[str, Any]] = Field(default_factory=list)
     transport_metrics: dict[str, Any] = Field(default_factory=dict)
     scorecard: dict[str, Any] | None

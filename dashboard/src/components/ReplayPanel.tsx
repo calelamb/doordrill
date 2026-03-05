@@ -83,6 +83,10 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
           <span>Turns</span>
           <strong>{replay.transport_metrics.turn_count ?? 0}</strong>
         </div>
+        <div className="metric">
+          <span>Barge-ins</span>
+          <strong>{replay.transport_metrics.barge_in_count ?? 0}</strong>
+        </div>
       </div>
 
       <div className="two-col">
@@ -129,6 +133,22 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
           </div>
         </section>
       </div>
+
+      <section>
+        <h3>Interruption Timeline</h3>
+        <ul className="timeline">
+          {replay.interruption_timeline.length === 0 ? <li className="muted">No interruptions detected.</li> : null}
+          {replay.interruption_timeline.map((interrupt) => (
+            <li key={interrupt.event_id}>
+              <span>{interrupt.sequence}</span>
+              <strong>{interrupt.reason}</strong>
+              <small>
+                {new Date(interrupt.at).toLocaleTimeString()} · {interrupt.latency_ms}ms
+              </small>
+            </li>
+          ))}
+        </ul>
+      </section>
 
       <section>
         <h3>Transcript</h3>

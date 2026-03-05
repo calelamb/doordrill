@@ -10,7 +10,7 @@ from app.models.assignment import Assignment
 from app.models.scenario import Scenario
 from app.models.scorecard import ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
-from app.models.session import SessionArtifact, SessionTurn
+from app.models.session import SessionArtifact, SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, ReviewReason, UserRole
 from app.models.user import User
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
@@ -306,6 +306,11 @@ def get_session_replay(
     artifacts = db.scalars(
         select(SessionArtifact).where(SessionArtifact.session_id == session_id, SessionArtifact.artifact_type == "audio")
     ).all()
+    state_events = db.scalars(
+        select(SessionEvent)
+        .where(SessionEvent.session_id == session_id, SessionEvent.event_type == "server.session.state")
+        .order_by(SessionEvent.event_ts.asc())
+    ).all()
 
     transcript_turns = [
         {
@@ -341,9 +346,25 @@ def get_session_replay(
 
     total_audio_duration_ms = 0
     total_audio_frames = 0
+    total_barge_ins = 0
     for artifact in artifacts:
         total_audio_duration_ms += int(artifact.metadata_json.get("duration_ms", 0))
         total_audio_frames += int(artifact.metadata_json.get("frame_count", 0))
+        total_barge_ins += int(artifact.metadata_json.get("barge_in_count", 0))
+
+    interruption_timeline = []
+    for event in state_events:
+        if event.payload.get("state") != "barge_in_detected":
+            continue
+        interruption_timeline.append(
+            {
+                "event_id": event.event_id,
+                "at": event.payload.get("at", event.event_ts.isoformat()),
+                "reason": event.payload.get("reason", "unknown"),
+                "latency_ms": int(event.payload.get("latency_ms", 0)),
+                "sequence": event.sequence,
+            }
+        )
 
     return SessionReplayResponse(
         session_id=session.id,
@@ -359,12 +380,14 @@ def get_session_replay(
         ],
         transcript_turns=transcript_turns,
         objection_timeline=objection_timeline,
+        interruption_timeline=interruption_timeline,
         stage_timeline=stage_timeline,
         transport_metrics={
             "audio_duration_ms": total_audio_duration_ms,
             "audio_frame_count": total_audio_frames,
             "turn_count": len(transcript_turns),
             "objection_turn_count": len(objection_timeline),
+            "barge_in_count": max(total_barge_ins, len(interruption_timeline)),
         },
         scorecard=(
             {

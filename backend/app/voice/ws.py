@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,8 @@ router = APIRouter(tags=["voice"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
+SUPPORTED_CLIENT_EVENTS = {"client.audio.chunk", "client.vad.state", "client.session.end"}
+
 
 try:
     event_buffer = RedisEventBuffer(settings.redis_url) if settings.redis_url else InMemoryEventBuffer()
@@ -35,6 +38,10 @@ ledger = SessionLedgerService(buffer=event_buffer)
 orchestrator = ConversationOrchestrator()
 grading_service = GradingService()
 providers = ProviderSuite.from_settings(settings)
+
+
+def _normalize_ts(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 async def _send_event(websocket: WebSocket, event_type: str, payload: dict[str, Any], sequence: int) -> None:
@@ -60,10 +67,18 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         db.close()
         return
 
+    incoming: asyncio.Queue[WsEvent] = asyncio.Queue(maxsize=1000)
+    disconnected = asyncio.Event()
     server_sequence = 0
     last_flush = time.monotonic()
     audio_frame_count = 0
     total_audio_duration_ms = 0
+    barge_in_count = 0
+
+    ai_speaking = False
+    ai_speaking_started_at: datetime | None = None
+    interrupt_signal_at: datetime | None = None
+    interrupt_signal_reason: str | None = None
 
     async def maybe_flush(force: bool = False) -> None:
         nonlocal last_flush
@@ -81,22 +96,16 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "type": msg.type,
                 "direction": direction.value,
                 "sequence": msg.sequence or 0,
-                "timestamp": msg.timestamp.isoformat(),
+                "timestamp": _normalize_ts(msg.timestamp).isoformat(),
                 "payload": msg.payload,
             },
         )
 
-    def _derive_rep_turn_window(msg: WsEvent) -> tuple[datetime, datetime]:
-        rep_started_at = msg.timestamp if msg.timestamp.tzinfo else msg.timestamp.replace(tzinfo=timezone.utc)
-        duration_ms = int(msg.payload.get("utterance_duration_ms", 0) or 0)
-        if duration_ms <= 0:
-            duration_ms = max(150, len(str(msg.payload.get("transcript_hint", ""))) * 22)
-        rep_ended_at = rep_started_at + timedelta(milliseconds=duration_ms)
-        return rep_started_at, rep_ended_at
-
-    try:
+    async def emit_session_state(payload: dict[str, Any]) -> None:
+        nonlocal server_sequence
+        body = {"session_id": session_id, **payload}
         server_sequence += 1
-        await _send_event(websocket, "server.session.state", {"state": "connected", "session_id": session_id}, server_sequence)
+        await _send_event(websocket, "server.session.state", body, server_sequence)
         await ledger.buffer_event(
             session_id=session_id,
             event={
@@ -104,16 +113,79 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "direction": EventDirection.SERVER.value,
                 "sequence": server_sequence,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "payload": {"state": "connected", "session_id": session_id},
+                "payload": body,
             },
         )
+
+    def set_interrupt(reason: str, ts: datetime | None = None) -> None:
+        nonlocal interrupt_signal_at, interrupt_signal_reason
+        if interrupt_signal_at is not None:
+            return
+        interrupt_signal_at = ts or datetime.now(timezone.utc)
+        interrupt_signal_reason = reason
+
+    def consume_interrupt() -> tuple[datetime | None, str | None]:
+        nonlocal interrupt_signal_at, interrupt_signal_reason
+        at = interrupt_signal_at
+        reason = interrupt_signal_reason
+        interrupt_signal_at = None
+        interrupt_signal_reason = None
+        return at, reason
+
+    def _derive_rep_turn_window(msg: WsEvent) -> tuple[datetime, datetime]:
+        rep_started_at = _normalize_ts(msg.timestamp)
+        duration_ms = int(msg.payload.get("utterance_duration_ms", 0) or 0)
+        if duration_ms <= 0:
+            duration_ms = max(150, len(str(msg.payload.get("transcript_hint", ""))) * 22)
+        rep_ended_at = rep_started_at + timedelta(milliseconds=duration_ms)
+        return rep_started_at, rep_ended_at
+
+    async def receive_loop() -> None:
+        nonlocal ai_speaking
+        while True:
+            try:
+                raw = await websocket.receive_json()
+            except WebSocketDisconnect:
+                disconnected.set()
+                break
+            except Exception:
+                disconnected.set()
+                logger.exception("WebSocket receive error", extra={"session_id": session_id})
+                break
+
+            try:
+                msg = WsEvent.model_validate(raw)
+            except Exception:
+                logger.warning("Dropped malformed websocket message", extra={"session_id": session_id, "raw": raw})
+                continue
+
+            if msg.type == "client.vad.state" and bool(msg.payload.get("speaking", False)):
+                set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
+            elif ai_speaking and msg.type == "client.audio.chunk":
+                set_interrupt("audio_chunk", _normalize_ts(msg.timestamp))
+
+            if msg.type == "client.session.end":
+                disconnected.set()
+
+            await incoming.put(msg)
+
+    receiver_task = asyncio.create_task(receive_loop())
+
+    try:
+        await emit_session_state({"state": "connected"})
         await maybe_flush()
 
         while True:
-            raw = await websocket.receive_json()
-            msg = WsEvent.model_validate(raw)
+            if disconnected.is_set() and incoming.empty():
+                break
 
-            if msg.type not in {"client.audio.chunk", "client.vad.state", "client.session.end"}:
+            try:
+                msg = await asyncio.wait_for(incoming.get(), timeout=0.25)
+            except TimeoutError:
+                await maybe_flush()
+                continue
+
+            if msg.type not in SUPPORTED_CLIENT_EVENTS:
                 server_sequence += 1
                 await _send_event(
                     websocket,
@@ -128,27 +200,16 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
             if msg.type == "client.vad.state":
                 speaking = bool(msg.payload.get("speaking", False))
-                server_sequence += 1
-                await _send_event(
-                    websocket,
-                    "server.session.state",
-                    {"state": "rep_speaking" if speaking else "rep_idle", "session_id": session_id},
-                    server_sequence,
-                )
-                await ledger.buffer_event(
-                    session_id=session_id,
-                    event={
-                        "type": "server.session.state",
-                        "direction": EventDirection.SERVER.value,
-                        "sequence": server_sequence,
-                        "payload": {"state": "rep_speaking" if speaking else "rep_idle"},
-                    },
-                )
+                if speaking and ai_speaking:
+                    set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
+                await emit_session_state({"state": "rep_speaking" if speaking else "rep_idle"})
                 await maybe_flush()
                 continue
 
             if msg.type == "client.session.end":
                 break
+
+            consume_interrupt()
 
             stt_result = await providers.stt.finalize_utterance(msg.payload)
             rep_text = stt_result.text
@@ -203,32 +264,32 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             await maybe_flush()
 
             if plan.stage_changed:
-                server_sequence += 1
-                stage_payload = {
-                    "state": plan.stage_after,
-                    "transition": {"from": plan.stage_before, "to": plan.stage_after},
-                    "session_id": session_id,
-                }
-                await _send_event(websocket, "server.session.state", stage_payload, server_sequence)
-                await ledger.buffer_event(
-                    session_id=session_id,
-                    event={
-                        "type": "server.session.state",
-                        "direction": EventDirection.SERVER.value,
-                        "sequence": server_sequence,
-                        "payload": stage_payload,
-                    },
+                await emit_session_state(
+                    {
+                        "state": plan.stage_after,
+                        "transition": {"from": plan.stage_before, "to": plan.stage_after},
+                    }
                 )
                 await maybe_flush()
 
             ai_text_parts: list[str] = []
             ai_started_at: datetime | None = None
             turn_audio_duration_ms = 0
+            ai_interrupted = False
+
+            ai_speaking = True
+            ai_speaking_started_at = datetime.now(timezone.utc)
+            await emit_session_state({"state": "ai_speaking", "stage": plan.stage_after})
+
             async for chunk in providers.llm.stream_reply(
                 rep_text=rep_text,
                 stage=plan.stage_after,
                 system_prompt=plan.system_prompt,
             ):
+                if interrupt_signal_at is not None:
+                    ai_interrupted = True
+                    break
+
                 if not chunk:
                     continue
                 if ai_started_at is None:
@@ -253,6 +314,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 )
 
                 async for audio_chunk in providers.tts.stream_audio(chunk):
+                    if interrupt_signal_at is not None:
+                        ai_interrupted = True
+                        break
+
                     audio_frame_count += 1
                     chunk_duration_ms = int(audio_chunk.get("duration_ms", 0))
                     total_audio_duration_ms += chunk_duration_ms
@@ -276,12 +341,39 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         },
                     )
 
+                if ai_interrupted:
+                    break
                 await maybe_flush()
 
+            interruption_payload: dict[str, Any] | None = None
+            if ai_interrupted:
+                barge_at, reason = consume_interrupt()
+                barge_at = barge_at or datetime.now(timezone.utc)
+                elapsed_ms = max(
+                    0,
+                    int((barge_at - (ai_speaking_started_at or barge_at)).total_seconds() * 1000),
+                )
+                barge_in_count += 1
+                interruption_payload = {
+                    "state": "barge_in_detected",
+                    "reason": reason or "unknown",
+                    "barge_in_count": barge_in_count,
+                    "latency_ms": elapsed_ms,
+                    "at": barge_at.isoformat(),
+                }
+                await emit_session_state(interruption_payload)
+            else:
+                consume_interrupt()
+
+            ai_speaking = False
+            await emit_session_state({"state": "ai_idle", "interrupted": ai_interrupted})
+
             ai_text = "".join(ai_text_parts).strip()
+            if ai_interrupted and not ai_text:
+                ai_text = "(response interrupted)"
             orchestrator.mark_ai_turn(session_id=session_id)
             ai_now = datetime.now(timezone.utc)
-            ai_started_at = ai_started_at or ai_now
+            ai_started_at = ai_started_at or ai_speaking_started_at or ai_now
             ai_duration_ms = max(120, turn_audio_duration_ms)
             ai_ended_at = ai_started_at + timedelta(milliseconds=ai_duration_ms)
             ai_turn = ledger.commit_turn(
@@ -303,6 +395,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "session_id": session_id,
                 "stage": plan.stage_after,
                 "objection_tags": plan.objection_tags,
+                "interrupted": ai_interrupted,
+                "interruption": interruption_payload,
             }
             await _send_event(websocket, "server.turn.committed", turn_payload, server_sequence)
             await ledger.buffer_event(
@@ -319,6 +413,14 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        receiver_task.cancel()
+        try:
+            await receiver_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # pragma: no cover
+            logger.exception("Receiver task cleanup error", extra={"session_id": session_id})
+
         try:
             await maybe_flush(force=True)
             transcript_artifact = ledger.compact_session(db, session_id)
@@ -333,6 +435,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         "channels": 1,
                         "frame_count": audio_frame_count,
                         "duration_ms": total_audio_duration_ms,
+                        "barge_in_count": barge_in_count,
                         "provider": providers.tts.provider_name,
                     },
                 )
@@ -363,6 +466,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "session_id": session_id,
                     "transcript_artifact": transcript_artifact.storage_key,
                     "audio_frames": audio_frame_count,
+                    "barge_in_count": barge_in_count,
                 },
             )
         except Exception:  # pragma: no cover

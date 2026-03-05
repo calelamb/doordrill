@@ -33,6 +33,13 @@ export type ReplayResponse = {
     turn_index: number;
     objection_tags: string[];
   }>;
+  interruption_timeline: Array<{
+    event_id: string;
+    at: string;
+    reason: string;
+    latency_ms: number;
+    sequence: number;
+  }>;
   stage_timeline: Array<{
     stage: string;
     entered_at: string;
