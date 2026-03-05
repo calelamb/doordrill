@@ -50,3 +50,37 @@ export type ReplayResponse = {
     weakness_tags: string[];
   };
 };
+
+export type ManagerAnalytics = {
+  manager_id: string;
+  assignment_count: number;
+  completed_assignment_count: number;
+  sessions_count: number;
+  active_rep_count: number;
+  average_score: number | null;
+  completion_rate: number;
+};
+
+export type RepProgress = {
+  rep_id: string;
+  session_count: number;
+  scored_session_count: number;
+  average_score: number | null;
+  latest_sessions: Array<{
+    session_id: string;
+    started_at: string | null;
+    status: string | null;
+    overall_score: number | null;
+  }>;
+};
+
+export type ManagerActionLog = {
+  id: string;
+  manager_id: string;
+  action_type: string;
+  target_type: string;
+  target_id: string;
+  summary: string | null;
+  payload: Record<string, unknown>;
+  occurred_at: string;
+};

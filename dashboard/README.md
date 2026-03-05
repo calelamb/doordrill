@@ -5,6 +5,9 @@ Vite + React manager console scaffold for:
 - replay details
 - score override
 - follow-up assignment creation
+- manager analytics
+- rep progress snapshot
+- manager action timeline
 
 ## Run
 

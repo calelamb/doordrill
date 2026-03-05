@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
 
 import { FeedList } from "./components/FeedList";
+import { PerformancePanel } from "./components/PerformancePanel";
 import { ReplayPanel } from "./components/ReplayPanel";
-import { fetchManagerFeed, fetchReplay } from "./lib/api";
-import type { FeedItem, ReplayResponse } from "./lib/types";
+import { fetchManagerActions, fetchManagerAnalytics, fetchManagerFeed, fetchReplay, fetchRepProgress } from "./lib/api";
+import type { FeedItem, ManagerActionLog, ManagerAnalytics, ReplayResponse, RepProgress } from "./lib/types";
 
 export function App() {
   const [managerId, setManagerId] = useState("");
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [replay, setReplay] = useState<ReplayResponse | null>(null);
+  const [analytics, setAnalytics] = useState<ManagerAnalytics | null>(null);
+  const [repProgress, setRepProgress] = useState<RepProgress | null>(null);
+  const [actions, setActions] = useState<ManagerActionLog[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,6 +26,12 @@ export function App() {
     try {
       const items = await fetchManagerFeed(managerId);
       setFeed(items);
+      const [analyticsData, actionData] = await Promise.all([
+        fetchManagerAnalytics(managerId),
+        fetchManagerActions(managerId)
+      ]);
+      setAnalytics(analyticsData);
+      setActions(actionData);
       if (!activeSessionId && items[0]) {
         setActiveSessionId(items[0].session_id);
       }
@@ -41,6 +51,11 @@ export function App() {
     try {
       const data = await fetchReplay(managerId, sessionId);
       setReplay(data);
+      const feedItem = feed.find((item) => item.session_id === sessionId);
+      if (feedItem) {
+        const progress = await fetchRepProgress(managerId, feedItem.rep_id);
+        setRepProgress(progress);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch replay");
     } finally {
@@ -92,6 +107,9 @@ export function App() {
             }
           }}
         />
+      </section>
+      <section className="layout secondary">
+        <PerformancePanel analytics={analytics} repProgress={repProgress} actions={actions} />
       </section>
     </main>
   );

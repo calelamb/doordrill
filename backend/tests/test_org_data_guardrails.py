@@ -88,3 +88,12 @@ def test_manager_action_log_written_for_assignment(client, seed_org):
 
     assert logs
     assert logs[0].action_type in {"assignment.created", "assignment.followup_created"}
+
+    actions_resp = client.get(
+        "/manager/actions",
+        params={"manager_id": seed_org["manager_id"], "limit": 10},
+        headers={"x-user-id": seed_org["manager_id"], "x-user-role": "manager"},
+    )
+    assert actions_resp.status_code == 200
+    actions = actions_resp.json()["items"]
+    assert any(item["action_type"] == "assignment.created" for item in actions)
