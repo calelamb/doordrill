@@ -54,3 +54,13 @@ See `architecture.md` for the full system design, data model, API specification,
 ## Status
 
 Early stage. Currently in design and prototyping.
+
+## Backend Progress
+
+The initial FastAPI backend foundation has been implemented in [`backend/`](./backend):
+
+- Assignment workflow (`manager -> rep`)
+- Realtime WebSocket voice session contract
+- Immutable session interaction ledger
+- Post-session grading + manager override workflow
+- Manager replay endpoint with transcript + artifact links

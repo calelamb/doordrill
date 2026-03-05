@@ -1,0 +1,30 @@
+[project]
+name = "doordrill-backend"
+version = "0.1.0"
+description = "DoorDrill v1 backend with realtime voice ledger and manager workflows"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "sqlalchemy>=2.0.36",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.6.0",
+  "redis>=5.2.0",
+  "httpx>=0.28.0",
+  "python-multipart>=0.0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  "anyio>=4.6.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"
