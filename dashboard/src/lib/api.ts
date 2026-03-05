@@ -1,0 +1,64 @@
+import type { FeedItem, ReplayResponse } from "./types";
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+
+const managerHeaders = (managerId: string) => ({
+  "x-user-id": managerId,
+  "x-user-role": "manager",
+  "content-type": "application/json"
+});
+
+export async function fetchManagerFeed(managerId: string): Promise<FeedItem[]> {
+  const response = await fetch(`${API_BASE}/manager/feed?manager_id=${encodeURIComponent(managerId)}`, {
+    headers: managerHeaders(managerId)
+  });
+  if (!response.ok) {
+    throw new Error(`feed request failed: ${response.status}`);
+  }
+  const body = await response.json();
+  return body.items ?? [];
+}
+
+export async function fetchReplay(managerId: string, sessionId: string): Promise<ReplayResponse> {
+  const response = await fetch(`${API_BASE}/manager/sessions/${sessionId}/replay`, {
+    headers: managerHeaders(managerId)
+  });
+  if (!response.ok) {
+    throw new Error(`replay request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function submitOverride(
+  managerId: string,
+  scorecardId: string,
+  payload: { reason_code: string; override_score?: number; notes?: string }
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/manager/scorecards/${scorecardId}`, {
+    method: "PATCH",
+    headers: managerHeaders(managerId),
+    body: JSON.stringify({ reviewer_id: managerId, ...payload })
+  });
+  if (!response.ok) {
+    throw new Error(`override request failed: ${response.status}`);
+  }
+}
+
+export async function createFollowup(
+  managerId: string,
+  scorecardId: string,
+  scenarioId: string
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/manager/scorecards/${scorecardId}/followup-assignment`, {
+    method: "POST",
+    headers: managerHeaders(managerId),
+    body: JSON.stringify({
+      scenario_id: scenarioId,
+      assigned_by: managerId,
+      retry_policy: { max_attempts: 2 }
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`follow-up assignment request failed: ${response.status}`);
+  }
+}
