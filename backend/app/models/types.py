@@ -37,3 +37,4 @@ class ReviewReason(str, enum.Enum):
     HARSH_AI = "harsh_ai"
     POLICY_OVERRIDE = "policy_override"
     MANAGER_COACHING = "manager_coaching"
+    REVIEW_ONLY = "review_only"

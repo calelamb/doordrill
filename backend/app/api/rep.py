@@ -16,9 +16,11 @@ from app.schemas.assignment import AssignmentResponse
 from app.schemas.notification import DeviceTokenCreateRequest, DeviceTokenResponse
 from app.schemas.session import SessionCreateRequest, SessionResponse
 from app.services.notification_service import NotificationService
+from app.services.manager_review_service import ManagerReviewService
 
 router = APIRouter(prefix="/rep", tags=["rep"])
 notification_service = NotificationService()
+review_service = ManagerReviewService()
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -110,6 +112,7 @@ def get_session_with_feedback(
         raise HTTPException(status_code=403, detail="rep can only access their own sessions")
 
     scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
+    manager_coaching_note = review_service.latest_rep_visible_note(db, session_id=session_id)
     return {
         "session": SessionResponse.model_validate(session).model_dump(),
         "scorecard": (
@@ -123,6 +126,19 @@ def get_session_with_feedback(
                 "weakness_tags": scorecard.weakness_tags,
             }
             if scorecard
+            else None
+        ),
+        "manager_coaching_note": (
+            {
+                "id": manager_coaching_note.id,
+                "scorecard_id": manager_coaching_note.scorecard_id,
+                "reviewer_id": manager_coaching_note.reviewer_id,
+                "note": manager_coaching_note.note,
+                "visible_to_rep": manager_coaching_note.visible_to_rep,
+                "weakness_tags": manager_coaching_note.weakness_tags,
+                "created_at": manager_coaching_note.created_at.isoformat() if manager_coaching_note.created_at else None,
+            }
+            if manager_coaching_note
             else None
         ),
     }

@@ -8,17 +8,25 @@ from app.core.auth import Actor, require_manager
 from app.db.session import get_db
 from app.models.assignment import Assignment
 from app.models.scenario import Scenario
-from app.models.scorecard import ManagerReview, Scorecard
+from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, ReviewReason, SessionStatus, UserRole
 from app.models.user import Team, User
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
 from app.schemas.notification import NotificationDeliveryResponse
-from app.schemas.scorecard import ManagerReviewResponse, ScorecardOverrideRequest
+from app.schemas.scorecard import (
+    BulkReviewRequest,
+    BulkReviewResponse,
+    CoachingNoteCreateRequest,
+    ManagerCoachingNoteResponse,
+    ManagerReviewResponse,
+    ScorecardOverrideRequest,
+)
 from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
 from app.services.manager_action_service import ManagerActionService
 from app.services.manager_feed_service import ManagerFeedService
+from app.services.manager_review_service import ManagerReviewService
 from app.services.notification_service import NotificationService
 from app.services.storage_service import StorageService
 
@@ -26,6 +34,7 @@ router = APIRouter(prefix="/manager", tags=["manager"])
 feed_service = ManagerFeedService()
 storage_service = StorageService()
 action_service = ManagerActionService()
+review_service = ManagerReviewService()
 notification_service = NotificationService()
 
 
@@ -46,6 +55,14 @@ def _get_scenario_or_404(db: Session, scenario_id: str) -> Scenario:
     if scenario is None:
         raise HTTPException(status_code=404, detail="scenario not found")
     return scenario
+
+
+def _serialize_review(review: ManagerReview) -> ManagerReviewResponse:
+    return ManagerReviewResponse.model_validate(review)
+
+
+def _serialize_coaching_note(note: ManagerCoachingNote) -> ManagerCoachingNoteResponse:
+    return ManagerCoachingNoteResponse.model_validate(note)
 
 
 @router.get("/team")
@@ -513,6 +530,15 @@ def get_session_replay(
 
     turns = db.scalars(select(SessionTurn).where(SessionTurn.session_id == session_id).order_by(SessionTurn.turn_index.asc())).all()
     scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
+    reviews: list[ManagerReview] = []
+    coaching_notes: list[ManagerCoachingNote] = []
+    if scorecard is not None:
+        reviews = db.scalars(
+            select(ManagerReview)
+            .where(ManagerReview.scorecard_id == scorecard.id)
+            .order_by(ManagerReview.reviewed_at.desc())
+        ).all()
+        coaching_notes = review_service.list_coaching_notes(db, scorecard_id=scorecard.id)
     artifacts = db.scalars(
         select(SessionArtifact).where(SessionArtifact.session_id == session_id, SessionArtifact.artifact_type == "audio")
     ).all()
@@ -612,6 +638,9 @@ def get_session_replay(
             if scorecard
             else None
         ),
+        manager_reviews=[_serialize_review(review) for review in reviews],
+        coaching_notes=[_serialize_coaching_note(note) for note in coaching_notes],
+        latest_coaching_note=_serialize_coaching_note(coaching_notes[0]) if coaching_notes else None,
     )
 
 
@@ -671,6 +700,113 @@ def override_scorecard(
     db.commit()
     db.refresh(review)
     return review
+
+
+@router.post("/sessions/bulk-review", response_model=BulkReviewResponse)
+def bulk_review_sessions(
+    payload: BulkReviewRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> BulkReviewResponse:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated reviewer required")
+
+    reviewer = _get_user_or_404(db, actor.user_id, "reviewer")
+    _ensure_same_org(actor, reviewer.org_id)
+
+    result = review_service.bulk_mark_reviewed(
+        db,
+        reviewer=reviewer,
+        session_ids=payload.session_ids,
+        idempotency_key=payload.idempotency_key,
+        notes=payload.notes,
+    )
+
+    if result["created_count"]:
+        action_service.log(
+            db,
+            manager_id=reviewer.id,
+            action_type="scorecard.bulk_reviewed",
+            target_type="session_batch",
+            target_id=payload.idempotency_key,
+            summary="Manager marked multiple scored sessions reviewed",
+            payload={
+                "created_count": result["created_count"],
+                "requested_count": result["requested_count"],
+                "session_ids": payload.session_ids,
+            },
+        )
+    db.commit()
+    return BulkReviewResponse.model_validate(result)
+
+
+@router.post("/scorecards/{scorecard_id}/coaching-notes", response_model=ManagerCoachingNoteResponse)
+def create_coaching_note(
+    scorecard_id: str,
+    payload: CoachingNoteCreateRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> ManagerCoachingNoteResponse:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated reviewer required")
+
+    reviewer = _get_user_or_404(db, actor.user_id, "reviewer")
+    _ensure_same_org(actor, reviewer.org_id)
+
+    coaching_note = review_service.create_coaching_note(
+        db,
+        scorecard_id=scorecard_id,
+        reviewer=reviewer,
+        note=payload.note,
+        visible_to_rep=payload.visible_to_rep,
+        weakness_tags=payload.weakness_tags,
+    )
+    if coaching_note is None:
+        raise HTTPException(status_code=404, detail="scorecard not found or not owned by reviewer")
+
+    action_service.log(
+        db,
+        manager_id=reviewer.id,
+        action_type="scorecard.coaching_note_added",
+        target_type="scorecard",
+        target_id=scorecard_id,
+        summary="Manager added coaching note to scorecard",
+        payload={
+            "visible_to_rep": payload.visible_to_rep,
+            "weakness_tags": payload.weakness_tags,
+        },
+    )
+    db.commit()
+    db.refresh(coaching_note)
+    return _serialize_coaching_note(coaching_note)
+
+
+@router.get("/scorecards/{scorecard_id}/coaching-notes", response_model=list[ManagerCoachingNoteResponse])
+def get_coaching_notes(
+    scorecard_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> list[ManagerCoachingNoteResponse]:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated reviewer required")
+
+    reviewer = _get_user_or_404(db, actor.user_id, "reviewer")
+    _ensure_same_org(actor, reviewer.org_id)
+
+    scorecard = db.scalar(select(Scorecard).where(Scorecard.id == scorecard_id))
+    if scorecard is None:
+        raise HTTPException(status_code=404, detail="scorecard not found")
+
+    session = db.scalar(select(DrillSession).where(DrillSession.id == scorecard.session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="source session not found")
+
+    assignment = db.scalar(select(Assignment).where(Assignment.id == session.assignment_id))
+    if assignment is None or (reviewer.role != UserRole.ADMIN and assignment.assigned_by != reviewer.id):
+        raise HTTPException(status_code=403, detail="cannot access coaching notes for another manager's session")
+
+    notes = review_service.list_coaching_notes(db, scorecard_id=scorecard_id)
+    return [_serialize_coaching_note(note) for note in notes]
 
 
 @router.get("/actions")

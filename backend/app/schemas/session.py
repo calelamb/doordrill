@@ -3,6 +3,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.scorecard import ManagerCoachingNoteResponse, ManagerReviewResponse
+
 
 class SessionCreateRequest(BaseModel):
     assignment_id: str
@@ -32,6 +34,9 @@ class SessionReplayResponse(BaseModel):
     stage_timeline: list[dict[str, Any]] = Field(default_factory=list)
     transport_metrics: dict[str, Any] = Field(default_factory=dict)
     scorecard: dict[str, Any] | None
+    manager_reviews: list[ManagerReviewResponse] = Field(default_factory=list)
+    coaching_notes: list[ManagerCoachingNoteResponse] = Field(default_factory=list)
+    latest_coaching_note: ManagerCoachingNoteResponse | None = None
 
 
 class ManagerFeedItem(BaseModel):

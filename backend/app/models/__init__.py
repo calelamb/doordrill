@@ -5,7 +5,7 @@ from app.models.manager_action import ManagerActionLog
 from app.models.notification_delivery import NotificationDelivery
 from app.models.postprocess_run import PostprocessRun
 from app.models.prompt_version import PromptVersion
-from app.models.scorecard import ManagerReview, Scorecard
+from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.scenario import Scenario
 from app.models.session import Session, SessionArtifact, SessionEvent, SessionTurn
 from app.models.user import Organization, Team, User
@@ -15,6 +15,7 @@ __all__ = [
     "Base",
     "DeviceToken",
     "ManagerActionLog",
+    "ManagerCoachingNote",
     "ManagerReview",
     "NotificationDelivery",
     "Organization",

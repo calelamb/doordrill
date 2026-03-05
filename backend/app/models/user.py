@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from app.models.assignment import Assignment
     from app.models.manager_action import ManagerActionLog
     from app.models.scenario import Scenario
-    from app.models.scorecard import ManagerReview
+    from app.models.scorecard import ManagerCoachingNote, ManagerReview
     from app.models.session import Session
 
 
@@ -67,4 +67,5 @@ class User(Base, TimestampMixin):
     assignments: Mapped[list["Assignment"]] = relationship(back_populates="rep", foreign_keys="Assignment.rep_id")
     sessions: Mapped[list["Session"]] = relationship(back_populates="rep")
     manager_reviews: Mapped[list["ManagerReview"]] = relationship(back_populates="reviewer")
+    coaching_notes: Mapped[list["ManagerCoachingNote"]] = relationship(back_populates="reviewer")
     action_logs: Mapped[list["ManagerActionLog"]] = relationship(back_populates="manager")
