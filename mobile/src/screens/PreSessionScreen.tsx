@@ -6,7 +6,7 @@ import { ChevronLeft } from "lucide-react-native";
 import BottomSheet, { BottomSheetBackdrop, BottomSheetView } from "@gorhom/bottom-sheet";
 import * as Haptics from "expo-haptics";
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
-import { BlurView } from "expo-blur";
+import { LinearGradient } from "expo-linear-gradient";
 
 import { RootStackParamList } from "../navigation/types";
 import { checkApiReachable, createRepSession, fetchRepAssignments, fetchRepScenario } from "../services/api";
@@ -119,7 +119,7 @@ export function PreSessionScreen({ route, navigation }: Props) {
   const renderBackdrop = useCallback(
     (props: any) => (
       <BottomSheetBackdrop {...props} disappearsOnIndex={-1} appearsOnIndex={0}>
-        <BlurView style={StyleSheet.absoluteFill} tint="dark" intensity={60} />
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.7)' }]} />
       </BottomSheetBackdrop>
     ),
     []
@@ -133,7 +133,7 @@ export function PreSessionScreen({ route, navigation }: Props) {
   };
 
   return (
-    <View style={styles.container}>
+    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
       <BottomSheet
         ref={bottomSheetRef}
         index={0}
@@ -200,18 +200,20 @@ export function PreSessionScreen({ route, navigation }: Props) {
 
         </BottomSheetView>
       </BottomSheet>
-    </View>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
   sheetBackground: {
-    backgroundColor: colors.panel,
+    backgroundColor: "#FDFDFD",
     borderRadius: 32,
+    borderWidth: 1,
+    borderColor: colors.line,
   },
   sheetIndicator: {
-    backgroundColor: colors.line,
+    backgroundColor: "rgba(0, 0, 0, 0.15)",
     width: 40,
   },
   sheetContent: {
@@ -229,7 +231,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: colors.bg,
+    backgroundColor: "rgba(0, 0, 0, 0.05)",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -248,7 +250,7 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: colors.accentSoft,
+    backgroundColor: "rgba(74, 222, 128, 0.12)",
     borderWidth: 2,
     borderColor: colors.accent,
   },
@@ -276,7 +278,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   detailsCard: {
-    backgroundColor: colors.bg,
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
     borderRadius: 24,
     padding: 20,
     gap: 8,
@@ -304,6 +306,8 @@ const styles = StyleSheet.create({
     padding: 12,
     backgroundColor: "#FEE2E2",
     borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#FECACA",
   },
   errorText: {
     color: "#991B1B",

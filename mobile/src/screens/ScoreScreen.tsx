@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState, useRef } from "react";
 import { ActivityIndicator, Animated as RNAnimated, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
 import { UserCircle } from "lucide-react-native";
 import Animated, { FadeInDown, FadeInUp, withSpring } from "react-native-reanimated";
+import { LinearGradient } from "expo-linear-gradient";
+import { BlurView } from "expo-blur";
 
 import { RootStackParamList } from "../navigation/types";
 import { fetchRepSession, fetchRepScenario } from "../services/api";
@@ -44,8 +46,7 @@ function scoreValue(value: number | { score?: number } | undefined): number {
 
 function scoreBand(score: number) {
   if (score < 5) return { bg: "#FEE2E2", text: "#991B1B", border: "#FECACA" };
-  if (score < 7) return { bg: "#FEF3C7", text: "#92400E", border: "#FDE68A" };
-  if (score < 8) return { bg: "#FEF3C7", text: "#92400E", border: "#FDE68A" }; // using amber for 5-7
+  if (score < 8) return { bg: "#FEF3C7", text: "#92400E", border: "#FDE68A" };
   return { bg: "#D1FAE5", text: "#065F46", border: "#A7F3D0" };
 }
 
@@ -167,8 +168,9 @@ export function ScoreScreen({ route, navigation }: Props) {
   const highlights = (scorecard?.highlights ?? []).slice(0, 4);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+    <LinearGradient colors={["#173322", "#0d1f14", "#050a06"]} style={styles.container}>
+      <SafeAreaView style={styles.safeArea}>
+        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         {loading ? (
           <View style={styles.loadingCard}>
             <ActivityIndicator color={colors.accent} />
@@ -202,11 +204,11 @@ export function ScoreScreen({ route, navigation }: Props) {
             {scorecard ? (
               <>
                 <Text style={styles.sectionTitle}>PERFORMANCE BREAKDOWN</Text>
-                <View style={styles.categoriesContainer}>
+                <BlurView intensity={40} tint="light" style={styles.categoriesContainer}>
                   {categories.map((cat, idx) => (
                     <CategoryBar key={cat.key} label={cat.label} score={cat.score} index={idx} />
                   ))}
-                </View>
+                </BlurView>
 
                 <Text style={styles.sectionTitle}>KEY MOMENTS</Text>
                 {highlights.length === 0 ? <Text style={styles.emptyText}>No highlights available.</Text> : null}
@@ -216,24 +218,28 @@ export function ScoreScreen({ route, navigation }: Props) {
                   const quote = hl.transcript_quote || hl.quote || null;
 
                   return (
-                    <Animated.View key={idx} entering={FadeInDown.delay(700 + idx * 100).springify()} style={styles.highlightCard}>
-                      <View style={styles.highlightHeader}>
-                        <View style={[styles.highlightTag, { backgroundColor: isStrong ? colors.accentSoft : "#FEF3C7" }]}> 
-                          <Text style={[styles.highlightTagText, { color: isStrong ? colors.accent : "#92400E" }]}>
-                            {isStrong ? "Strong" : "Improve"}
-                          </Text>
+                    <Animated.View key={idx} entering={FadeInDown.delay(700 + idx * 100).springify()} style={styles.highlightCardWrapper}>
+                      <BlurView intensity={40} tint="light" style={styles.highlightCard}>
+                        <View style={styles.highlightHeader}>
+                          <View style={[styles.highlightTag, { backgroundColor: isStrong ? colors.accentSoft : "#FEF3C7" }]}> 
+                            <Text style={[styles.highlightTagText, { color: isStrong ? colors.accent : "#92400E" }]}>
+                              {isStrong ? "Strong" : "Improve"}
+                            </Text>
+                          </View>
+                          {hl.turn_id ? <Text style={styles.turnRef}>Turn {hl.turn_id.slice(0, 8)}</Text> : null}
                         </View>
-                        {hl.turn_id ? <Text style={styles.turnRef}>Turn {hl.turn_id.slice(0, 8)}</Text> : null}
-                      </View>
-                      <Text style={styles.highlightNote}>{hl.note}</Text>
-                      {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
+                        <Text style={styles.highlightNote}>{hl.note}</Text>
+                        {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
+                      </BlurView>
                     </Animated.View>
                   );
                 })}
 
                 <Text style={styles.sectionTitle}>FEEDBACK</Text>
-                <Animated.View entering={FadeInDown.delay(1000).springify()} style={styles.summaryCard}>
-                  <Text style={styles.summaryText}>{scorecard.ai_summary}</Text>
+                <Animated.View entering={FadeInDown.delay(1000).springify()} style={styles.summaryCardWrapper}>
+                  <BlurView intensity={40} tint="light" style={styles.summaryCard}>
+                    <Text style={styles.summaryText}>{scorecard.ai_summary}</Text>
+                  </BlurView>
                 </Animated.View>
 
                 {managerNote ? (
@@ -269,11 +275,13 @@ export function ScoreScreen({ route, navigation }: Props) {
         )}
       </ScrollView>
     </SafeAreaView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: colors.bg },
+  container: { flex: 1 },
+  safeArea: { flex: 1 },
   content: { padding: 20, paddingBottom: 40 },
   loadingCard: {
     marginTop: 40,
@@ -297,10 +305,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 12,
-    shadowColor: colors.ink,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
+    borderWidth: 1,
   },
   heroValue: {
     fontSize: 64,
@@ -343,6 +348,12 @@ const styles = StyleSheet.create({
   },
   categoriesContainer: {
     gap: 12,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
+    padding: 16,
+    overflow: "hidden",
   },
   categoryRow: {
     gap: 6,
@@ -373,13 +384,16 @@ const styles = StyleSheet.create({
   
   emptyText: { color: colors.muted, fontSize: 14, fontStyle: "italic" },
   
-  highlightCard: {
-    backgroundColor: colors.panel,
+  highlightCardWrapper: {
+    marginBottom: 8,
+    borderRadius: 16,
+    overflow: "hidden",
     borderWidth: 1,
     borderColor: colors.line,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 8,
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
+  },
+  highlightCard: {
+    padding: 16,
   },
   highlightHeader: {
     flexDirection: "row",
@@ -411,17 +425,20 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   
-  summaryCard: {
-    backgroundColor: colors.panel,
+  summaryCardWrapper: {
+    borderRadius: 16,
+    overflow: "hidden",
     borderWidth: 1,
     borderColor: colors.line,
-    borderRadius: 14,
-    padding: 16,
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
+  },
+  summaryCard: {
+    padding: 18,
   },
   summaryText: {
-    fontSize: 14,
+    fontSize: 15,
     color: colors.ink,
-    lineHeight: 22,
+    lineHeight: 24,
   },
   
   managerNoteCard: {
@@ -468,8 +485,8 @@ const styles = StyleSheet.create({
   },
   secondaryCta: {
     flex: 1,
-    backgroundColor: colors.panel,
-    borderWidth: 1.5,
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
+    borderWidth: 1,
     borderColor: colors.line,
     borderRadius: 14,
     paddingVertical: 14,

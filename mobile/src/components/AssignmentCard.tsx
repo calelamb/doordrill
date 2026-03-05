@@ -1,4 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { BlurView } from "expo-blur";
+import { Calendar, Target, Play, RotateCcw } from "lucide-react-native";
 
 import { colors } from "../theme/tokens";
 import { RepAssignment, ScenarioBrief } from "../types";
@@ -25,19 +27,19 @@ function statusStyles(status: string): { chip: object; label: object } {
   const normalized = status.toLowerCase();
   if (normalized === "completed") {
     return {
-      chip: { backgroundColor: "#D9F4E7" },
-      label: { color: "#165A36" }
+      chip: { backgroundColor: "rgba(74, 222, 128, 0.15)", borderWidth: 1, borderColor: "rgba(74, 222, 128, 0.3)" },
+      label: { color: "#4ade80" }
     };
   }
   if (normalized === "in_progress") {
     return {
-      chip: { backgroundColor: "#E2E8FF" },
-      label: { color: "#273D8A" }
+      chip: { backgroundColor: "rgba(59, 130, 246, 0.15)", borderWidth: 1, borderColor: "rgba(59, 130, 246, 0.3)" },
+      label: { color: "#60a5fa" }
     };
   }
   return {
-    chip: { backgroundColor: "#FFE7CF" },
-    label: { color: "#8D461A" }
+    chip: { backgroundColor: "rgba(245, 158, 11, 0.15)", borderWidth: 1, borderColor: "rgba(245, 158, 11, 0.3)" },
+    label: { color: "#fbbf24" }
   };
 }
 
@@ -60,49 +62,80 @@ export function AssignmentCard({ assignment, scenario, disabled = false, onStart
   const target = assignment.min_score_target ?? 80;
 
   return (
-    <View style={[styles.card, assignment.status === "completed" && styles.cardCompleted]}>
-      <View style={styles.headerRow}>
-        <View style={styles.titleContainer}>
-          <Text style={styles.scenarioName} numberOfLines={1}>
-            {scenario?.name || `Scenario ${assignment.scenario_id.slice(0, 8)}`}
-          </Text>
-          {scenario && <DifficultyBadge level={scenario.difficulty} />}
+    <View style={[styles.cardWrapper, assignment.status === "completed" && styles.cardWrapperCompleted]}>
+      <BlurView intensity={40} tint="light" style={[styles.card, assignment.status === "completed" && styles.cardCompleted]}>
+        <View style={styles.headerRow}>
+          <View style={styles.titleContainer}>
+            <Text style={styles.scenarioName} numberOfLines={1}>
+              {scenario?.name || `Scenario ${assignment.scenario_id.slice(0, 8)}`}
+            </Text>
+            {scenario && <DifficultyBadge level={scenario.difficulty} />}
+          </View>
+          <View style={[styles.statusChip, statusTone.chip]}>
+            <Text style={[styles.statusLabel, statusTone.label]}>{assignment.status.replaceAll("_", " ")}</Text>
+          </View>
         </View>
-        <View style={[styles.statusChip, statusTone.chip]}>
-          <Text style={[styles.statusLabel, statusTone.label]}>{assignment.status.replaceAll("_", " ")}</Text>
-        </View>
-      </View>
 
-      <View style={styles.metaGrid}>
-        <View style={styles.metaCell}>
-          <Text style={styles.metaLabel}>Due Date</Text>
-          <Text style={styles.metaValue}>{fmtDue(assignment.due_at)}</Text>
+        <View style={styles.metaGrid}>
+          <View style={styles.metaCell}>
+            <View style={styles.metaLabelRow}>
+              <Calendar size={12} color={colors.muted} />
+              <Text style={styles.metaLabel}>Due Date</Text>
+            </View>
+            <Text style={styles.metaValue}>{fmtDue(assignment.due_at)}</Text>
+          </View>
+          <View style={styles.metaCell}>
+            <View style={styles.metaLabelRow}>
+              <Target size={12} color={colors.muted} />
+              <Text style={styles.metaLabel}>Target Score</Text>
+            </View>
+            <Text style={styles.metaValue}>{target}</Text>
+          </View>
         </View>
-        <View style={styles.metaCell}>
-          <Text style={styles.metaLabel}>Target Score</Text>
-          <Text style={styles.metaValue}>{target}</Text>
-        </View>
-      </View>
 
-      <Pressable style={[styles.button, disabled && styles.disabled]} disabled={disabled} onPress={onStart}>
-        <Text style={styles.buttonLabel}>{assignment.status === "completed" ? "Practice Again" : "Start Drill"}</Text>
-      </Pressable>
+        <Pressable 
+          style={({ pressed }) => [
+            styles.button, 
+            disabled && styles.disabled,
+            pressed && !disabled && styles.buttonPressed
+          ]} 
+          disabled={disabled} 
+          onPress={onStart}
+        >
+          {assignment.status === "completed" ? (
+            <RotateCcw size={16} color="#fff" />
+          ) : (
+            <Play size={16} color="#fff" fill="#fff" />
+          )}
+          <Text style={styles.buttonLabel}>{assignment.status === "completed" ? "Practice Again" : "Start Drill"}</Text>
+        </Pressable>
+      </BlurView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  card: {
-    borderRadius: 18,
+  cardWrapper: {
+    borderRadius: 20,
+    overflow: "hidden",
     borderWidth: 1,
     borderColor: colors.line,
-    backgroundColor: colors.panel,
-    padding: 16,
-    gap: 12
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  cardWrapperCompleted: {
+    opacity: 0.85,
+  },
+  card: {
+    padding: 18,
+    gap: 14,
   },
   cardCompleted: {
-    opacity: 0.85,
-    backgroundColor: "#FDFDFD",
+    backgroundColor: "rgba(255, 255, 255, 0.8)",
   },
   headerRow: {
     flexDirection: "row",
@@ -145,18 +178,32 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: colors.line,
-    backgroundColor: colors.bg,
-    padding: 10,
-    gap: 4
+    backgroundColor: "rgba(255, 255, 255, 0.4)",
+    padding: 12,
+    gap: 6
+  },
+  metaLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6
   },
   metaLabel: { color: colors.muted, fontSize: 11, fontWeight: "700", textTransform: "uppercase" },
   metaValue: { color: colors.ink, fontSize: 14, fontWeight: "700" },
   button: {
-    borderRadius: 12,
+    flexDirection: "row",
+    gap: 8,
+    justifyContent: "center",
+    borderRadius: 14,
     backgroundColor: colors.accent,
     alignItems: "center",
-    paddingVertical: 12,
-    marginTop: 2
+    paddingVertical: 14,
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: "rgba(0, 0, 0, 0.05)",
+  },
+  buttonPressed: {
+    opacity: 0.85,
+    transform: [{ scale: 0.98 }]
   },
   disabled: { opacity: 0.5 },
   buttonLabel: { color: "white", fontWeight: "800", fontSize: 15 }

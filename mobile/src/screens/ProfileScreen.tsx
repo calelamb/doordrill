@@ -1,7 +1,9 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
-import { Award, Target, Zap } from "lucide-react-native";
+import { Award, Target, Zap, LogOut } from "lucide-react-native";
+import { LinearGradient } from "expo-linear-gradient";
+import { BlurView } from "expo-blur";
 
 import { BottomTabParamList, RootStackParamList } from "../navigation/types";
 import { fetchRepProgress } from "../services/api";
@@ -41,91 +43,103 @@ export function ProfileScreen({ navigation }: Props) {
   }, [loadProgress]);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
-        <View style={styles.avatarContainer}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{repId?.slice(0, 2).toUpperCase()}</Text>
+    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.content}>
+          <View style={styles.avatarContainer}>
+            <View style={styles.avatar}>
+              <Text style={styles.avatarText}>{repId?.slice(0, 2).toUpperCase()}</Text>
+            </View>
+            <Text style={styles.name}>{repId}</Text>
+            <Text style={styles.role}>Sales Representative</Text>
           </View>
-          <Text style={styles.name}>{repId}</Text>
-          <Text style={styles.role}>Sales Representative</Text>
-        </View>
 
-        {loading && !progress ? (
-          <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
-        ) : error ? (
-          <View style={styles.errorContainer}>
-            <Text style={styles.error}>{error}</Text>
-            <Pressable onPress={loadProgress}>
-              <Text style={styles.retryText}>Retry</Text>
-            </Pressable>
-          </View>
-        ) : progress ? (
-          <View style={styles.statsContainer}>
-            <Text style={styles.sectionTitle}>Your Progress</Text>
-            
-            <View style={styles.statGrid}>
-              <View style={styles.statCard}>
-                <View style={styles.statHeader}>
-                  <Target size={18} color={colors.muted} />
-                  <Text style={styles.statLabel}>Total Drills</Text>
+          {loading && !progress ? (
+            <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
+          ) : error ? (
+            <View style={styles.errorContainer}>
+              <Text style={styles.error}>{error}</Text>
+              <Pressable onPress={loadProgress}>
+                <Text style={styles.retryText}>Retry</Text>
+              </Pressable>
+            </View>
+          ) : progress ? (
+            <View style={styles.statsContainer}>
+              <Text style={styles.sectionTitle}>Your Progress</Text>
+              
+              <View style={styles.statGrid}>
+                <View style={styles.statCardWrapper}>
+                  <BlurView intensity={40} tint="light" style={styles.statCard}>
+                    <View style={styles.statHeader}>
+                      <Target size={18} color={colors.muted} />
+                      <Text style={styles.statLabel}>Total Drills</Text>
+                    </View>
+                    <Text style={styles.statValue}>{progress.session_count}</Text>
+                  </BlurView>
                 </View>
-                <Text style={styles.statValue}>{progress.session_count}</Text>
-              </View>
 
-              <View style={styles.statCard}>
-                <View style={styles.statHeader}>
-                  <Award size={18} color={colors.accent} />
-                  <Text style={styles.statLabel}>Average Score</Text>
+                <View style={styles.statCardWrapper}>
+                  <BlurView intensity={40} tint="light" style={styles.statCard}>
+                    <View style={styles.statHeader}>
+                      <Award size={18} color={colors.accent} />
+                      <Text style={styles.statLabel}>Average Score</Text>
+                    </View>
+                    <Text style={[styles.statValue, { color: colors.accent }]}>
+                      {progress.average_score !== null ? progress.average_score.toFixed(1) : "--"}
+                    </Text>
+                  </BlurView>
                 </View>
-                <Text style={[styles.statValue, { color: colors.accent }]}>
-                  {progress.average_score !== null ? progress.average_score.toFixed(1) : "--"}
-                </Text>
-              </View>
 
-              <View style={[styles.statCard, { width: "100%" }]}>
-                <View style={styles.statHeader}>
-                  <Zap size={18} color="#D97706" />
-                  <Text style={styles.statLabel}>Scored Sessions</Text>
+                <View style={[styles.statCardWrapper, { width: "100%" }]}>
+                  <BlurView intensity={40} tint="light" style={styles.statCard}>
+                    <View style={styles.statHeader}>
+                      <Zap size={18} color="#D97706" />
+                      <Text style={styles.statLabel}>Scored Sessions</Text>
+                    </View>
+                    <Text style={styles.statValue}>{progress.scored_session_count}</Text>
+                  </BlurView>
                 </View>
-                <Text style={styles.statValue}>{progress.scored_session_count}</Text>
               </View>
             </View>
-          </View>
-        ) : null}
+          ) : null}
 
-        <View style={styles.actionsContainer}>
-          <Pressable style={styles.logoutButton} onPress={clearSession}>
-            <Text style={styles.logoutText}>Sign Out</Text>
-          </Pressable>
+          <View style={styles.actionsContainer}>
+            <Pressable style={({pressed}) => [styles.logoutButton, pressed && styles.logoutButtonPressed]} onPress={clearSession}>
+              <LogOut size={18} color="#991B1B" />
+              <Text style={styles.logoutText}>Sign Out</Text>
+            </Pressable>
+          </View>
         </View>
-      </View>
-    </SafeAreaView>
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: colors.bg },
-  container: { flex: 1, padding: 20 },
+  container: { flex: 1 },
+  safeArea: { flex: 1 },
+  content: { flex: 1, padding: 20 },
   avatarContainer: { alignItems: "center", marginTop: 24, marginBottom: 32 },
   avatar: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: colors.accentSoft,
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    backgroundColor: "rgba(74, 222, 128, 0.12)",
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 16,
-    borderWidth: 2,
-    borderColor: colors.accent,
+    borderWidth: 1,
+    borderColor: "rgba(74, 222, 128, 0.3)",
   },
   avatarText: { fontSize: 32, fontWeight: "800", color: colors.accent },
-  name: { fontSize: 28, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 4 },
+  name: { fontSize: 24, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 4 },
   role: { fontSize: 15, color: colors.muted },
   errorContainer: {
     backgroundColor: "#FEE2E2",
+    borderWidth: 1,
+    borderColor: "#FECACA",
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 14,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
@@ -134,28 +148,37 @@ const styles = StyleSheet.create({
   error: { color: "#991B1B", fontWeight: "600", flex: 1 },
   retryText: { color: "#991B1B", fontWeight: "800", textDecorationLine: "underline" },
   statsContainer: { flex: 1 },
-  sectionTitle: { fontSize: 18, fontWeight: "800", color: colors.ink, marginBottom: 16 },
+  sectionTitle: { fontSize: 18, fontFamily: "Poppins_700Bold", color: colors.ink, marginBottom: 16 },
   statGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
-  statCard: {
+  statCardWrapper: {
     flex: 1,
     minWidth: "45%",
-    backgroundColor: colors.panel,
-    borderRadius: 16,
-    padding: 16,
+    borderRadius: 20,
+    overflow: "hidden",
     borderWidth: 1,
     borderColor: colors.line,
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
+  },
+  statCard: {
+    padding: 18,
   },
   statHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 12 },
-  statLabel: { fontSize: 13, fontWeight: "700", color: colors.muted, textTransform: "uppercase" },
-  statValue: { fontSize: 32, fontWeight: "800", color: colors.ink },
-  actionsContainer: { marginTop: "auto", gap: 12, paddingTop: 24 },
+  statLabel: { fontSize: 12, fontWeight: "700", color: colors.muted, textTransform: "uppercase", letterSpacing: 0.5 },
+  statValue: { fontSize: 36, fontWeight: "800", color: colors.ink },
+  actionsContainer: { marginTop: "auto", gap: 12, paddingTop: 24, paddingBottom: 20 },
   logoutButton: {
+    flexDirection: "row",
+    gap: 8,
     paddingVertical: 16,
     alignItems: "center",
-    backgroundColor: colors.panel,
+    justifyContent: "center",
+    backgroundColor: "#FEE2E2",
     borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: 14,
+    borderColor: "#FECACA",
+    borderRadius: 16,
   },
-  logoutText: { fontSize: 16, fontWeight: "700", color: colors.accent },
+  logoutButtonPressed: {
+    opacity: 0.7,
+  },
+  logoutText: { fontSize: 16, fontWeight: "700", color: "#991B1B" },
 });

@@ -3,6 +3,7 @@ import { NavigatorScreenParams } from "@react-navigation/native";
 export type BottomTabParamList = {
   AssignmentsTab: undefined;
   HistoryTab: undefined;
+  CommunicationsTab: undefined;
   ProfileTab: undefined;
 };
 
@@ -21,4 +22,8 @@ export type RootStackParamList = {
   Score: {
     sessionId: string;
   };
+  MessageThread: {
+    threadId: string;
+  };
+  NewMessage: undefined;
 };

@@ -17,14 +17,15 @@ export function LoginScreen() {
   const handleLogin = () => {
     setLoading(true);
     setTimeout(() => {
-      // Mock log in flow mapping the email explicitly back to the dummy API state wrapper
-      const mockRepId = email.includes("@") ? email.split("@")[0] : email;
-      setRepId(mockRepId);
+      // Hardcode the repId to match the seed data in the local database
+      // This prevents the 401 error since the user will actually exist
+      const hardcodedRepId = "31b9fd7f-06c0-46f4-a536-059b8936ff83";
+      setRepId(hardcodedRepId);
     }, 600);
   };
 
   return (
-    <LinearGradient colors={["#173322", "#0d1f14", "#050a06"]} style={styles.container}>
+    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <KeyboardAvoidingView
           behavior={Platform.OS === "ios" ? "padding" : "height"}
@@ -39,7 +40,7 @@ export function LoginScreen() {
               <Text style={styles.subtitle}>Sign in to your account</Text>
             </View>
 
-            <BlurView intensity={30} tint="dark" style={styles.glassCard}>
+            <BlurView intensity={40} tint="light" style={styles.glassCard}>
               <View style={styles.inputGroup}>
                 <Text style={styles.label}>Email Address</Text>
                 <View style={styles.inputWrapper}>
@@ -115,24 +116,24 @@ const styles = StyleSheet.create({
     width: 68,
     height: 68,
     borderRadius: 22,
-    backgroundColor: "rgba(74, 222, 128, 0.12)",
+    backgroundColor: "rgba(22, 163, 74, 0.12)",
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 20,
     borderWidth: 1,
-    borderColor: "rgba(74, 222, 128, 0.25)",
+    borderColor: "rgba(22, 163, 74, 0.25)",
   },
   title: {
     fontFamily: "Poppins_800ExtraBold",
     fontSize: 34,
     fontWeight: "800",
-    color: "#ffffff",
+    color: "#1F1A13",
     letterSpacing: 0.5,
     marginBottom: 8,
   },
   subtitle: {
     fontSize: 16,
-    color: "#9ca3af",
+    color: "#6C6255",
     fontWeight: "400",
     letterSpacing: 0.2,
   },
@@ -140,9 +141,9 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     padding: 24,
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
+    borderColor: "rgba(0, 0, 0, 0.08)",
     overflow: "hidden",
-    backgroundColor: "rgba(0, 0, 0, 0.25)",
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
   },
   inputGroup: {
     marginBottom: 20,
@@ -150,7 +151,7 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 12,
     fontWeight: "600",
-    color: "#e5e7eb",
+    color: "#6C6255",
     marginBottom: 8,
     textTransform: "uppercase",
     letterSpacing: 0.8,
@@ -158,9 +159,9 @@ const styles = StyleSheet.create({
   inputWrapper: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "rgba(0, 0, 0, 0.3)",
+    backgroundColor: "rgba(255, 255, 255, 0.8)",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
+    borderColor: "rgba(0, 0, 0, 0.08)",
     borderRadius: 14,
     height: 54,
     paddingHorizontal: 16,
@@ -170,7 +171,7 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    color: "#ffffff",
+    color: "#1F1A13",
     fontSize: 16,
     height: "100%",
   },

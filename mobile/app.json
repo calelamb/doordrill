@@ -4,7 +4,10 @@
     "slug": "doordrill-mobile",
     "version": "0.1.0",
     "orientation": "portrait",
-    "platforms": ["ios", "android"],
+    "platforms": [
+      "ios",
+      "android"
+    ],
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
@@ -16,6 +19,9 @@
     "extra": {
       "apiBaseUrl": "http://127.0.0.1:8000",
       "wsBaseUrl": "ws://127.0.0.1:8000"
-    }
+    },
+    "plugins": [
+      "expo-font"
+    ]
   }
 }

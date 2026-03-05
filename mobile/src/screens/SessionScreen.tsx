@@ -639,8 +639,8 @@ export function SessionScreen({ route, navigation }: Props) {
   const statusTone = !connected || reconnectAttempt > 0 ? styles.statusWarn : aiSpeaking || playingAudio ? styles.statusHot : styles.statusCool;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
+    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+      <SafeAreaView style={styles.safeArea}>
         <View style={styles.topBar}>
           <View>
             <Text style={styles.topLabel}>Live Drill</Text>
@@ -673,7 +673,7 @@ export function SessionScreen({ route, navigation }: Props) {
           <Text style={styles.waveformHint}>Mic level reacts only when you speak.</Text>
         </View>
 
-        <View style={styles.captionCard}>
+        <BlurView intensity={40} tint="light" style={styles.captionCard}>
           <Text style={styles.captionLabel}>Live Transcript</Text>
           <Text style={styles.captionText} numberOfLines={3}>
             {liveTranscript}
@@ -688,10 +688,10 @@ export function SessionScreen({ route, navigation }: Props) {
           ) : null}
           {showWaitingNudge ? <Text style={styles.waitingNudge}>The homeowner is waiting...</Text> : null}
           {error ? <Text style={styles.errorText}>{error}</Text> : null}
-        </View>
+        </BlurView>
 
         {showSavePartial ? (
-          <View style={styles.savePartialCard}>
+          <BlurView intensity={40} tint="light" style={styles.savePartialCard}>
             <Text style={styles.savePartialTitle}>Connection not recovered</Text>
             <Text style={styles.savePartialBody}>We tried three reconnect attempts. Save the partial session and review what was captured.</Text>
             <View style={styles.savePartialActions}>
@@ -711,7 +711,7 @@ export function SessionScreen({ route, navigation }: Props) {
                 <Text style={styles.savePartialLabel}>Save partial session</Text>
               </Pressable>
             </View>
-          </View>
+          </BlurView>
         ) : null}
 
         <View style={styles.bottomBar}>
@@ -725,7 +725,7 @@ export function SessionScreen({ route, navigation }: Props) {
             }}
             style={[styles.micButton, (!connected || endingSession || showSavePartial) && styles.micButtonDisabled, recording && styles.micButtonActive]}
           >
-            {connected ? <Mic color="#fff" size={32} /> : <MicOff color={colors.muted} size={32} />}
+            {connected ? <Mic color="#fff" size={36} strokeWidth={2.5} /> : <MicOff color={colors.muted} size={32} />}
           </Pressable>
 
           <Pressable
@@ -774,8 +774,8 @@ export function SessionScreen({ route, navigation }: Props) {
             <Text style={styles.endButtonLabel}>{endingSession ? "Saving..." : "Press and hold to end"}</Text>
           </Pressable>
         </View>
-      </View>
-    </SafeAreaView>
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
 
@@ -837,7 +837,7 @@ const styles = StyleSheet.create({
     height: 224,
     borderRadius: 112,
     borderWidth: 1,
-    borderColor: "#E9D7C7",
+    borderColor: "rgba(0,0,0,0.1)",
   },
   orbRingActive: {
     borderColor: "rgba(200,81,42,0.3)",
@@ -846,12 +846,12 @@ const styles = StyleSheet.create({
     width: 152,
     height: 152,
     borderRadius: 76,
-    backgroundColor: colors.panel,
+    backgroundColor: "rgba(255, 255, 255, 0.8)",
     borderWidth: 1,
     borderColor: colors.line,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: colors.ink,
+    shadowColor: "#000",
     shadowOffset: { width: 0, height: 12 },
     shadowOpacity: 0.08,
     shadowRadius: 18,
@@ -882,9 +882,10 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     borderWidth: 1,
     borderColor: colors.line,
-    backgroundColor: colors.panel,
+    backgroundColor: "rgba(255,255,255,0.5)",
     padding: 18,
     gap: 10,
+    overflow: "hidden",
   },
   captionLabel: { color: colors.muted, fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 },
   captionText: { color: colors.ink, fontSize: 18, fontWeight: "700", lineHeight: 24 },
@@ -908,6 +909,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFF5EA",
     padding: 18,
     gap: 10,
+    overflow: "hidden",
   },
   savePartialTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
   savePartialBody: { color: colors.muted, fontSize: 14, lineHeight: 20 },
@@ -917,7 +919,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.line,
-    backgroundColor: colors.panel,
+    backgroundColor: "rgba(255,255,255,0.5)",
     paddingVertical: 14,
     alignItems: "center",
   },
@@ -952,6 +954,7 @@ const styles = StyleSheet.create({
   },
   micButtonDisabled: {
     backgroundColor: "#E7DDD2",
+    borderWidth: 0,
     shadowOpacity: 0,
   },
   endButton: {
@@ -959,7 +962,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     borderColor: colors.line,
-    backgroundColor: colors.panel,
+    backgroundColor: "rgba(255, 255, 255, 0.5)",
     overflow: "hidden",
     alignItems: "center",
     justifyContent: "center",

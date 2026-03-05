@@ -1,7 +1,8 @@
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
-import { ClipboardList, History, User } from "lucide-react-native";
+import { ClipboardList, History, User, MessageSquare } from "lucide-react-native";
+import { Platform } from "react-native";
 
 import { useSession } from "../store/session";
 import { AssignmentsScreen } from "../screens/AssignmentsScreen";
@@ -11,6 +12,9 @@ import { LoginScreen } from "../screens/LoginScreen";
 import { ScoreScreen } from "../screens/ScoreScreen";
 import { SessionScreen } from "../screens/SessionScreen";
 import { ProfileScreen } from "../screens/ProfileScreen";
+import { CommunicationsScreen } from "../screens/CommunicationsScreen";
+import { MessageThreadScreen } from "../screens/MessageThreadScreen";
+import { NewMessageScreen } from "../screens/NewMessageScreen";
 import { RootStackParamList, BottomTabParamList } from "./types";
 import { colors } from "../theme/tokens";
 
@@ -23,17 +27,19 @@ function MainTabNavigator() {
       screenOptions={{
         headerShown: false,
         tabBarStyle: {
-          backgroundColor: colors.panel,
-          borderTopColor: colors.line,
-          paddingBottom: 8,
+          backgroundColor: "#FFFCF4",
+          borderTopColor: "rgba(0, 0, 0, 0.05)",
+          borderTopWidth: 1,
+          paddingBottom: Platform.OS === "ios" ? 24 : 8,
           paddingTop: 8,
-          height: 60,
+          height: Platform.OS === "ios" ? 85 : 65,
         },
         tabBarActiveTintColor: colors.accent,
-        tabBarInactiveTintColor: colors.muted,
+        tabBarInactiveTintColor: "#6C6255",
         tabBarLabelStyle: {
-          fontSize: 12,
-          fontWeight: "600",
+          fontSize: 11,
+          fontWeight: "700",
+          marginTop: 4,
         },
       }}
     >
@@ -43,6 +49,14 @@ function MainTabNavigator() {
         options={{
           tabBarLabel: "Drills",
           tabBarIcon: ({ color, size }) => <ClipboardList color={color} size={size} />,
+        }}
+      />
+      <Tab.Screen 
+        name="CommunicationsTab" 
+        component={CommunicationsScreen} 
+        options={{
+          tabBarLabel: "Inbox",
+          tabBarIcon: ({ color, size }) => <MessageSquare color={color} size={size} />,
         }}
       />
       <Tab.Screen 
@@ -94,6 +108,15 @@ export function AppNavigator() {
           />
           <Stack.Screen name="Session" component={SessionScreen} options={{ headerShown: false }} />
           <Stack.Screen name="Score" component={ScoreScreen} options={{ title: "Scorecard" }} />
+          <Stack.Screen name="MessageThread" component={MessageThreadScreen} options={{ headerShown: false }} />
+          <Stack.Screen 
+            name="NewMessage" 
+            component={NewMessageScreen} 
+            options={{
+              headerShown: false,
+              presentation: "modal"
+            }} 
+          />
         </Stack.Navigator>
       )}
     </NavigationContainer>

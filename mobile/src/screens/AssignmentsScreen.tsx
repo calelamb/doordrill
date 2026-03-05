@@ -1,6 +1,8 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View, ActivityIndicator, RefreshControl } from "react-native";
+import { LinearGradient } from "expo-linear-gradient";
+import { ClipboardList, BookOpenCheck, Target } from "lucide-react-native";
 
 import { AssignmentCard } from "../components/AssignmentCard";
 import { BottomTabParamList } from "../navigation/types";
@@ -100,105 +102,146 @@ export function AssignmentsScreen({ navigation }: Props) {
   }, [assignments]);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
-        <View style={styles.headerRow}>
-          <View>
+    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.content}>
+          <View style={styles.headerRow}>
+            <View style={styles.headerIconContainer}>
+              <Target size={36} color={colors.accent} strokeWidth={2.5} />
+            </View>
             <Text style={styles.title}>Your Drills</Text>
             <Text style={styles.subtitle}>Open a brief, then jump straight in.</Text>
           </View>
+
+          {error ? (
+            <View style={styles.errorContainer}>
+              <Text style={styles.error}>{error}</Text>
+              <Pressable onPress={loadData}>
+                <Text style={styles.retryText}>Retry</Text>
+              </Pressable>
+            </View>
+          ) : null}
+
+          <ScrollView 
+            contentContainerStyle={styles.list}
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl refreshing={loading && assignments.length > 0} onRefresh={loadData} colors={[colors.accent]} tintColor={colors.accent} />
+            }
+          >
+            {loading && assignments.length === 0 ? (
+              <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
+            ) : (
+              <>
+                {sortedAssignments.open.length === 0 && sortedAssignments.completed.length === 0 ? (
+                  <View style={styles.emptyState}>
+                    <View style={styles.emptyIconContainer}>
+                      <ClipboardList size={32} color={colors.accent} />
+                    </View>
+                    <Text style={styles.emptyText}>No drills yet.</Text>
+                    <Text style={styles.emptySubtext}>Your manager will assign scenarios here.</Text>
+                  </View>
+                ) : null}
+
+                {sortedAssignments.open.map((assignment) => (
+                  <AssignmentCard
+                    key={assignment.id}
+                    assignment={assignment}
+                    scenario={scenarios[assignment.scenario_id]}
+                    disabled={loading}
+                    onStart={() => {
+                      void startDrill(assignment);
+                    }}
+                  />
+                ))}
+
+                {sortedAssignments.completed.length > 0 && (
+                  <View style={styles.completedSection}>
+                    <View style={styles.completedHeader}>
+                      <BookOpenCheck size={18} color={colors.success} />
+                      <Text style={styles.sectionTitle}>Completed Drills</Text>
+                    </View>
+                    {sortedAssignments.completed.map((assignment) => (
+                      <AssignmentCard
+                        key={assignment.id}
+                        assignment={assignment}
+                        scenario={scenarios[assignment.scenario_id]}
+                        disabled={loading}
+                        onStart={() => {
+                          void startDrill(assignment);
+                        }}
+                      />
+                    ))}
+                  </View>
+                )}
+              </>
+            )}
+          </ScrollView>
         </View>
-
-        {error ? (
-          <View style={styles.errorContainer}>
-            <Text style={styles.error}>{error}</Text>
-            <Pressable onPress={loadData}>
-              <Text style={styles.retryText}>Retry</Text>
-            </Pressable>
-          </View>
-        ) : null}
-
-        <ScrollView 
-          contentContainerStyle={styles.list}
-          refreshControl={
-            <RefreshControl refreshing={loading && assignments.length > 0} onRefresh={loadData} colors={[colors.accent]} tintColor={colors.accent} />
-          }
-        >
-          {loading && assignments.length === 0 ? (
-            <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
-          ) : (
-            <>
-              {sortedAssignments.open.length === 0 && sortedAssignments.completed.length === 0 ? (
-                <View style={styles.emptyState}>
-                  <Text style={styles.emptyText}>No drills yet.</Text>
-                  <Text style={styles.emptySubtext}>Your manager will assign scenarios here.</Text>
-                </View>
-              ) : null}
-
-              {sortedAssignments.open.map((assignment) => (
-                <AssignmentCard
-                  key={assignment.id}
-                  assignment={assignment}
-                  scenario={scenarios[assignment.scenario_id]}
-                  disabled={loading}
-                  onStart={() => {
-                    void startDrill(assignment);
-                  }}
-                />
-              ))}
-
-              {sortedAssignments.completed.length > 0 && (
-                <View style={styles.completedSection}>
-                  <Text style={styles.sectionTitle}>Completed Drills</Text>
-                  {sortedAssignments.completed.map((assignment) => (
-                    <AssignmentCard
-                      key={assignment.id}
-                      assignment={assignment}
-                      scenario={scenarios[assignment.scenario_id]}
-                      disabled={loading}
-                      onStart={() => {
-                        void startDrill(assignment);
-                      }}
-                    />
-                  ))}
-                </View>
-              )}
-            </>
-          )}
-        </ScrollView>
-      </View>
-    </SafeAreaView>
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: colors.bg },
-  container: { flex: 1, padding: 20, gap: 16 },
-  headerRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 },
-  title: { fontSize: 32, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 4 },
-  subtitle: { color: colors.muted, fontSize: 15 },
+  container: { flex: 1 },
+  safeArea: { flex: 1 },
+  content: { flex: 1, padding: 20, gap: 16 },
+  headerRow: { alignItems: "center", marginBottom: 16, marginTop: 16 },
+  headerIconContainer: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: "rgba(74, 222, 128, 0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "rgba(74, 222, 128, 0.3)"
+  },
+  title: { fontSize: 32, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 4, textAlign: "center" },
+  subtitle: { color: colors.muted, fontSize: 16, textAlign: "center" },
   errorContainer: {
     backgroundColor: "#FEE2E2",
-    padding: 12,
-    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    padding: 14,
+    borderRadius: 14,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center"
   },
   error: { color: "#991B1B", fontWeight: "600", flex: 1 },
   retryText: { color: "#991B1B", fontWeight: "800", textDecorationLine: "underline" },
-  list: { gap: 16, paddingBottom: 20 },
-  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", marginTop: 60, gap: 8 },
-  emptyText: { fontSize: 18, fontWeight: "700", color: colors.ink },
-  emptySubtext: { fontSize: 14, color: colors.muted },
+  list: { gap: 16, paddingBottom: 40 },
+  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", marginTop: 80, gap: 12 },
+  emptyIconContainer: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: colors.accentSoft,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: "rgba(74, 222, 128, 0.2)"
+  },
+  emptyText: { fontSize: 20, fontFamily: "Poppins_700Bold", color: colors.ink },
+  emptySubtext: { fontSize: 15, color: colors.muted, textAlign: "center" },
   completedSection: {
-    marginTop: 24,
+    marginTop: 32,
     gap: 16,
+  },
+  completedHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    marginBottom: 12,
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: "800",
+    fontFamily: "Poppins_700Bold",
     color: colors.ink,
-    marginTop: 8,
   }
 });
