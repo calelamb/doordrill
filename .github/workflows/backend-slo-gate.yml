@@ -39,6 +39,19 @@ jobs:
       - name: Run Backend Tests
         run: pytest
 
+      - name: Run Auth Mode Smoke Tests
+        env:
+          AUTH_REQUIRED: "true"
+          AUTH_MODE: "jwt"
+        run: |
+          pytest tests/test_ws_auth.py tests/test_endpoint_conformance.py::test_auth_register_login_refresh
+
+      - name: Migration Smoke
+        env:
+          DATABASE_URL: sqlite:////tmp/doordrill-migration-smoke.db
+        run: |
+          alembic upgrade head
+
       - name: Start API
         run: |
           nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 >/tmp/doordrill-api.log 2>&1 &

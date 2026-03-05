@@ -1,6 +1,6 @@
 # DoorDrill Backend Incident Runbook
 
-This runbook covers the v1 highest-risk failure modes: worker outages, provider outages, and replay integrity drift.
+This runbook covers the v1 highest-risk failure modes: worker outages, provider outages, websocket auth failures, and replay integrity drift.
 
 ## 1) Celery Worker Outage
 
@@ -27,7 +27,7 @@ order by task_type, status;
 ```sql
 select session_id, task_type, status, attempts, next_retry_at, last_error
 from postprocess_runs
-where status in ('pending','retry')
+where status in ('pending','retry_scheduled')
 order by created_at asc
 limit 20;
 ```
@@ -39,8 +39,11 @@ limit 20;
    - `post_session.cleanup`
    - `post_session.grade`
    - `post_session.notify`
-3. Requeue any stale `retry` rows by setting `next_retry_at = now()` if needed.
-4. Verify new sessions progress to `completed` with scorecards.
+   - `post_session.retry_due`
+   - `notifications.retry_due`
+3. Confirm Celery beat is running; without it, `retry_scheduled` rows will not drain.
+4. Requeue any stale `retry_scheduled` rows by setting `next_retry_at = now()` if needed.
+5. Verify new sessions progress to `completed` with scorecards.
 
 ## 2) Provider Outage (Deepgram/OpenAI/ElevenLabs/SendGrid/Expo)
 
@@ -48,7 +51,7 @@ limit 20;
 
 - Spike in provider timeout errors in logs.
 - First-audio latency and retry counts increase.
-- Notification deliveries move to `retry`/`failed`.
+- Notification deliveries move to `retry_scheduled`/`dead_letter`.
 
 ### Immediate Checks
 
@@ -58,7 +61,7 @@ limit 20;
 ```sql
 select channel, status, retries, last_error, created_at
 from notification_deliveries
-where status in ('retry','failed')
+where status in ('retry_scheduled','dead_letter','failed')
 order by created_at desc
 limit 50;
 ```
@@ -66,9 +69,9 @@ limit 50;
 3. Check postprocess task errors:
 
 ```sql
-select task_type, status, attempts, last_error
+select task_type, status, attempts, next_retry_at, last_error
 from postprocess_runs
-where status in ('retry','failed')
+where status in ('retry_scheduled','failed')
 order by updated_at desc
 limit 50;
 ```
@@ -84,7 +87,34 @@ limit 50;
    - validate mock fallback behavior in non-prod first
 4. Re-enable channels/providers after recovery and monitor retry drain.
 
-## 3) Replay Integrity Drift
+## 3) WebSocket Auth Failures
+
+### Symptoms
+
+- Mobile or browser clients fail to connect to `/ws/sessions/{id}`.
+- Staging/prod rejects websocket connections while local header-based tests still work.
+- Logs show spikes in close code `4401` or `4403`.
+
+### Immediate Checks
+
+1. Confirm runtime auth configuration:
+   - `AUTH_REQUIRED=true`
+   - `AUTH_MODE=jwt`
+2. Verify the client sends the access token on the websocket URL as `?access_token=...`.
+3. Validate the JWT against the same `JWT_SECRET` or `JWT_JWKS_URL` used by REST auth.
+4. Confirm the token subject matches the rep who owns the session, unless the actor is an admin.
+
+### Mitigation
+
+1. Re-run auth smoke:
+   - `/auth/register`
+   - `/auth/login`
+   - rep session creation
+   - websocket connect with `?access_token=...`
+2. If failures are isolated to managers, that is expected in v1; manager live-session websocket access is intentionally denied.
+3. If failures are widespread, rotate/reload JWT config and verify no proxy strips websocket query strings.
+
+## 4) Replay Integrity Drift
 
 ### Symptoms
 
@@ -122,12 +152,13 @@ limit 100;
 3. Run SLO harness with `--verify-replay --trigger-barge-in` to validate full path.
 4. If corruption is isolated, re-run postprocess for impacted session IDs and regenerate artifacts.
 
-## 4) Recovery Validation Checklist
+## 5) Recovery Validation Checklist
 
 1. New sessions complete with:
    - transcript turns persisted
    - scorecard generated
    - notification delivery attempted/sent
+   - retry sweeper backlog draining
 2. SLO gate sample passes p50/p95 first-audio and barge-in p95 latency.
 3. `postprocess_runs` backlog is draining and failure rate trends down.
 4. Manager replay for canary org shows synchronized transcript/audio timeline.
