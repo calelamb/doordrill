@@ -50,6 +50,7 @@ Must-have tables are present:
 - `session_artifacts` (audio/transcript artifact index)
 - `scorecards`
 - `manager_reviews`
+- `manager_action_logs`
 
 Supporting tables:
 - `organizations`
@@ -64,6 +65,9 @@ Supporting tables:
 - `POST /manager/assignments`
 - `POST /manager/scorecards/{scorecard_id}/followup-assignment`
 - `GET /manager/feed?manager_id=...`
+- `GET /manager/reps/{rep_id}/progress?manager_id=...`
+- `GET /manager/analytics?manager_id=...`
+- `GET /manager/actions?manager_id=...`
 - `GET /manager/sessions/{session_id}/replay`
 - `PATCH /manager/scorecards/{scorecard_id}`
 - `GET /rep/assignments?rep_id=...`
@@ -131,6 +135,15 @@ Supporting tables:
 - creating next-assignment directly from scorecard context
 - embedding `weakness_tags` in retry metadata for adaptive drill routing
 
+`GET /manager/reps/{rep_id}/progress` supports:
+- rep-level trend and recent session performance retrieval
+
+`GET /manager/analytics` supports:
+- manager/team-level assignment, completion, and score aggregates
+
+`GET /manager/actions` supports:
+- manager workflow audit trail retrieval from `manager_action_logs`
+
 ## File Map (Start Here)
 
 - App boot:
@@ -149,21 +162,28 @@ Supporting tables:
   - `backend/app/voice/ws.py`
 - Core services:
   - `backend/app/services/conversation_orchestrator.py`
+  - `backend/app/services/provider_clients.py`
   - `backend/app/services/ledger_buffer.py`
   - `backend/app/services/ledger_service.py`
   - `backend/app/services/grading_service.py`
   - `backend/app/services/manager_feed_service.py`
+  - `backend/app/services/manager_action_service.py`
   - `backend/app/services/storage_service.py`
 - Migrations:
   - `backend/alembic/`
   - `backend/alembic/versions/20260305_0001_initial_schema.py`
   - `backend/alembic/versions/20260305_0002_scorecard_weakness_tags.py`
+  - `backend/alembic/versions/20260305_0003_org_audit_and_indexes.py`
 - Tests:
   - `backend/tests/test_manager_rep_flow.py`
   - `backend/tests/test_auth_rbac.py`
+  - `backend/tests/test_org_data_guardrails.py`
+  - `backend/tests/test_provider_clients.py`
 - Dashboard:
   - `dashboard/src/App.tsx`
   - `dashboard/src/components/FeedList.tsx`
+  - `dashboard/src/components/PerformancePanel.tsx`
+  - `dashboard/src/components/RepPanel.tsx`
   - `dashboard/src/components/ReplayPanel.tsx`
   - `dashboard/src/lib/api.ts`
 
@@ -182,7 +202,7 @@ pytest
 ```
 
 Current status:
-- tests pass (`8 passed`)
+- tests pass (`15 passed`)
 
 ## What Is Stubbed vs Production-Ready
 
@@ -194,29 +214,28 @@ Production-ready structure:
 - ledger persistence flow
 
 Stubbed integrations:
-- Deepgram STT (currently simulated transcript handling)
-- LLM conversation provider (currently deterministic orchestrator output)
-- ElevenLabs TTS (currently placeholder audio payload in WS events)
+- Deepgram STT (real API path implemented with mock fallback)
+- LLM conversation provider (OpenAI streaming path implemented with mock fallback)
+- ElevenLabs TTS (streaming path implemented with mock fallback)
 - S3/R2 presigned URL generation (currently placeholder URL builder)
 
 ## Required Next Steps (Priority Order)
 
 1. Provider integration
-   - wire Deepgram streaming STT
-   - wire LLM streaming responses
-   - wire ElevenLabs streaming TTS
-   - preserve existing event contract
+   - implemented provider adapters and fallback behavior
+   - next: validate with real keys in staging and tune latency budgets
 
 2. Replay fidelity hardening
-   - align artifact timestamps with turn boundaries
-   - persist richer objection tags and stage transitions
+   - turn timing alignment implemented in WS turn commit windows
+   - next: add multi-turn interruption timing traces
 
 3. Auth and authorization
-   - add real auth (Firebase/Supabase/JWT)
-   - enforce manager/rep/org access controls on every endpoint (header-based RBAC scaffold implemented; org-level enforcement still pending)
+   - header + JWT actor resolution implemented
+   - org-level endpoint guards implemented
+   - next: wire external identity provider token lifecycle
 
 4. Infra readiness
-   - add Alembic migrations (implemented baseline + initial revision)
+   - add Alembic migrations (implemented through rev `20260305_0003`)
    - add structured logging + tracing (request logging middleware implemented; tracing pending)
    - configure Redis + Postgres + object storage in deployment
 
@@ -226,8 +245,9 @@ Stubbed integrations:
    - test event loss guarantees and reconnect behavior
 
 6. Frontend integration
-   - manager UI: feed, replay, override (implemented scaffold in `dashboard/`; hardening and auth/session UX still pending)
-   - rep UI: assignments, live drill, scorecard view
+   - manager UI: feed, replay, override, analytics, action timeline implemented in scaffold
+   - rep UI: assignments + session start + score fetch implemented in scaffold
+   - next: live voice rep UI and auth/session UX hardening
 
 ## Non-Negotiable Product Requirements
 

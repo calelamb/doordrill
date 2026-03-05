@@ -64,6 +64,10 @@ The initial FastAPI backend foundation has been implemented in [`backend/`](./ba
 - Immutable session interaction ledger
 - Post-session grading + manager override workflow
 - Manager replay endpoint with transcript + artifact links
+- Manager analytics + rep progress endpoints
+- Manager action audit logging (`manager_action_logs`)
+- Org-scoped access control with header/JWT actor resolution
+- Provider adapters for Deepgram/OpenAI/ElevenLabs (real API paths + fallback)
 
 ## Dashboard Progress
 
@@ -73,3 +77,6 @@ A manager web scaffold has been implemented in [`dashboard/`](./dashboard):
 - Session replay detail (`/manager/sessions/{id}/replay`)
 - Score override action (`PATCH /manager/scorecards/{id}`)
 - Follow-up assignment action (`POST /manager/scorecards/{id}/followup-assignment`)
+- Analytics + rep progress panel (`/manager/analytics`, `/manager/reps/{id}/progress`)
+- Manager action timeline (`/manager/actions`)
+- Rep mode scaffold (assignment list, session start, score fetch)
