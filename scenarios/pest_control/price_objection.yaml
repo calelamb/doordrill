@@ -1,0 +1,28 @@
+id: pest_control_price_objection_v1
+industry: pest_control
+name: Price Objection Focus
+description: >-
+  Homeowner currently pays a low monthly rate and repeatedly pushes back on price.
+  Rep must justify value and avoid discount-spiral behavior.
+stage_flow:
+  - door_knock
+  - initial_pitch
+  - objection_handling
+  - close_attempt
+persona:
+  name: Angela Brooks
+  attitude: budget_conscious
+  buy_likelihood: medium
+  concerns:
+    - monthly_cost
+    - hidden_fees
+    - cancellation_terms
+  objections:
+    - "I can get service cheaper from another company."
+    - "What fees are you not telling me about?"
+    - "I am not signing anything unless I can cancel easily."
+  personality_notes: >-
+    Uses short, direct responses and will only move forward when value is tied to
+    avoided callbacks, guaranteed retreatments, and total annual cost clarity.
+rubric_version: pest_control_v1
+difficulty: 2

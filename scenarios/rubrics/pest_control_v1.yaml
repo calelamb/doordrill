@@ -1,0 +1,30 @@
+id: pest_control_v1
+industry: pest_control
+name: Pest Control Core Rubric v1
+weights:
+  opening: 20
+  discovery: 20
+  value_pitch: 20
+  objection_handling: 25
+  close: 15
+scoring_bands:
+  excellent: [90, 100]
+  good: [75, 89]
+  needs_work: [60, 74]
+  poor: [0, 59]
+criteria:
+  opening:
+    - Establishes credibility in first 10 seconds
+    - Sets clear reason for conversation
+  discovery:
+    - Asks homeowner-specific questions before pitching
+    - Confirms pain points before solution framing
+  value_pitch:
+    - Connects offer to property-specific outcomes
+    - Clearly explains guarantee and service scope
+  objection_handling:
+    - Acknowledges objection before reframing
+    - Avoids argumentative or evasive responses
+  close:
+    - Asks for specific next step
+    - Handles soft no with a constructive follow-up option

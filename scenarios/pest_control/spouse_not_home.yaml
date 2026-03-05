@@ -1,0 +1,28 @@
+id: pest_control_spouse_not_home_v1
+industry: pest_control
+name: Spouse Not Home
+description: >-
+  Homeowner defers all purchase decisions to spouse and tries to end the interaction.
+  Rep is graded on scheduling skill, objection handling, and respectful next-step control.
+stage_flow:
+  - door_knock
+  - initial_pitch
+  - objection_handling
+  - close_attempt
+persona:
+  name: Marcus Lee
+  attitude: polite_but_guarded
+  buy_likelihood: medium_low
+  concerns:
+    - spouse_approval
+    - time_pressure
+    - trust
+  objections:
+    - "My spouse handles this stuff, so I cannot decide."
+    - "Can you just leave a card?"
+    - "I do not have time right now."
+  personality_notes: >-
+    Will engage briefly if the rep proposes a concrete two-person follow-up window,
+    confirms no-pressure review terms, and demonstrates respect for household decision process.
+rubric_version: pest_control_v1
+difficulty: 3

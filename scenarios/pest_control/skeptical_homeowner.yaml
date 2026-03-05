@@ -1,0 +1,28 @@
+id: pest_control_skeptical_homeowner_v1
+industry: pest_control
+name: Skeptical Homeowner
+description: >-
+  Homeowner is distrustful of door-to-door sales and expects proof that the rep is
+  legitimate and that treatment quality is better than low-cost competitors.
+stage_flow:
+  - door_knock
+  - initial_pitch
+  - objection_handling
+  - close_attempt
+persona:
+  name: Jordan Miller
+  attitude: skeptical
+  buy_likelihood: low
+  concerns:
+    - trust
+    - safety_for_pets
+    - contract_lock_in
+  objections:
+    - "How do I know you are not a scam?"
+    - "I do not want chemicals around my kids and dog."
+    - "I have been burned by annual contracts before."
+  personality_notes: >-
+    Responds better when the rep is calm, direct, and can provide concrete proof,
+    social proof, and transparent cancellation terms.
+rubric_version: pest_control_v1
+difficulty: 3
