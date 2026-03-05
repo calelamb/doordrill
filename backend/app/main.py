@@ -1,18 +1,31 @@
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.api.manager import router as manager_router
 from app.api.rep import router as rep_router
 from app.core.config import get_settings
+from app.core.logging_config import configure_logging
 from app.db.init_db import init_db
+from app.middleware.request_logging import RequestLoggingMiddleware
 from app.voice.ws import router as ws_router
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name)
+configure_logging()
 
 
-@app.on_event("startup")
-def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     init_db()
+    yield
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.logger = logging.getLogger("doordrill.api")
+app.add_middleware(RequestLoggingMiddleware)
 
 
 @app.get("/health")
