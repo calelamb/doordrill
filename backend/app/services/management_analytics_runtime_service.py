@@ -9,7 +9,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models.analytics import AnalyticsDimManager, AnalyticsRefreshRun, AnalyticsFactSession
+from app.models.analytics import AnalyticsDimManager, AnalyticsFactSession, AnalyticsMetricDefinition, AnalyticsRefreshRun
 from app.models.assignment import Assignment
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
@@ -402,8 +402,8 @@ class ManagementAnalyticsRuntimeService:
                 .where(
                     AnalyticsFactSession.manager_id == manager_id,
                     AnalyticsFactSession.overall_score.is_not(None),
-                    AnalyticsFactSession.started_at >= current_start,
-                    AnalyticsFactSession.started_at <= current_end,
+                    AnalyticsFactSession.session_date >= current_start.date(),
+                    AnalyticsFactSession.session_date <= current_end.date(),
                 )
                 .group_by(AnalyticsFactSession.scenario_id, Scenario.name)
                 .order_by(Scenario.name.asc())
@@ -413,8 +413,8 @@ class ManagementAnalyticsRuntimeService:
                 select(AnalyticsFactSession.overall_score).where(
                     AnalyticsFactSession.manager_id == manager_id,
                     AnalyticsFactSession.overall_score.is_not(None),
-                    AnalyticsFactSession.started_at >= current_start,
-                    AnalyticsFactSession.started_at <= current_end,
+                    AnalyticsFactSession.session_date >= current_start.date(),
+                    AnalyticsFactSession.session_date <= current_end.date(),
                 )
             ).all()
 
@@ -549,5 +549,36 @@ class ManagementAnalyticsRuntimeService:
             query_name="operations_status",
             manager_id=manager_id,
             cache_params={"kind": "operations_status"},
+            builder=build,
+        )
+
+    def get_metric_definitions(self, db: Session, *, manager_id: str) -> dict[str, Any]:
+        def build() -> dict[str, Any]:
+            rows = db.scalars(
+                select(AnalyticsMetricDefinition)
+                .where(AnalyticsMetricDefinition.active.is_(True))
+                .order_by(AnalyticsMetricDefinition.entity_type.asc(), AnalyticsMetricDefinition.metric_key.asc())
+            ).all()
+            return {
+                "manager_id": manager_id,
+                "items": [
+                    {
+                        "metric_key": row.metric_key,
+                        "display_name": row.display_name,
+                        "description": row.description,
+                        "entity_type": row.entity_type,
+                        "aggregation_method": row.aggregation_method,
+                        "owner": row.owner,
+                        "metadata_json": row.metadata_json,
+                    }
+                    for row in rows
+                ],
+            }
+
+        return self._with_cache(
+            db,
+            query_name="metric_definitions",
+            manager_id=manager_id,
+            cache_params={"kind": "metric_definitions"},
             builder=build,
         )

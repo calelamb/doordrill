@@ -150,3 +150,11 @@ def test_management_intelligence_endpoints(client, seed_org):
     )
     assert benchmarks.status_code == 200
     assert "score_benchmarks" in benchmarks.json()
+
+    metric_definitions = client.get(
+        "/manager/analytics/metrics/definitions",
+        params={"manager_id": seed_org["manager_id"]},
+        headers=manager_headers,
+    )
+    assert metric_definitions.status_code == 200
+    assert metric_definitions.json()["items"]

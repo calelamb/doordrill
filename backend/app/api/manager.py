@@ -813,6 +813,20 @@ def get_manager_analytics_operations(
     return management_analytics_service.get_operations_status(db, manager_id=manager_id)
 
 
+@router.get("/analytics/metrics/definitions")
+def get_manager_metric_definitions(
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    return management_analytics_service.get_metric_definitions(db, manager_id=manager_id)
+
+
 @router.get("/sessions/{session_id}/replay", response_model=SessionReplayResponse)
 def get_session_replay(
     session_id: str,

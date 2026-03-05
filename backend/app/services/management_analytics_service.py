@@ -9,11 +9,15 @@ from typing import Any
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
+from app.models.analytics import (
+    AnalyticsFactCoachingIntervention,
+    AnalyticsFactManagerCalibration,
+    AnalyticsFactSession,
+)
 from app.models.assignment import Assignment
 from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
-from app.models.session import Session as DrillSession
-from app.models.session import SessionEvent, SessionTurn
+from app.models.session import SessionTurn
 from app.models.types import AssignmentStatus
 from app.models.user import User
 
@@ -92,6 +96,30 @@ def _severity_rank(level: str) -> int:
     return 1
 
 
+def _enum_value(value: Any, default: str = "unknown") -> str:
+    if value is None:
+        return default
+    raw = getattr(value, "value", value)
+    return str(raw)
+
+
+def _category_scores_from_fact(row: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if row.opening_score is not None:
+        payload["opening"] = {"score": float(row.opening_score)}
+    if row.pitch_score is not None:
+        payload["pitch"] = {"score": float(row.pitch_score)}
+        payload["pitch_delivery"] = {"score": float(row.pitch_score)}
+    if row.objection_score is not None:
+        payload["objection_handling"] = {"score": float(row.objection_score)}
+    if row.closing_score is not None:
+        payload["closing"] = {"score": float(row.closing_score)}
+        payload["closing_technique"] = {"score": float(row.closing_score)}
+    if row.professionalism_score is not None:
+        payload["professionalism"] = {"score": float(row.professionalism_score)}
+    return payload
+
+
 class ManagementAnalyticsService:
     def _load_sessions(
         self,
@@ -101,19 +129,6 @@ class ManagementAnalyticsService:
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> list[SessionRecord]:
-        reviewed_exists = (
-            select(ManagerReview.id)
-            .where(ManagerReview.scorecard_id == Scorecard.id)
-            .limit(1)
-            .correlate(Scorecard)
-            .exists()
-        )
-        latest_reviewed_at = (
-            select(func.max(ManagerReview.reviewed_at))
-            .where(ManagerReview.scorecard_id == Scorecard.id)
-            .correlate(Scorecard)
-            .scalar_subquery()
-        )
         latest_coaching_note = (
             select(ManagerCoachingNote.note)
             .where(ManagerCoachingNote.scorecard_id == Scorecard.id)
@@ -125,36 +140,40 @@ class ManagementAnalyticsService:
 
         stmt = (
             select(
-                DrillSession.id.label("session_id"),
-                DrillSession.rep_id.label("rep_id"),
+                AnalyticsFactSession.session_id.label("session_id"),
+                AnalyticsFactSession.rep_id.label("rep_id"),
                 User.name.label("rep_name"),
-                DrillSession.scenario_id.label("scenario_id"),
+                AnalyticsFactSession.scenario_id.label("scenario_id"),
                 Scenario.name.label("scenario_name"),
-                Scenario.difficulty.label("scenario_difficulty"),
-                DrillSession.started_at.label("started_at"),
-                DrillSession.ended_at.label("ended_at"),
-                DrillSession.duration_seconds.label("duration_seconds"),
-                Scorecard.overall_score.label("overall_score"),
-                Scorecard.category_scores.label("category_scores"),
-                Scorecard.weakness_tags.label("weakness_tags"),
+                AnalyticsFactSession.difficulty.label("scenario_difficulty"),
+                AnalyticsFactSession.started_at.label("started_at"),
+                AnalyticsFactSession.ended_at.label("ended_at"),
+                AnalyticsFactSession.duration_seconds.label("duration_seconds"),
+                AnalyticsFactSession.overall_score.label("overall_score"),
+                AnalyticsFactSession.opening_score.label("opening_score"),
+                AnalyticsFactSession.pitch_score.label("pitch_score"),
+                AnalyticsFactSession.objection_score.label("objection_score"),
+                AnalyticsFactSession.closing_score.label("closing_score"),
+                AnalyticsFactSession.professionalism_score.label("professionalism_score"),
+                AnalyticsFactSession.weakness_tags_json.label("weakness_tags"),
                 Scorecard.highlights.label("highlights"),
-                case((reviewed_exists, True), else_=False).label("manager_reviewed"),
-                latest_reviewed_at.label("latest_reviewed_at"),
+                AnalyticsFactSession.manager_reviewed.label("manager_reviewed"),
+                AnalyticsFactSession.latest_reviewed_at.label("latest_reviewed_at"),
                 latest_coaching_note.label("latest_coaching_note_preview"),
                 Assignment.status.label("assignment_status"),
-                DrillSession.status.label("session_status"),
+                AnalyticsFactSession.status.label("session_status"),
             )
-            .join(Assignment, Assignment.id == DrillSession.assignment_id)
-            .join(User, User.id == DrillSession.rep_id)
-            .join(Scenario, Scenario.id == DrillSession.scenario_id)
-            .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
-            .where(Assignment.assigned_by == manager_id)
-            .order_by(DrillSession.started_at.desc())
+            .join(Assignment, Assignment.id == AnalyticsFactSession.assignment_id)
+            .join(User, User.id == AnalyticsFactSession.rep_id)
+            .join(Scenario, Scenario.id == AnalyticsFactSession.scenario_id)
+            .outerjoin(Scorecard, Scorecard.session_id == AnalyticsFactSession.session_id)
+            .where(AnalyticsFactSession.manager_id == manager_id)
+            .order_by(AnalyticsFactSession.started_at.desc())
         )
         if date_from is not None:
-            stmt = stmt.where(DrillSession.started_at >= date_from)
+            stmt = stmt.where(AnalyticsFactSession.session_date >= date_from.date())
         if date_to is not None:
-            stmt = stmt.where(DrillSession.started_at <= date_to)
+            stmt = stmt.where(AnalyticsFactSession.session_date <= date_to.date())
 
         rows = db.execute(stmt).mappings().all()
         return [
@@ -169,14 +188,14 @@ class ManagementAnalyticsService:
                 ended_at=_normalize_dt(row["ended_at"]),
                 duration_seconds=row["duration_seconds"],
                 overall_score=float(row["overall_score"]) if row["overall_score"] is not None else None,
-                category_scores=row["category_scores"] or {},
+                category_scores=_category_scores_from_fact(row),
                 weakness_tags=row["weakness_tags"] or [],
                 highlights=row["highlights"] or [],
                 manager_reviewed=bool(row["manager_reviewed"]),
                 latest_reviewed_at=_normalize_dt(row["latest_reviewed_at"]),
                 latest_coaching_note_preview=row["latest_coaching_note_preview"],
-                assignment_status=row["assignment_status"].value if row["assignment_status"] else "unknown",
-                session_status=row["session_status"].value if row["session_status"] else "unknown",
+                assignment_status=_enum_value(row["assignment_status"]),
+                session_status=_enum_value(row["session_status"]),
             )
             for row in rows
         ]
@@ -185,13 +204,11 @@ class ManagementAnalyticsService:
         if not session_ids:
             return {}
         rows = db.execute(
-            select(SessionTurn.session_id, SessionTurn.objection_tags).where(SessionTurn.session_id.in_(session_ids))
+            select(AnalyticsFactSession.session_id, AnalyticsFactSession.objection_tags_json).where(
+                AnalyticsFactSession.session_id.in_(session_ids)
+            )
         ).all()
-        tags_by_session: dict[str, Counter[str]] = defaultdict(Counter)
-        for session_id, tags in rows:
-            for tag in tags or []:
-                tags_by_session[session_id][tag] += 1
-        return {session_id: [tag for tag, _ in counter.most_common()] for session_id, counter in tags_by_session.items()}
+        return {session_id: list(tags or []) for session_id, tags in rows}
 
     def _load_transcript_previews(self, db: Session, session_ids: list[str]) -> dict[str, str]:
         if not session_ids:
@@ -211,17 +228,11 @@ class ManagementAnalyticsService:
         if not session_ids:
             return {}
         rows = db.execute(
-            select(SessionEvent.session_id, SessionEvent.payload)
-            .where(
-                SessionEvent.session_id.in_(session_ids),
-                SessionEvent.event_type == "server.session.state",
+            select(AnalyticsFactSession.session_id, AnalyticsFactSession.barge_in_count).where(
+                AnalyticsFactSession.session_id.in_(session_ids)
             )
         ).all()
-        counts: dict[str, int] = defaultdict(int)
-        for session_id, payload in rows:
-            if isinstance(payload, dict) and payload.get("state") == "barge_in_detected":
-                counts[session_id] += 1
-        return counts
+        return {session_id: int(count or 0) for session_id, count in rows}
 
     def _load_assignment_completion(self, db: Session, *, manager_id: str, date_from: datetime, date_to: datetime) -> dict[str, dict[str, Any]]:
         rows = db.execute(
@@ -687,51 +698,51 @@ class ManagementAnalyticsService:
             }
 
         session_map = {session.session_id: session for session in sessions}
-        scorecard_rows = db.execute(
-            select(Scorecard.id, Scorecard.session_id).where(Scorecard.session_id.in_(session_ids))
-        ).all()
-        scorecard_by_session = {session_id: scorecard_id for scorecard_id, session_id in scorecard_rows}
-        scorecard_ids = [scorecard_id for scorecard_id, _ in scorecard_rows]
-
-        reviews = db.scalars(
-            select(ManagerReview)
-            .where(ManagerReview.scorecard_id.in_(scorecard_ids), ManagerReview.reviewed_at >= date_from, ManagerReview.reviewed_at <= date_to)
-            .order_by(ManagerReview.reviewed_at.desc())
-        ).all() if scorecard_ids else []
-
         notes = db.scalars(
             select(ManagerCoachingNote)
             .where(
-                ManagerCoachingNote.scorecard_id.in_(scorecard_ids),
+                ManagerCoachingNote.scorecard_id.in_(
+                    select(Scorecard.id).where(Scorecard.session_id.in_(session_ids))
+                ),
                 ManagerCoachingNote.created_at >= date_from,
                 ManagerCoachingNote.created_at <= date_to,
             )
             .order_by(ManagerCoachingNote.created_at.desc())
-        ).all() if scorecard_ids else []
+        ).all()
+        note_map = {note.id: note for note in notes}
 
-        scored_sessions_by_rep: dict[str, list[SessionRecord]] = defaultdict(list)
-        for session in sessions:
-            if session.overall_score is not None:
-                scored_sessions_by_rep[session.rep_id].append(session)
-        for rep_sessions in scored_sessions_by_rep.values():
-            rep_sessions.sort(key=lambda item: item.started_at or datetime.min.replace(tzinfo=timezone.utc))
+        coaching_facts = db.scalars(
+            select(AnalyticsFactCoachingIntervention)
+            .where(
+                AnalyticsFactCoachingIntervention.manager_id == manager_id,
+                AnalyticsFactCoachingIntervention.session_id.in_(session_ids),
+                AnalyticsFactCoachingIntervention.note_created_at >= date_from,
+                AnalyticsFactCoachingIntervention.note_created_at <= date_to,
+            )
+            .order_by(AnalyticsFactCoachingIntervention.note_created_at.desc())
+        ).all()
+        calibration_facts = db.scalars(
+            select(AnalyticsFactManagerCalibration)
+            .where(
+                AnalyticsFactManagerCalibration.manager_id == manager_id,
+                AnalyticsFactManagerCalibration.session_id.in_(session_ids),
+                AnalyticsFactManagerCalibration.reviewed_at >= date_from,
+                AnalyticsFactManagerCalibration.reviewed_at <= date_to,
+            )
+            .order_by(AnalyticsFactManagerCalibration.reviewed_at.desc())
+        ).all()
 
         uplift_rows = []
         tag_uplift: dict[str, list[float]] = defaultdict(list)
         recent_notes = []
-        for note in notes:
-            session_id = next((sid for sid, scid in scorecard_by_session.items() if scid == note.scorecard_id), None)
-            if not session_id:
+        for fact in coaching_facts:
+            source_session = session_map.get(fact.session_id)
+            if not source_session:
                 continue
-            source_session = session_map.get(session_id)
-            if not source_session or source_session.overall_score is None:
-                continue
-            rep_sessions = scored_sessions_by_rep.get(source_session.rep_id, [])
-            next_session = next((item for item in rep_sessions if (item.started_at or datetime.min.replace(tzinfo=timezone.utc)) > (source_session.started_at or datetime.min.replace(tzinfo=timezone.utc))), None)
-            delta = None
-            if next_session and next_session.overall_score is not None:
-                delta = round(next_session.overall_score - source_session.overall_score, 2)
-                for tag in note.weakness_tags:
+            note = note_map.get(fact.coaching_note_id)
+            delta = round(fact.score_delta, 2) if fact.score_delta is not None else None
+            if delta is not None:
+                for tag in fact.weakness_tags_json or []:
                     tag_uplift[tag].append(delta)
             uplift_rows.append(
                 {
@@ -739,33 +750,30 @@ class ManagementAnalyticsService:
                     "rep_name": source_session.rep_name,
                     "session_id": source_session.session_id,
                     "scenario_name": source_session.scenario_name,
-                    "before_score": source_session.overall_score,
-                    "after_score": next_session.overall_score if next_session else None,
+                    "before_score": fact.before_score,
+                    "after_score": fact.after_score,
                     "delta": delta,
-                    "note": note.note,
-                    "weakness_tags": note.weakness_tags,
-                    "created_at": note.created_at.isoformat(),
+                    "note": note.note if note else "",
+                    "weakness_tags": list(fact.weakness_tags_json or []),
+                    "created_at": fact.note_created_at.isoformat(),
                 }
             )
             recent_notes.append(
                 {
-                    "id": note.id,
+                    "id": fact.coaching_note_id,
                     "rep_id": source_session.rep_id,
                     "rep_name": source_session.rep_name,
                     "scenario_name": source_session.scenario_name,
-                    "note": note.note,
-                    "visible_to_rep": note.visible_to_rep,
-                    "weakness_tags": note.weakness_tags,
-                    "created_at": note.created_at.isoformat(),
+                    "note": note.note if note else "",
+                    "visible_to_rep": bool(fact.visible_to_rep),
+                    "weakness_tags": list(fact.weakness_tags_json or []),
+                    "created_at": fact.note_created_at.isoformat(),
                 }
             )
 
         reviewer_rows: dict[str, dict[str, Any]] = {}
         override_deltas = []
-        for review in reviews:
-            session_id = next((sid for sid, scid in scorecard_by_session.items() if scid == review.scorecard_id), None)
-            source_session = session_map.get(session_id) if session_id else None
-            base_score = source_session.overall_score if source_session else None
+        for review in calibration_facts:
             row = reviewer_rows.setdefault(
                 review.reviewer_id,
                 {
@@ -779,8 +787,8 @@ class ManagementAnalyticsService:
                 },
             )
             row["review_count"] += 1
-            if review.override_score is not None and base_score is not None:
-                delta = round(review.override_score - base_score, 2)
+            if review.override_score is not None and review.ai_score is not None and review.delta_score is not None:
+                delta = round(review.delta_score, 2)
                 row["override_count"] += 1
                 row["delta_samples"].append(delta)
                 override_deltas.append(delta)
@@ -806,12 +814,12 @@ class ManagementAnalyticsService:
         reviewers.sort(key=lambda item: item["review_count"], reverse=True)
 
         timeline_buckets: dict[str, dict[str, Any]] = defaultdict(lambda: {"date": "", "review_count": 0, "coaching_note_count": 0})
-        for review in reviews:
+        for review in calibration_facts:
             key = review.reviewed_at.date().isoformat()
             timeline_buckets[key]["date"] = key
             timeline_buckets[key]["review_count"] += 1
-        for note in notes:
-            key = note.created_at.date().isoformat()
+        for fact in coaching_facts:
+            key = fact.note_created_at.date().isoformat()
             timeline_buckets[key]["date"] = key
             timeline_buckets[key]["coaching_note_count"] += 1
 
@@ -821,12 +829,12 @@ class ManagementAnalyticsService:
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
             "summary": {
-                "coaching_note_count": len(notes),
-                "review_count": len(reviews),
+                "coaching_note_count": len(coaching_facts),
+                "review_count": len(calibration_facts),
                 "override_rate": round(
-                    len([review for review in reviews if review.override_score is not None]) / max(1, len(reviews)),
+                    len([review for review in calibration_facts if review.override_score is not None]) / max(1, len(calibration_facts)),
                     3,
-                ) if reviews else 0.0,
+                ) if calibration_facts else 0.0,
                 "average_override_delta": round(sum(override_deltas) / len(override_deltas), 2) if override_deltas else None,
             },
             "coaching_uplift": uplift_rows[:36],
