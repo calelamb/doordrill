@@ -18,10 +18,10 @@ from app.models.session import SessionArtifact, SessionTurn
 from app.models.types import AssignmentStatus, EventDirection, SessionStatus, TurnSpeaker
 from app.schemas.ws import WsEvent
 from app.services.conversation_orchestrator import ConversationOrchestrator
-from app.services.grading_service import GradingService
 from app.services.ledger_buffer import InMemoryEventBuffer, RedisEventBuffer
 from app.services.ledger_service import SessionLedgerService
 from app.services.provider_clients import ProviderSuite
+from app.services.session_postprocess_service import SessionPostprocessService
 
 router = APIRouter(tags=["voice"])
 settings = get_settings()
@@ -37,7 +37,7 @@ except Exception:
 
 ledger = SessionLedgerService(buffer=event_buffer)
 orchestrator = ConversationOrchestrator()
-grading_service = GradingService()
+postprocess_service = SessionPostprocessService()
 providers = ProviderSuite.from_settings(settings)
 
 
@@ -479,8 +479,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 assignment.status = AssignmentStatus.COMPLETED
             db.commit()
 
+            postprocess_result = None
             if session is not None:
-                await grading_service.grade_session(db, session_id=session_id)
+                postprocess_result = await postprocess_service.enqueue_or_run(db, session_id=session_id)
 
             logger.info(
                 "Session finalized",
@@ -489,6 +490,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "transcript_artifact": transcript_artifact.storage_key,
                     "audio_frames": audio_frame_count,
                     "barge_in_count": barge_in_count,
+                    "postprocess_mode": postprocess_result["mode"] if postprocess_result else "none",
                     "trace_id": ws_trace_id,
                 },
             )

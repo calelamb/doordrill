@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     elevenlabs_base_url: str = Field(default="https://api.elevenlabs.io", alias="ELEVENLABS_BASE_URL")
     deepgram_model: str = Field(default="nova-2", alias="DEEPGRAM_MODEL")
     provider_timeout_seconds: float = Field(default=10.0, alias="PROVIDER_TIMEOUT_SECONDS")
+
+    use_celery: bool = Field(default=False, alias="USE_CELERY")
+    celery_broker_url: str = Field(default="redis://localhost:6379/0", alias="CELERY_BROKER_URL")
+    celery_result_backend: str = Field(default="redis://localhost:6379/1", alias="CELERY_RESULT_BACKEND")
+    whisper_cleanup_enabled: bool = Field(default=False, alias="WHISPER_CLEANUP_ENABLED")
+    whisper_model: str = Field(default="gpt-4o-mini-transcribe", alias="WHISPER_MODEL")
+    manager_notification_email_enabled: bool = Field(default=False, alias="MANAGER_NOTIFICATION_EMAIL_ENABLED")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=True, alias="LOG_JSON")
 

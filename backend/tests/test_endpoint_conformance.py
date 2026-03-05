@@ -1,5 +1,10 @@
 import time
 
+from sqlalchemy import select
+
+from app.db.session import SessionLocal
+from app.models.session import SessionArtifact
+
 
 def _create_assignment(client, seed_org: dict[str, str]) -> dict:
     response = client.post(
@@ -147,3 +152,12 @@ def test_manager_and_rep_endpoint_conformance(client, seed_org):
             break
         time.sleep(0.02)
     assert rep_progress.json()["session_count"] >= 1
+
+    db = SessionLocal()
+    cleanup_artifact = db.scalar(
+        select(SessionArtifact).where(
+            SessionArtifact.session_id == session_id, SessionArtifact.artifact_type == "transcript_cleanup"
+        )
+    )
+    db.close()
+    assert cleanup_artifact is not None
