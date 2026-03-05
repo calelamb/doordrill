@@ -5,10 +5,14 @@ Expo + React Native client focused on the rep workflow.
 ## Implemented v1 flow
 
 - Rep sign-in bootstrap (`rep_id`)
-- Assignment list (`GET /rep/assignments`)
+- Assignment list (`GET /rep/assignments`) with status filters
 - Start drill session (`POST /rep/sessions`)
 - Live drill screen using websocket contract (`WS /ws/sessions/{id}`)
-- Scorecard screen (`GET /rep/sessions/{id}`)
+  - hold-to-talk microphone capture (Expo AV)
+  - VAD state signaling (`client.vad.state`)
+  - audio payload send (`client.audio.chunk` with `audio_base64`)
+  - interruption cue + reconnect controls
+- Scorecard screen (`GET /rep/sessions/{id}`) with category bars/highlights/weakness tags
 
 ## Environment
 
@@ -39,5 +43,5 @@ npm run android
 
 ## Notes
 
-- Voice microphone capture is intentionally abstracted in `src/services/audio.ts` and staged for the next phase.
-- Current live drill uses typed utterance events against the same websocket contract as desktop dashboard rep mode.
+- The rep can provide an optional transcript hint while sending real mic audio; backend STT uses the hint only as fallback.
+- AI audio playback is best-effort chunk playback in v1 and can be replaced with a dedicated streaming player in a later pass.
