@@ -8,7 +8,7 @@ Vite + React manager console scaffold for:
 - manager analytics
 - rep progress snapshot
 - manager action timeline
-- rep mode (assignment list + session start + score fetch)
+- rep mode (assignment list + session start + score fetch + live WS drill console)
 
 ## Run
 
@@ -24,6 +24,7 @@ Optional env:
 
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_WS_BASE_URL=ws://127.0.0.1:8000
 ```
 
 ## Current scope
@@ -31,3 +32,7 @@ VITE_API_BASE_URL=http://127.0.0.1:8000
 - Designed as a fast integration shell against backend contracts.
 - Uses manager header auth scaffold (`x-user-id`, `x-user-role=manager`).
 - Enter a manager ID in the UI to load data.
+- Rep mode includes a live websocket console (`/ws/sessions/{id}`) with:
+  - connection controls (connect/end)
+  - utterance send controls (VAD + audio chunk contract)
+  - live event stream for STT/AI/session state and turn commits

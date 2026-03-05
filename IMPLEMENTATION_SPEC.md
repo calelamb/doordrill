@@ -227,7 +227,8 @@ Stubbed integrations:
 
 2. Replay fidelity hardening
    - turn timing alignment implemented in WS turn commit windows
-   - next: add multi-turn interruption timing traces
+   - interruption-aware traces implemented (`barge_in_detected` + replay interruption timeline)
+   - next: benchmark barge-in cancel latency against <=150ms target with provider-backed runs
 
 3. Auth and authorization
    - header + JWT actor resolution implemented
@@ -236,18 +237,18 @@ Stubbed integrations:
 
 4. Infra readiness
    - add Alembic migrations (implemented through rev `20260305_0003`)
-   - add structured logging + tracing (request logging middleware implemented; tracing pending)
+   - structured logging + tracing implemented (JSON logs, request/session trace IDs)
    - configure Redis + Postgres + object storage in deployment
 
 5. Performance and reliability
-   - load test to 200 concurrent sessions (initial synthetic harness added at `backend/scripts/load_test_ws.py`)
-   - verify p50/p95 first-audio latency
-   - test event loss guarantees and reconnect behavior
+   - load test ramp harness implemented (`50,100,200` stages, SLO gates, JSON reports)
+   - next: run staged benchmarks in deployed env and enforce CI gating on SLO failures
+   - next: test event loss guarantees and reconnect behavior under network churn
 
 6. Frontend integration
    - manager UI: feed, replay, override, analytics, action timeline implemented in scaffold
-   - rep UI: assignments + session start + score fetch implemented in scaffold
-   - next: live voice rep UI and auth/session UX hardening
+   - rep UI: assignments + session start + score fetch + live WS drill console implemented
+   - next: microphone capture/streaming UX + auth/session hardening
 
 ## Non-Negotiable Product Requirements
 

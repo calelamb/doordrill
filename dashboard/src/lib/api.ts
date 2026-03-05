@@ -1,6 +1,7 @@
 import type { FeedItem, ManagerActionLog, ManagerAnalytics, ReplayResponse, RepAssignment, RepProgress, RepSessionDetail } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const WS_BASE = import.meta.env.VITE_WS_BASE_URL ?? API_BASE.replace(/^http/i, "ws");
 
 const managerHeaders = (managerId: string) => ({
   "x-user-id": managerId,
@@ -140,4 +141,8 @@ export async function fetchRepSession(repId: string, sessionId: string): Promise
     throw new Error(`rep session request failed: ${response.status}`);
   }
   return response.json();
+}
+
+export function getRepSessionWsUrl(sessionId: string): string {
+  return `${WS_BASE}/ws/sessions/${encodeURIComponent(sessionId)}`;
 }

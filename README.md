@@ -68,6 +68,9 @@ The initial FastAPI backend foundation has been implemented in [`backend/`](./ba
 - Manager action audit logging (`manager_action_logs`)
 - Org-scoped access control with header/JWT actor resolution
 - Provider adapters for Deepgram/OpenAI/ElevenLabs (real API paths + fallback)
+- Interruption-aware WS replay traces (`barge_in_detected`) + transport metrics
+- Structured tracing logs with request/session correlation IDs
+- Ramp/SLO websocket load harness (`backend/scripts/load_test_ws.py`)
 
 ## Dashboard Progress
 
@@ -79,4 +82,4 @@ A manager web scaffold has been implemented in [`dashboard/`](./dashboard):
 - Follow-up assignment action (`POST /manager/scorecards/{id}/followup-assignment`)
 - Analytics + rep progress panel (`/manager/analytics`, `/manager/reps/{id}/progress`)
 - Manager action timeline (`/manager/actions`)
-- Rep mode scaffold (assignment list, session start, score fetch)
+- Rep mode live drill console (session WS connect, turn send, live event stream, score refresh)
