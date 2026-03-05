@@ -1,3 +1,19 @@
+from app.models.analytics import (
+    AnalyticsDimManager,
+    AnalyticsDimRep,
+    AnalyticsDimScenario,
+    AnalyticsFactCoachingIntervention,
+    AnalyticsFactManagerCalibration,
+    AnalyticsFactRepDay,
+    AnalyticsFactRepWeek,
+    AnalyticsFactScenarioDay,
+    AnalyticsFactSession,
+    AnalyticsFactSessionTurnMetrics,
+    AnalyticsFactTeamDay,
+    AnalyticsMetricDefinition,
+    AnalyticsMetricSnapshot,
+    AnalyticsRefreshRun,
+)
 from app.models.assignment import Assignment
 from app.models.base import Base
 from app.models.device_token import DeviceToken
@@ -12,6 +28,20 @@ from app.models.user import Organization, Team, User
 
 __all__ = [
     "Assignment",
+    "AnalyticsDimManager",
+    "AnalyticsDimRep",
+    "AnalyticsDimScenario",
+    "AnalyticsFactCoachingIntervention",
+    "AnalyticsFactManagerCalibration",
+    "AnalyticsFactRepDay",
+    "AnalyticsFactRepWeek",
+    "AnalyticsFactScenarioDay",
+    "AnalyticsFactSession",
+    "AnalyticsFactSessionTurnMetrics",
+    "AnalyticsFactTeamDay",
+    "AnalyticsMetricDefinition",
+    "AnalyticsMetricSnapshot",
+    "AnalyticsRefreshRun",
     "Base",
     "DeviceToken",
     "ManagerActionLog",

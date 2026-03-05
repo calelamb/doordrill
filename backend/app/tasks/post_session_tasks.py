@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from app.db.session import SessionLocal
+from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.services.notification_service import NotificationService
 from app.services.session_postprocess_service import SessionPostprocessService
 from app.tasks.celery_app import get_celery_app
@@ -10,6 +11,7 @@ from app.tasks.celery_app import get_celery_app
 celery_app = get_celery_app()
 postprocess_service = SessionPostprocessService()
 notification_service = NotificationService()
+analytics_refresh_service = AnalyticsRefreshService()
 
 
 def _run(coro):
@@ -43,6 +45,26 @@ def _run_notification_retry(limit: int):
     db = SessionLocal()
     try:
         return _run(notification_service.retry_due_deliveries(db, limit=limit))
+    finally:
+        db.close()
+
+
+def _run_analytics_backfill():
+    db = SessionLocal()
+    try:
+        result = analytics_refresh_service.backfill_all(db)
+        db.commit()
+        return result
+    finally:
+        db.close()
+
+
+def _run_manager_refresh(manager_id: str):
+    db = SessionLocal()
+    try:
+        result = analytics_refresh_service.refresh_manager(db, manager_id=manager_id)
+        db.commit()
+        return result
     finally:
         db.close()
 
@@ -104,3 +126,26 @@ if celery_app is not None:  # pragma: no branch - depends on runtime settings
             if self.request.retries >= self.max_retries:
                 return {"ok": False, "task": "notifications.retry_due", "error": str(exc)}
             raise self.retry(exc=exc, countdown=30)
+
+
+    @celery_app.task(bind=True, name="analytics.refresh_manager", max_retries=3)
+    def refresh_manager_analytics(self, manager_id: str):
+        try:
+            result = _run_manager_refresh(manager_id)
+            return {"ok": True, "task": "analytics.refresh_manager", "manager_id": manager_id, "result": result}
+        except Exception as exc:  # pragma: no cover - worker runtime
+            if self.request.retries >= self.max_retries:
+                return {"ok": False, "task": "analytics.refresh_manager", "manager_id": manager_id, "error": str(exc)}
+            countdown = min(60 * (2 ** self.request.retries), 1800)
+            raise self.retry(exc=exc, countdown=countdown)
+
+
+    @celery_app.task(bind=True, name="analytics.backfill", max_retries=1)
+    def analytics_backfill(self):
+        try:
+            result = _run_analytics_backfill()
+            return {"ok": True, "task": "analytics.backfill", "result": result}
+        except Exception as exc:  # pragma: no cover - worker runtime
+            if self.request.retries >= self.max_retries:
+                return {"ok": False, "task": "analytics.backfill", "error": str(exc)}
+            raise self.retry(exc=exc, countdown=60)

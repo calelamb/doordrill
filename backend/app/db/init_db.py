@@ -4,6 +4,7 @@ from app.db.session import SessionLocal, engine
 from app.models import Base  # noqa: F401 - ensure models imported
 from app.models.prompt_version import PromptVersion
 from app.models.scenario import Scenario
+from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.services.conversation_orchestrator import PromptBuilder
 from app.services.grading_service import GradingPromptBuilder
 
@@ -209,6 +210,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
+        AnalyticsRefreshService().ensure_metric_definitions(db)
         _seed_prompt_versions(db)
         _seed_phase_one_scenarios(db)
         db.commit()

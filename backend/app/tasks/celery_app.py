@@ -31,6 +31,8 @@ def get_celery_app():
         "post_session.notify": {"queue": "postprocess.notify"},
         "post_session.retry_due": {"queue": "postprocess.retry"},
         "notifications.retry_due": {"queue": "notifications.retry"},
+        "analytics.refresh_manager": {"queue": "analytics.refresh"},
+        "analytics.backfill": {"queue": "analytics.backfill"},
     }
     celery_app.conf.task_acks_late = True
     celery_app.conf.worker_prefetch_multiplier = 1
@@ -42,6 +44,10 @@ def get_celery_app():
         "notifications-retry-due-every-minute": {
             "task": "notifications.retry_due",
             "schedule": 60.0,
+        },
+        "analytics-backfill-hourly": {
+            "task": "analytics.backfill",
+            "schedule": 3600.0,
         },
     }
     return celery_app

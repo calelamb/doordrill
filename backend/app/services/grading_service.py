@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.types import SessionStatus
@@ -75,6 +76,7 @@ class GradingService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.prompt_builder = GradingPromptBuilder()
+        self.analytics_refresh_service = AnalyticsRefreshService()
 
     async def grade_session(self, db: Session, session_id: str) -> Scorecard:
         session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
@@ -117,6 +119,7 @@ class GradingService:
 
         session.status = SessionStatus.GRADED
         session.ended_at = session.ended_at or datetime.now(timezone.utc)
+        self.analytics_refresh_service.refresh_session(db, session_id=session_id)
         db.commit()
         db.refresh(scorecard)
         return scorecard

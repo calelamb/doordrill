@@ -27,6 +27,7 @@ from app.schemas.scorecard import (
 from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
 from app.services.manager_action_service import ManagerActionService
 from app.services.management_analytics_service import ManagementAnalyticsService
+from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.services.manager_feed_service import ManagerFeedService
 from app.services.manager_review_service import ManagerReviewService
 from app.services.notification_service import NotificationService
@@ -39,6 +40,7 @@ action_service = ManagerActionService()
 review_service = ManagerReviewService()
 notification_service = NotificationService()
 management_analytics_service = ManagementAnalyticsService()
+analytics_refresh_service = AnalyticsRefreshService()
 RUBRIC_CATEGORY_KEYS = {
     "opening": "opening",
     "pitch": "pitch",
@@ -1159,6 +1161,8 @@ def override_scorecard(
         },
     )
 
+    analytics_refresh_service.refresh_session(db, session_id=source_session.id)
+
     db.commit()
     db.refresh(review)
     return review
@@ -1198,6 +1202,9 @@ def bulk_review_sessions(
                 "session_ids": payload.session_ids,
             },
         )
+        for item in result["items"]:
+            if item.get("status") == "created":
+                analytics_refresh_service.refresh_session(db, session_id=item["session_id"])
     db.commit()
     return BulkReviewResponse.model_validate(result)
 
@@ -1238,6 +1245,7 @@ def create_coaching_note(
             "weakness_tags": payload.weakness_tags,
         },
     )
+    analytics_refresh_service.refresh_session(db, session_id=coaching_note.scorecard.session_id)
     db.commit()
     db.refresh(coaching_note)
     return _serialize_coaching_note(coaching_note)
