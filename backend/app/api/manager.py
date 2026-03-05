@@ -14,16 +14,19 @@ from app.models.session import SessionArtifact, SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, ReviewReason, SessionStatus, UserRole
 from app.models.user import Team, User
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
+from app.schemas.notification import NotificationDeliveryResponse
 from app.schemas.scorecard import ManagerReviewResponse, ScorecardOverrideRequest
 from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
 from app.services.manager_action_service import ManagerActionService
 from app.services.manager_feed_service import ManagerFeedService
+from app.services.notification_service import NotificationService
 from app.services.storage_service import StorageService
 
 router = APIRouter(prefix="/manager", tags=["manager"])
 feed_service = ManagerFeedService()
 storage_service = StorageService()
 action_service = ManagerActionService()
+notification_service = NotificationService()
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -699,3 +702,35 @@ def get_manager_actions(
             for log in logs
         ]
     }
+
+
+@router.get("/notifications")
+def get_manager_notifications(
+    manager_id: str = Query(...),
+    limit: int = Query(default=100, ge=1, le=500),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own notifications")
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    rows = notification_service.list_manager_notifications(db, manager_id=manager_id, limit=limit)
+    items = [
+        NotificationDeliveryResponse(
+            id=row.id,
+            session_id=row.session_id,
+            manager_id=row.manager_id,
+            channel=row.channel,
+            payload=row.payload,
+            provider_response=row.provider_response,
+            status=row.status,
+            retries=row.retries,
+            next_retry_at=row.next_retry_at,
+            last_error=row.last_error,
+            sent_at=row.sent_at,
+            created_at=row.created_at,
+        ).model_dump()
+        for row in rows
+    ]
+    return {"items": items}

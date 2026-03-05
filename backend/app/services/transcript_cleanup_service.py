@@ -39,6 +39,12 @@ class TranscriptCleanupService:
             "turn_count": len(cleaned_turns),
             "cleaned_turns": cleaned_turns,
             "source": "whisper" if whisper_text else "fallback",
+            "provenance": {
+                "whisper_cleanup_enabled": self.settings.whisper_cleanup_enabled,
+                "whisper_attempted": bool(self.settings.whisper_cleanup_enabled and self.settings.openai_api_key),
+                "whisper_succeeded": bool(whisper_text),
+                "fallback_used": not bool(whisper_text),
+            },
         }
         if whisper_text:
             metadata["whisper_text"] = whisper_text

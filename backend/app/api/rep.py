@@ -12,9 +12,12 @@ from app.models.session import Session as DrillSession
 from app.models.types import AssignmentStatus, SessionStatus
 from app.models.user import User
 from app.schemas.assignment import AssignmentResponse
+from app.schemas.notification import DeviceTokenCreateRequest, DeviceTokenResponse
 from app.schemas.session import SessionCreateRequest, SessionResponse
+from app.services.notification_service import NotificationService
 
 router = APIRouter(prefix="/rep", tags=["rep"])
+notification_service = NotificationService()
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -182,3 +185,45 @@ def get_rep_progress(
         "scored_session_count": int(scored_count),
         "average_score": round(float(avg_score), 2) if avg_score is not None else None,
     }
+
+
+@router.post("/device-tokens", response_model=DeviceTokenResponse)
+def register_device_token(
+    payload: DeviceTokenCreateRequest,
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+    user = _get_user_or_404(db, actor.user_id, "user")
+    _ensure_same_org(actor, user.org_id)
+    token = notification_service.register_device_token(
+        db,
+        user_id=user.id,
+        platform=payload.platform,
+        token=payload.token,
+    )
+    return {
+        "id": token.id,
+        "user_id": token.user_id,
+        "platform": token.platform,
+        "token": token.token,
+        "status": token.status,
+        "last_seen_at": token.last_seen_at,
+    }
+
+
+@router.delete("/device-tokens/{token_id}")
+def revoke_device_token(
+    token_id: str,
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+    user = _get_user_or_404(db, actor.user_id, "user")
+    _ensure_same_org(actor, user.org_id)
+    revoked = notification_service.revoke_device_token(db, user_id=user.id, token_id=token_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="device token not found")
+    return {"ok": True, "token_id": token_id}

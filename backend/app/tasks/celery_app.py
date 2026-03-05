@@ -25,4 +25,11 @@ def get_celery_app():
     celery_app.conf.result_serializer = "json"
     celery_app.conf.accept_content = ["json"]
     celery_app.conf.timezone = "UTC"
+    celery_app.conf.task_routes = {
+        "post_session.cleanup": {"queue": "postprocess.cleanup"},
+        "post_session.grade": {"queue": "postprocess.grade"},
+        "post_session.notify": {"queue": "postprocess.notify"},
+    }
+    celery_app.conf.task_acks_late = True
+    celery_app.conf.worker_prefetch_multiplier = 1
     return celery_app

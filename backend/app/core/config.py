@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     whisper_cleanup_enabled: bool = Field(default=False, alias="WHISPER_CLEANUP_ENABLED")
     whisper_model: str = Field(default="gpt-4o-mini-transcribe", alias="WHISPER_MODEL")
     manager_notification_email_enabled: bool = Field(default=False, alias="MANAGER_NOTIFICATION_EMAIL_ENABLED")
+    manager_notification_push_enabled: bool = Field(default=False, alias="MANAGER_NOTIFICATION_PUSH_ENABLED")
+    notification_max_retries: int = Field(default=5, alias="NOTIFICATION_MAX_RETRIES")
+    notification_retry_base_seconds: int = Field(default=30, alias="NOTIFICATION_RETRY_BASE_SECONDS")
+    sendgrid_api_key: str | None = Field(default=None, alias="SENDGRID_API_KEY")
+    sendgrid_from_email: str | None = Field(default=None, alias="SENDGRID_FROM_EMAIL")
+    expo_push_base_url: str = Field(default="https://exp.host/--/api/v2/push/send", alias="EXPO_PUSH_BASE_URL")
+    expo_push_access_token: str | None = Field(default=None, alias="EXPO_PUSH_ACCESS_TOKEN")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=True, alias="LOG_JSON")
 
