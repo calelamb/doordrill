@@ -58,6 +58,13 @@ export async function createRepSession(
   return parseJson<{ id: string }>(response, "create session");
 }
 
+export async function fetchAllScenarios(repId: string): Promise<ScenarioBrief[]> {
+  const response = await fetch(`${API_BASE_URL}/scenarios`, {
+    headers: repHeaders(repId)
+  });
+  return parseJson<ScenarioBrief[]>(response, "fetch all scenarios");
+}
+
 export async function fetchRepScenario(repId: string, scenarioId: string): Promise<ScenarioBrief> {
   const response = await fetch(`${API_BASE_URL}/scenarios/${encodeURIComponent(scenarioId)}`, {
     headers: repHeaders(repId)
@@ -70,4 +77,11 @@ export async function fetchRepSession(repId: string, sessionId: string): Promise
     headers: repHeaders(repId)
   });
   return parseJson<RepSessionDetail>(response, "fetch session detail");
+}
+
+export async function fetchRepProgress(repId: string): Promise<RepProgress> {
+  const response = await fetch(`${API_BASE_URL}/rep/progress?rep_id=${encodeURIComponent(repId)}`, {
+    headers: repHeaders(repId)
+  });
+  return parseJson<RepProgress>(response, "fetch progress");
 }

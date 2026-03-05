@@ -1,12 +1,13 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useMemo, useState, useRef } from "react";
+import { ActivityIndicator, Animated, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { UserCircle } from "lucide-react-native";
 
 import { RootStackParamList } from "../navigation/types";
-import { fetchRepSession } from "../services/api";
+import { fetchRepSession, fetchRepScenario } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { RepSessionDetail, Scorecard } from "../types";
+import { RepSessionDetail, Scorecard, ScenarioBrief } from "../types";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Score">;
 
@@ -40,73 +41,86 @@ function scoreValue(value: number | { score?: number } | undefined): number {
   return 0;
 }
 
-function scoreBand(score: number): { bg: string; border: string; text: string; fill: string } {
-  if (score < 5) {
-    return { bg: "#FBE5E1", border: "#E5B3AA", text: "#9F3021", fill: "#D2553C" };
-  }
-  if (score < 7) {
-    return { bg: "#FFF2DA", border: "#E4C18B", text: "#8B5C1D", fill: "#D19A2F" };
-  }
-  return { bg: "#E3F3E8", border: "#B5D9BF", text: "#1E6A3B", fill: "#2E8B57" };
+function scoreBand(score: number) {
+  if (score < 5) return { bg: "#FEE2E2", text: "#991B1B", border: "#FECACA" };
+  if (score < 7) return { bg: "#FEF3C7", text: "#92400E", border: "#FDE68A" };
+  if (score < 8) return { bg: "#FEF3C7", text: "#92400E", border: "#FDE68A" }; // using amber for 5-7
+  return { bg: "#D1FAE5", text: "#065F46", border: "#A7F3D0" };
 }
 
-function scoreWidth(score: number): `${number}%` {
-  return `${clamp((score / 10) * 100, 0, 100)}%`;
-}
+function CategoryBar({ label, score, index }: { label: string; score: number; index: number }) {
+  const widthAnim = useRef(new Animated.Value(0)).current;
+  const band = scoreBand(score);
 
-function managerNoteFromData(data: RepSessionDetail | null): string | null {
-  if (!data) {
-    return null;
-  }
-  const reviewNotes = data.manager_review?.notes;
-  if (reviewNotes && reviewNotes.trim()) {
-    return reviewNotes.trim();
-  }
-  const managerNote = data.manager_note;
-  if (managerNote && managerNote.trim()) {
-    return managerNote.trim();
-  }
-  return null;
+  useEffect(() => {
+    Animated.timing(widthAnim, {
+      toValue: (score / 10) * 100,
+      duration: 700,
+      delay: index * 100,
+      useNativeDriver: false,
+    }).start();
+  }, [score, index, widthAnim]);
+
+  return (
+    <View style={styles.categoryRow}>
+      <View style={styles.categoryHeader}>
+        <Text style={styles.categoryName}>{label}</Text>
+        <Text style={[styles.categoryScore, { color: band.text }]}>{score.toFixed(1)}</Text>
+      </View>
+      <View style={styles.track}>
+        <Animated.View
+          style={[
+            styles.trackFill,
+            { backgroundColor: colors.accent, width: widthAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }) }
+          ]}
+        />
+      </View>
+    </View>
+  );
 }
 
 export function ScoreScreen({ route, navigation }: Props) {
   const { repId } = useSession();
   const { sessionId } = route.params;
   const [data, setData] = useState<RepSessionDetail | null>(null);
+  const [scenario, setScenario] = useState<ScenarioBrief | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pollCount, setPollCount] = useState(0);
 
+  const heroBarAnim = useRef(new Animated.Value(0)).current;
+
   useEffect(() => {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    async function loadScorecard() {
-      if (!repId) {
-        return;
-      }
+    async function loadData() {
+      if (!repId) return;
 
-      if (!cancelled) {
-        setLoading((current) => (pollCount === 0 ? true : current));
-        setRefreshing(pollCount > 0);
-        setError(null);
+      if (!cancelled && pollCount === 0) {
+        setLoading(true);
+      } else if (!cancelled) {
+        setRefreshing(true);
       }
 
       try {
         const result = await fetchRepSession(repId, sessionId);
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
         setData(result);
+
+        if (result.session.scenario_id && !scenario) {
+          const sc = await fetchRepScenario(repId, result.session.scenario_id);
+          if (!cancelled) setScenario(sc);
+        }
 
         if (!result.scorecard && pollCount < 5) {
           retryTimer = setTimeout(() => {
-            setPollCount((current) => current + 1);
+            if (!cancelled) setPollCount((c) => c + 1);
           }, 2000);
         }
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && pollCount === 0) {
           setError(err instanceof Error ? err.message : "Failed to load scorecard");
         }
       } finally {
@@ -117,26 +131,35 @@ export function ScoreScreen({ route, navigation }: Props) {
       }
     }
 
-    void loadScorecard();
+    void loadData();
 
     return () => {
       cancelled = true;
-      if (retryTimer) {
-        clearTimeout(retryTimer);
-      }
+      if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [pollCount, repId, sessionId]);
+  }, [pollCount, repId, sessionId, scenario]);
 
   const scorecard = data?.scorecard;
   const overallScore = scorecard?.overall_score ?? 0;
   const overallBand = scoreBand(overallScore);
-  const managerNote = managerNoteFromData(data);
+
+  useEffect(() => {
+    if (scorecard) {
+      Animated.timing(heroBarAnim, {
+        toValue: (overallScore / 10) * 100,
+        duration: 800,
+        useNativeDriver: false,
+      }).start();
+    }
+  }, [scorecard, overallScore, heroBarAnim]);
+
+  const managerNote = data?.manager_note || data?.manager_review?.notes;
 
   const categories = useMemo<CategoryRow[]>(() => {
     const scores = scorecard?.category_scores ?? {};
-    return CATEGORY_ORDER.map((category) => ({
-      ...category,
-      score: scoreValue(scores[category.key]),
+    return CATEGORY_ORDER.map((cat) => ({
+      ...cat,
+      score: scoreValue(scores[cat.key]),
     }));
   }, [scorecard]);
 
@@ -144,205 +167,301 @@ export function ScoreScreen({ route, navigation }: Props) {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-          <View style={[styles.heroCard, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}> 
-            <Text style={[styles.heroKicker, { color: overallBand.text }]}>Drill Score</Text>
-            <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
-            <Text style={styles.heroSubtext}>Session {sessionId.slice(0, 8)}</Text>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        {loading ? (
+          <View style={styles.loadingCard}>
+            <ActivityIndicator color={colors.accent} />
+            <Text style={styles.loadingText}>Pulling your scorecard...</Text>
           </View>
-
-          {loading ? (
-            <View style={styles.loadingCard}>
-              <ActivityIndicator color={colors.accent} />
-              <Text style={styles.loadingText}>Pulling your scorecard...</Text>
+        ) : (
+          <>
+            <View style={styles.heroBlock}>
+              <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
+              <Text style={styles.heroLabel}>Overall Score</Text>
+              <View style={styles.heroBarTrack}>
+                <Animated.View
+                  style={[
+                    styles.heroBarFill,
+                    {
+                      backgroundColor: overallBand.text,
+                      width: heroBarAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }),
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={styles.scenarioName}>{scenario?.name ?? "Scenario"}</Text>
             </View>
-          ) : null}
 
-          {refreshing && !scorecard ? <Text style={styles.refreshText}>AI grading is still processing...</Text> : null}
-          {error ? <Text style={styles.errorText}>{error}</Text> : null}
+            {refreshing && !scorecard ? <Text style={styles.refreshText}>AI grading is still processing...</Text> : null}
+            {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Category Breakdown</Text>
-            {categories.map((category) => {
-              const band = scoreBand(category.score);
-              return (
-                <View key={category.key} style={styles.categoryRow}>
-                  <View style={styles.categoryHeader}>
-                    <Text style={styles.categoryName}>{category.label}</Text>
-                    <Text style={styles.categoryScore}>{category.score.toFixed(1)}</Text>
-                  </View>
-                  <View style={styles.track}>
-                    <View style={[styles.trackFill, { width: scoreWidth(category.score), backgroundColor: band.fill }]} />
-                  </View>
+            {scorecard ? (
+              <>
+                <Text style={styles.sectionTitle}>PERFORMANCE BREAKDOWN</Text>
+                <View style={styles.categoriesContainer}>
+                  {categories.map((cat, idx) => (
+                    <CategoryBar key={cat.key} label={cat.label} score={cat.score} index={idx} />
+                  ))}
                 </View>
-              );
-            })}
-          </View>
 
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Highlight Moments</Text>
-            {highlights.length === 0 ? <Text style={styles.emptyText}>No highlights are available yet.</Text> : null}
-            {highlights.map((highlight, index) => {
-              const band = highlight.type === "strong" ? scoreBand(8) : scoreBand(6);
-              const quote = highlight.transcript_quote || highlight.quote || null;
-              return (
-                <View key={`${highlight.note}-${index}`} style={[styles.highlightCard, { backgroundColor: band.bg, borderColor: band.border }]}> 
-                  <View style={styles.highlightHeader}>
-                    <Text style={[styles.highlightType, { color: band.text }]}>
-                      {highlight.type === "strong" ? "Strong" : "Improve"}
-                    </Text>
-                    {highlight.turn_id ? <Text style={styles.turnRef}>Turn {highlight.turn_id.slice(0, 8)}</Text> : null}
-                  </View>
-                  <Text style={styles.highlightNote}>{highlight.note}</Text>
-                  {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
+                <Text style={styles.sectionTitle}>KEY MOMENTS</Text>
+                {highlights.length === 0 ? <Text style={styles.emptyText}>No highlights available.</Text> : null}
+                {highlights.map((hl, idx) => {
+                  const isStrong = hl.type === "strong";
+                  const hlBand = isStrong ? scoreBand(8) : scoreBand(6);
+                  const quote = hl.transcript_quote || hl.quote || null;
+
+                  return (
+                    <View key={idx} style={styles.highlightCard}>
+                      <View style={styles.highlightHeader}>
+                        <View style={[styles.highlightTag, { backgroundColor: isStrong ? colors.accentSoft : "#FEF3C7" }]}> 
+                          <Text style={[styles.highlightTagText, { color: isStrong ? colors.accent : "#92400E" }]}>
+                            {isStrong ? "Strong" : "Improve"}
+                          </Text>
+                        </View>
+                        {hl.turn_id ? <Text style={styles.turnRef}>Turn {hl.turn_id.slice(0, 8)}</Text> : null}
+                      </View>
+                      <Text style={styles.highlightNote}>{hl.note}</Text>
+                      {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
+                    </View>
+                  );
+                })}
+
+                <Text style={styles.sectionTitle}>FEEDBACK</Text>
+                <View style={styles.summaryCard}>
+                  <Text style={styles.summaryText}>{scorecard.ai_summary}</Text>
                 </View>
-              );
-            })}
-          </View>
 
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>AI Summary</Text>
-            <Text style={styles.summaryText}>
-              {scorecard?.ai_summary ?? "Your scorecard is still being assembled. Check back in a few seconds."}
-            </Text>
-          </View>
+                {managerNote ? (
+                  <View style={styles.managerNoteCard}>
+                    <View style={styles.managerNoteHeader}>
+                      <UserCircle size={16} color={colors.accent} />
+                      <Text style={styles.managerNoteLabel}>Manager Note</Text>
+                    </View>
+                    <Text style={styles.managerNoteText}>{managerNote}</Text>
+                  </View>
+                ) : null}
+              </>
+            ) : null}
 
-          {managerNote ? (
-            <View style={styles.managerNoteCard}>
-              <Text style={styles.managerNoteLabel}>Manager Coaching Note</Text>
-              <Text style={styles.managerNoteText}>{managerNote}</Text>
+            <View style={styles.ctaRow}>
+              <Pressable
+                style={styles.primaryCta}
+                onPress={() => {
+                  const assignmentId = data?.session.assignment_id;
+                  const scenarioId = data?.session.scenario_id;
+                  if (assignmentId && scenarioId) {
+                    navigation.replace("PreSession", { assignmentId, scenarioId });
+                  }
+                }}
+              >
+                <Text style={styles.primaryCtaLabel}>Try Again</Text>
+              </Pressable>
+              <Pressable style={styles.secondaryCta} onPress={() => navigation.replace("Assignments")}>
+                <Text style={styles.secondaryCtaLabel}>Back to Drills</Text>
+              </Pressable>
             </View>
-          ) : null}
-        </ScrollView>
-
-        <View style={styles.ctaRow}>
-          <Pressable
-            style={styles.primaryCta}
-            onPress={() => {
-              const assignmentId = data?.session.assignment_id;
-              const scenarioId = data?.session.scenario_id;
-              if (assignmentId && scenarioId) {
-                navigation.replace("PreSession", { assignmentId, scenarioId });
-              }
-            }}
-          >
-            <Text style={styles.primaryCtaLabel}>Try Again</Text>
-          </Pressable>
-          <Pressable style={styles.secondaryCta} onPress={() => navigation.replace("Assignments")}>
-            <Text style={styles.secondaryCtaLabel}>Back to Drills</Text>
-          </Pressable>
-        </View>
-      </View>
+          </>
+        )}
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.bg },
-  container: { flex: 1 },
-  content: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 150, gap: 16 },
-  heroCard: {
-    borderRadius: 24,
-    borderWidth: 1,
-    padding: 24,
+  content: { padding: 20, paddingBottom: 40 },
+  loadingCard: {
+    marginTop: 40,
+    padding: 20,
     alignItems: "center",
+    gap: 12,
+  },
+  loadingText: { color: colors.muted, fontSize: 15 },
+  refreshText: { color: colors.muted, fontSize: 13, textAlign: "center", marginBottom: 12 },
+  errorText: { color: "#AF2D18", fontSize: 14, fontWeight: "700", textAlign: "center", marginBottom: 12 },
+  
+  heroBlock: {
+    alignItems: "center",
+    paddingTop: 32,
+    marginBottom: 24,
+  },
+  heroValue: {
+    fontSize: 64,
+    fontWeight: "800",
+  },
+  heroLabel: {
+    fontSize: 13,
+    color: colors.muted,
+    textTransform: "uppercase",
+    letterSpacing: 1.5,
+    marginTop: 4,
+  },
+  heroBarTrack: {
+    width: "100%",
+    height: 4,
+    backgroundColor: colors.line,
+    borderRadius: 2,
+    marginTop: 12,
+    overflow: "hidden",
+  },
+  heroBarFill: {
+    height: "100%",
+    borderRadius: 2,
+  },
+  scenarioName: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: colors.ink,
+    marginTop: 16,
+  },
+  
+  sectionTitle: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: colors.muted,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    marginTop: 28,
+    marginBottom: 12,
+  },
+  categoriesContainer: {
+    gap: 12,
+  },
+  categoryRow: {
     gap: 6,
   },
-  heroKicker: { fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 1 },
-  heroValue: { fontSize: 56, fontWeight: "900", lineHeight: 60 },
-  heroSubtext: { color: colors.muted, fontSize: 13, fontWeight: "600" },
-  loadingCard: {
-    borderRadius: 18,
-    backgroundColor: colors.panel,
-    borderWidth: 1,
-    borderColor: colors.line,
-    padding: 16,
+  categoryHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
     alignItems: "center",
-    gap: 10,
   },
-  loadingText: { color: colors.muted, fontSize: 14 },
-  refreshText: { color: colors.muted, fontSize: 13, textAlign: "center" },
-  errorText: { color: "#AF2D18", fontSize: 14, fontWeight: "700", textAlign: "center" },
-  section: {
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.panel,
-    padding: 18,
-    gap: 14,
+  categoryName: {
+    fontSize: 13,
+    color: colors.ink,
   },
-  sectionTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },
-  categoryRow: { gap: 8 },
-  categoryHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  categoryName: { color: colors.ink, fontSize: 14, fontWeight: "700" },
-  categoryScore: { color: colors.ink, fontSize: 14, fontWeight: "800" },
+  categoryScore: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
   track: {
-    height: 10,
-    borderRadius: 999,
-    backgroundColor: "#EFE3D4",
+    height: 6,
+    backgroundColor: colors.line,
+    borderRadius: 3,
     overflow: "hidden",
   },
   trackFill: {
     height: "100%",
-    borderRadius: 999,
+    borderRadius: 3,
   },
-  emptyText: { color: colors.muted, fontSize: 14 },
+  
+  emptyText: { color: colors.muted, fontSize: 14, fontStyle: "italic" },
+  
   highlightCard: {
-    borderRadius: 16,
-    borderWidth: 1,
-    padding: 14,
-    gap: 8,
-  },
-  highlightHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  highlightType: { fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 },
-  turnRef: { color: colors.muted, fontSize: 11, fontWeight: "700" },
-  highlightNote: { color: colors.ink, fontSize: 15, fontWeight: "700", lineHeight: 21 },
-  highlightQuote: {
-    color: colors.muted,
-    fontSize: 13,
-    lineHeight: 19,
-    fontStyle: "italic",
-  },
-  summaryText: { color: colors.ink, fontSize: 15, lineHeight: 23 },
-  managerNoteCard: {
-    marginHorizontal: 20,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: "#C8D9EA",
-    backgroundColor: "#EFF6FD",
-    padding: 18,
-    gap: 8,
-  },
-  managerNoteLabel: { color: "#25527A", fontSize: 12, fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.8 },
-  managerNoteText: { color: "#163954", fontSize: 15, lineHeight: 22, fontWeight: "600" },
-  ctaRow: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingHorizontal: 20,
-    paddingTop: 14,
-    paddingBottom: 24,
-    gap: 10,
-    backgroundColor: colors.bg,
-    borderTopWidth: 1,
-    borderTopColor: colors.line,
-  },
-  primaryCta: {
-    borderRadius: 16,
-    backgroundColor: colors.accent,
-    alignItems: "center",
-    paddingVertical: 16,
-  },
-  primaryCtaLabel: { color: "#fff", fontSize: 16, fontWeight: "800" },
-  secondaryCta: {
-    borderRadius: 16,
+    backgroundColor: colors.panel,
     borderWidth: 1,
     borderColor: colors.line,
-    backgroundColor: colors.panel,
-    alignItems: "center",
-    paddingVertical: 15,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 8,
   },
-  secondaryCtaLabel: { color: colors.ink, fontSize: 15, fontWeight: "700" },
+  highlightHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  highlightTag: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  highlightTagText: {
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+  },
+  turnRef: { color: colors.muted, fontSize: 11 },
+  highlightNote: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: colors.ink,
+    marginTop: 8,
+  },
+  highlightQuote: {
+    fontSize: 13,
+    color: colors.muted,
+    fontStyle: "italic",
+    marginTop: 6,
+    lineHeight: 20,
+  },
+  
+  summaryCard: {
+    backgroundColor: colors.panel,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 14,
+    padding: 16,
+  },
+  summaryText: {
+    fontSize: 14,
+    color: colors.ink,
+    lineHeight: 22,
+  },
+  
+  managerNoteCard: {
+    backgroundColor: colors.accentSoft,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.accent,
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 8,
+  },
+  managerNoteHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  managerNoteLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: colors.accent,
+  },
+  managerNoteText: {
+    fontSize: 13,
+    color: colors.ink,
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  
+  ctaRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginTop: 32,
+  },
+  primaryCta: {
+    flex: 1,
+    backgroundColor: colors.accent,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  primaryCtaLabel: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  secondaryCta: {
+    flex: 1,
+    backgroundColor: colors.panel,
+    borderWidth: 1.5,
+    borderColor: colors.line,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  secondaryCtaLabel: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: "700",
+  },
 });

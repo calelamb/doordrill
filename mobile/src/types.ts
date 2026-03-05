@@ -57,6 +57,13 @@ export type RepSessionDetail = {
   manager_note?: string | null;
 };
 
+export type RepProgress = {
+  rep_id: string;
+  session_count: number;
+  scored_session_count: number;
+  average_score: number | null;
+};
+
 export type WsInboundEvent = {
   type: string;
   sequence?: number;

@@ -123,6 +123,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(74, 222, 128, 0.25)",
   },
   title: {
+    fontFamily: "Poppins_800ExtraBold",
     fontSize: 34,
     fontWeight: "800",
     color: "#ffffff",

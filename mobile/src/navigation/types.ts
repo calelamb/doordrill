@@ -14,4 +14,5 @@ export type RootStackParamList = {
     sessionId: string;
   };
   History: undefined;
+  Profile: undefined;
 };

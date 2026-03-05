@@ -1,13 +1,25 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { colors } from "../theme/tokens";
-import { RepAssignment } from "../types";
+import { RepAssignment, ScenarioBrief } from "../types";
 
 type Props = {
   assignment: RepAssignment;
+  scenario?: ScenarioBrief;
   disabled?: boolean;
   onStart: () => void;
 };
+
+function DifficultyBadge({ level }: { level: number }) {
+  const dots = Array.from({ length: 5 }, (_, i) => i + 1);
+  return (
+    <View style={styles.difficultyBadge}>
+      {dots.map((i) => (
+        <View key={i} style={[styles.dot, i <= level ? styles.dotFilled : styles.dotEmpty]} />
+      ))}
+    </View>
+  );
+}
 
 function statusStyles(status: string): { chip: object; label: object } {
   const normalized = status.toLowerCase();
@@ -39,20 +51,23 @@ function fmtDue(dueAt: string | null): string {
   }
   return parsed.toLocaleString(undefined, {
     month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit"
+    day: "numeric"
   });
 }
 
-export function AssignmentCard({ assignment, disabled = false, onStart }: Props) {
+export function AssignmentCard({ assignment, scenario, disabled = false, onStart }: Props) {
   const statusTone = statusStyles(assignment.status);
   const target = assignment.min_score_target ?? 80;
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, assignment.status === "completed" && styles.cardCompleted]}>
       <View style={styles.headerRow}>
-        <Text style={styles.id}>Assignment {assignment.id.slice(0, 8)}</Text>
+        <View style={styles.titleContainer}>
+          <Text style={styles.scenarioName} numberOfLines={1}>
+            {scenario?.name || `Scenario ${assignment.scenario_id.slice(0, 8)}`}
+          </Text>
+          {scenario && <DifficultyBadge level={scenario.difficulty} />}
+        </View>
         <View style={[styles.statusChip, statusTone.chip]}>
           <Text style={[styles.statusLabel, statusTone.label]}>{assignment.status.replaceAll("_", " ")}</Text>
         </View>
@@ -60,22 +75,17 @@ export function AssignmentCard({ assignment, disabled = false, onStart }: Props)
 
       <View style={styles.metaGrid}>
         <View style={styles.metaCell}>
-          <Text style={styles.metaLabel}>Scenario</Text>
-          <Text style={styles.metaValue}>{assignment.scenario_id.slice(0, 8)}</Text>
-        </View>
-        <View style={styles.metaCell}>
-          <Text style={styles.metaLabel}>Due</Text>
+          <Text style={styles.metaLabel}>Due Date</Text>
           <Text style={styles.metaValue}>{fmtDue(assignment.due_at)}</Text>
         </View>
-      </View>
-
-      <View style={styles.targetRow}>
-        <Text style={styles.targetLabel}>Target Score</Text>
-        <Text style={styles.targetValue}>{target}</Text>
+        <View style={styles.metaCell}>
+          <Text style={styles.metaLabel}>Target Score</Text>
+          <Text style={styles.metaValue}>{target}</Text>
+        </View>
       </View>
 
       <Pressable style={[styles.button, disabled && styles.disabled]} disabled={disabled} onPress={onStart}>
-        <Text style={styles.buttonLabel}>{assignment.status === "in_progress" ? "Resume Drill" : "Start Drill"}</Text>
+        <Text style={styles.buttonLabel}>{assignment.status === "completed" ? "Practice Again" : "Start Drill"}</Text>
       </Pressable>
     </View>
   );
@@ -87,49 +97,67 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
     backgroundColor: colors.panel,
-    padding: 14,
-    gap: 10
+    padding: 16,
+    gap: 12
+  },
+  cardCompleted: {
+    opacity: 0.85,
+    backgroundColor: "#FDFDFD",
   },
   headerRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 8
   },
-  id: { fontWeight: "800", color: colors.ink, fontSize: 15 },
-  statusChip: { borderRadius: 999, paddingVertical: 5, paddingHorizontal: 10 },
-  statusLabel: { fontSize: 11, fontWeight: "700", textTransform: "capitalize" },
+  titleContainer: {
+    flex: 1,
+    gap: 4,
+    marginRight: 8,
+  },
+  scenarioName: {
+    fontWeight: "800",
+    color: colors.ink,
+    fontSize: 16,
+  },
+  difficultyBadge: {
+    flexDirection: "row",
+    gap: 2,
+    alignItems: "center"
+  },
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  dotFilled: {
+    backgroundColor: colors.accent,
+  },
+  dotEmpty: {
+    backgroundColor: colors.accentSoft,
+    opacity: 0.6,
+  },
+  statusChip: { borderRadius: 999, paddingVertical: 4, paddingHorizontal: 8 },
+  statusLabel: { fontSize: 10, fontWeight: "800", textTransform: "uppercase" },
   metaGrid: { flexDirection: "row", gap: 10 },
   metaCell: {
     flex: 1,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: colors.line,
-    backgroundColor: "#FFF9EF",
-    padding: 9,
-    gap: 3
+    backgroundColor: colors.bg,
+    padding: 10,
+    gap: 4
   },
   metaLabel: { color: colors.muted, fontSize: 11, fontWeight: "700", textTransform: "uppercase" },
-  metaValue: { color: colors.ink, fontSize: 13, fontWeight: "600" },
-  targetRow: {
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.accentSoft,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center"
-  },
-  targetLabel: { color: colors.ink, fontSize: 12, fontWeight: "700" },
-  targetValue: { color: colors.accent, fontSize: 18, fontWeight: "800" },
+  metaValue: { color: colors.ink, fontSize: 14, fontWeight: "700" },
   button: {
     borderRadius: 12,
     backgroundColor: colors.accent,
     alignItems: "center",
-    paddingVertical: 11
+    paddingVertical: 12,
+    marginTop: 2
   },
   disabled: { opacity: 0.5 },
-  buttonLabel: { color: "white", fontWeight: "800", fontSize: 14 }
+  buttonLabel: { color: "white", fontWeight: "800", fontSize: 15 }
 });
