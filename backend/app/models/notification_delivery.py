@@ -21,6 +21,7 @@ class NotificationDelivery(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_notification_deliveries_session_status", "session_id", "status"),
         Index("ix_notification_deliveries_manager_status", "manager_id", "status"),
+        Index("ix_notification_deliveries_status_next_retry", "status", "next_retry_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)

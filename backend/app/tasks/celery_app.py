@@ -29,7 +29,19 @@ def get_celery_app():
         "post_session.cleanup": {"queue": "postprocess.cleanup"},
         "post_session.grade": {"queue": "postprocess.grade"},
         "post_session.notify": {"queue": "postprocess.notify"},
+        "post_session.retry_due": {"queue": "postprocess.retry"},
+        "notifications.retry_due": {"queue": "notifications.retry"},
     }
     celery_app.conf.task_acks_late = True
     celery_app.conf.worker_prefetch_multiplier = 1
+    celery_app.conf.beat_schedule = {
+        "post-session-retry-due-every-minute": {
+            "task": "post_session.retry_due",
+            "schedule": 60.0,
+        },
+        "notifications-retry-due-every-minute": {
+            "task": "notifications.retry_due",
+            "schedule": 60.0,
+        },
+    }
     return celery_app

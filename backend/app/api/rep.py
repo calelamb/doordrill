@@ -233,6 +233,7 @@ def register_device_token(
         "id": token.id,
         "user_id": token.user_id,
         "platform": token.platform,
+        "provider": token.provider,
         "token": token.token,
         "status": token.status,
         "last_seen_at": token.last_seen_at,

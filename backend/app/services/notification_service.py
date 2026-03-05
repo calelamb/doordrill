@@ -48,6 +48,11 @@ class NotificationService:
             return ExpoPushProvider(self.settings)
         return LogPushProvider()
 
+    def _infer_push_provider(self, token: str) -> str:
+        if token.startswith("ExponentPushToken["):
+            return "expo"
+        return (self.settings.notification_push_provider or "expo").lower()
+
     async def notify_manager_session_completed(self, db: Session, session_id: str) -> dict:
         session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
         if session is None:
@@ -99,6 +104,7 @@ class NotificationService:
                 push_payload = {
                     "token_id": token.id,
                     "push_token": token.token,
+                    "provider": token.provider,
                     "title": "DoorDrill Session Completed",
                     "body": summary,
                     "data": {"session_id": session_id, "rep_id": session.rep_id},
@@ -165,11 +171,25 @@ class NotificationService:
             return {"id": delivery.id, "channel": delivery.channel, "sent": True}
 
         delivery.retries += 1
-        delay_seconds = self.settings.notification_retry_base_seconds * (2 ** max(0, delivery.retries - 1))
-        delivery.next_retry_at = now + timedelta(seconds=min(delay_seconds, 3600))
         delivery.provider_response = send_result.response if send_result else {}
         delivery.last_error = send_result.error if send_result else "unsupported_channel"
-        delivery.status = "dead_letter" if delivery.retries >= self.settings.notification_max_retries else "retry_scheduled"
+        permanent_failure = bool(send_result and send_result.permanent_failure)
+        invalid_token = bool(send_result and send_result.invalid_token)
+
+        if invalid_token and delivery.channel == "push":
+            token_id = str(delivery.payload.get("token_id") or "").strip()
+            if token_id:
+                token_row = db.scalar(select(DeviceToken).where(DeviceToken.id == token_id))
+                if token_row is not None:
+                    token_row.status = "invalid"
+
+        if permanent_failure or delivery.retries >= self.settings.notification_max_retries:
+            delivery.status = "dead_letter"
+            delivery.next_retry_at = None
+        else:
+            delay_seconds = self.settings.notification_retry_base_seconds * (2 ** max(0, delivery.retries - 1))
+            delivery.next_retry_at = now + timedelta(seconds=min(delay_seconds, 3600))
+            delivery.status = "retry_scheduled"
         return {
             "id": delivery.id,
             "channel": delivery.channel,
@@ -179,10 +199,18 @@ class NotificationService:
         }
 
     def register_device_token(self, db: Session, *, user_id: str, platform: str, token: str) -> DeviceToken:
-        existing = db.scalar(select(DeviceToken).where(DeviceToken.user_id == user_id, DeviceToken.token == token))
+        provider = self._infer_push_provider(token)
+        existing = db.scalar(
+            select(DeviceToken).where(
+                DeviceToken.user_id == user_id,
+                DeviceToken.provider == provider,
+                DeviceToken.token == token,
+            )
+        )
         now = datetime.now(timezone.utc)
         if existing:
             existing.platform = platform
+            existing.provider = provider
             existing.status = "active"
             existing.last_seen_at = now
             db.commit()
@@ -192,6 +220,7 @@ class NotificationService:
         row = DeviceToken(
             user_id=user_id,
             platform=platform,
+            provider=provider,
             token=token,
             status="active",
             last_seen_at=now,
@@ -209,10 +238,51 @@ class NotificationService:
         db.commit()
         return True
 
-    def list_manager_notifications(self, db: Session, *, manager_id: str, limit: int = 100) -> list[NotificationDelivery]:
-        return db.scalars(
+    async def retry_due_deliveries(self, db: Session, *, limit: int = 50) -> dict[str, Any]:
+        stmt = (
             select(NotificationDelivery)
-            .where(NotificationDelivery.manager_id == manager_id)
-            .order_by(NotificationDelivery.created_at.desc())
+            .where(
+                NotificationDelivery.status == "retry_scheduled",
+                NotificationDelivery.next_retry_at.is_not(None),
+                NotificationDelivery.next_retry_at <= datetime.now(timezone.utc),
+            )
+            .order_by(NotificationDelivery.next_retry_at.asc())
             .limit(limit)
-        ).all()
+        )
+        bind = db.get_bind()
+        if bind is not None and bind.dialect.name != "sqlite":
+            stmt = stmt.with_for_update(skip_locked=True)
+
+        rows = db.scalars(stmt).all()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            if row.status == "dead_letter":
+                continue
+            items.append(await self._deliver(db, row))
+        db.commit()
+        return {"retried_count": len(items), "items": items}
+
+    def list_manager_notifications(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        status: str | None = None,
+        channel: str | None = None,
+        session_id: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        limit: int = 100,
+    ) -> list[NotificationDelivery]:
+        stmt = select(NotificationDelivery).where(NotificationDelivery.manager_id == manager_id)
+        if status:
+            stmt = stmt.where(NotificationDelivery.status == status)
+        if channel:
+            stmt = stmt.where(NotificationDelivery.channel == channel)
+        if session_id:
+            stmt = stmt.where(NotificationDelivery.session_id == session_id)
+        if date_from:
+            stmt = stmt.where(NotificationDelivery.created_at >= date_from)
+        if date_to:
+            stmt = stmt.where(NotificationDelivery.created_at <= date_to)
+        return db.scalars(stmt.order_by(NotificationDelivery.created_at.desc()).limit(limit)).all()

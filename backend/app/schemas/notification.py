@@ -13,6 +13,7 @@ class DeviceTokenResponse(BaseModel):
     id: str
     user_id: str
     platform: str
+    provider: str
     token: str
     status: str
     last_seen_at: datetime

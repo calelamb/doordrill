@@ -843,6 +843,11 @@ def get_manager_actions(
 @router.get("/notifications")
 def get_manager_notifications(
     manager_id: str = Query(...),
+    status: str | None = Query(default=None),
+    channel: str | None = Query(default=None),
+    session_id: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     actor: Actor = Depends(require_manager),
     db: Session = Depends(get_db),
@@ -851,7 +856,16 @@ def get_manager_notifications(
         raise HTTPException(status_code=403, detail="manager can only access their own notifications")
     manager = _get_user_or_404(db, manager_id, "manager")
     _ensure_same_org(actor, manager.org_id)
-    rows = notification_service.list_manager_notifications(db, manager_id=manager_id, limit=limit)
+    rows = notification_service.list_manager_notifications(
+        db,
+        manager_id=manager_id,
+        status=status,
+        channel=channel,
+        session_id=session_id,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
     items = [
         NotificationDeliveryResponse(
             id=row.id,

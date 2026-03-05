@@ -44,6 +44,19 @@ class SessionPostprocessService:
         db.refresh(row)
         return row
 
+    def _queue_task(self, db: Session, *, session_id: str, task_type: str) -> bool:
+        row = self._ensure_run_row(db, session_id=session_id, task_type=task_type)
+        row.status = "queued"
+        row.next_retry_at = None
+        db.commit()
+
+        celery = get_celery_app()
+        if celery is None:
+            return False
+        queue_name = f"postprocess.{task_type}"
+        celery.send_task(f"post_session.{task_type}", args=[session_id], queue=queue_name)
+        return True
+
     async def run_task_inline(self, db: Session, *, session_id: str, task_type: str) -> dict[str, Any]:
         if task_type not in TASK_TYPES:
             raise ValueError(f"unsupported task_type: {task_type}")
@@ -97,15 +110,42 @@ class SessionPostprocessService:
 
     async def enqueue_or_run(self, db: Session, session_id: str) -> dict[str, Any]:
         if self.settings.use_celery:
-            celery = get_celery_app()
-            if celery is not None:
-                try:
-                    for task_type in TASK_TYPES:
-                        self._ensure_run_row(db, session_id=session_id, task_type=task_type)
-                    celery.send_task("post_session.cleanup", args=[session_id], queue="postprocess.cleanup")
-                    celery.send_task("post_session.grade", args=[session_id], queue="postprocess.grade")
-                    celery.send_task("post_session.notify", args=[session_id], queue="postprocess.notify")
+            try:
+                queued = 0
+                for task_type in TASK_TYPES:
+                    queued += int(self._queue_task(db, session_id=session_id, task_type=task_type))
+                if queued == len(TASK_TYPES):
                     return {"mode": "celery", "session_id": session_id}
-                except Exception:
-                    logger.exception("Failed to enqueue post-session tasks, falling back inline", extra={"session_id": session_id})
+            except Exception:
+                logger.exception("Failed to enqueue post-session tasks, falling back inline", extra={"session_id": session_id})
         return await self.run_inline(db, session_id)
+
+    async def retry_due_runs(self, db: Session, *, limit: int = 50) -> dict[str, Any]:
+        stmt = (
+            select(PostprocessRun)
+            .where(
+                PostprocessRun.status == "retry_scheduled",
+                PostprocessRun.next_retry_at.is_not(None),
+                PostprocessRun.next_retry_at <= datetime.now(timezone.utc),
+            )
+            .order_by(PostprocessRun.next_retry_at.asc())
+            .limit(limit)
+        )
+        bind = db.get_bind()
+        if bind is not None and bind.dialect.name != "sqlite":
+            stmt = stmt.with_for_update(skip_locked=True)
+
+        rows = db.scalars(stmt).all()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            if row.status == "completed":
+                continue
+            if self.settings.use_celery and get_celery_app() is not None:
+                self._queue_task(db, session_id=row.session_id, task_type=row.task_type)
+                items.append({"run_id": row.id, "task_type": row.task_type, "status": "queued"})
+                continue
+
+            result = await self.run_task_inline(db, session_id=row.session_id, task_type=row.task_type)
+            items.append({"run_id": row.id, **result})
+
+        return {"retried_count": len(items), "items": items}

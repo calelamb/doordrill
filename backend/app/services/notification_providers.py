@@ -26,6 +26,8 @@ class ProviderSendResult:
     status: str
     response: dict[str, Any]
     error: str | None = None
+    permanent_failure: bool = False
+    invalid_token: bool = False
 
 
 class EmailProvider:
@@ -186,6 +188,18 @@ class FcmPushProvider(PushProvider):
                 success_count = int(parsed.get("success", 0) or 0)
                 if success_count > 0:
                     return ProviderSendResult(ok=True, status="sent", response={"provider": "fcm", "body": parsed})
+                results = parsed.get("results") if isinstance(parsed, dict) else None
+                if isinstance(results, list) and results:
+                    error_code = str((results[0] or {}).get("error") or "")
+                    if error_code in {"InvalidRegistration", "NotRegistered", "MismatchSenderId"}:
+                        return ProviderSendResult(
+                            ok=False,
+                            status="failed",
+                            response={"provider": "fcm", "body": parsed},
+                            error=f"fcm_token_invalid:{error_code}",
+                            permanent_failure=True,
+                            invalid_token=True,
+                        )
                 return ProviderSendResult(
                     ok=False,
                     status="failed",
@@ -245,11 +259,15 @@ class ExpoPushProvider(PushProvider):
                 if isinstance(ticket, dict):
                     ticket_status = ticket.get("status")
                     if ticket_status and ticket_status != "ok":
+                        details = ticket.get("details", {}) if isinstance(ticket.get("details"), dict) else {}
+                        invalid_token = details.get("error") == "DeviceNotRegistered"
                         return ProviderSendResult(
                             ok=False,
                             status="failed",
                             response={"provider": "expo", "body": parsed},
-                            error="expo_ticket_failed",
+                            error=f"expo_ticket_failed:{ticket_status}",
+                            permanent_failure=invalid_token,
+                            invalid_token=invalid_token,
                         )
                 return ProviderSendResult(ok=True, status="sent", response={"provider": "expo", "body": parsed})
 
