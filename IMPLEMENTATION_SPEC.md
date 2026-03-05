@@ -202,7 +202,7 @@ pytest
 ```
 
 Current status:
-- tests pass (`15 passed`)
+- tests pass (`17 passed`)
 
 ## What Is Stubbed vs Production-Ready
 
@@ -212,12 +212,12 @@ Production-ready structure:
 - relational schema
 - manager workflows + replay plumbing
 - ledger persistence flow
+- grading pipeline with LLM-judge path + deterministic fallback
 
 Stubbed integrations:
 - Deepgram STT (real API path implemented with mock fallback)
 - LLM conversation provider (OpenAI streaming path implemented with mock fallback)
 - ElevenLabs TTS (streaming path implemented with mock fallback)
-- S3/R2 presigned URL generation (implemented with fallback URL mode for local/dev)
 
 ## Required Next Steps (Priority Order)
 

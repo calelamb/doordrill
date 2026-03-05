@@ -119,4 +119,5 @@ python scripts/load_test_ws.py \
 - Redis buffering is enabled automatically if `REDIS_URL` is provided.
 - Storage URLs now support S3/R2 presigning when object storage credentials are configured; otherwise fallback URLs are returned for local dev.
 - Provider adapters for Deepgram/OpenAI/ElevenLabs are wired with real API paths plus mock fallback behavior to keep local development deterministic.
+- Grading uses OpenAI judge mode when API credentials are present, with normalized JSON output and deterministic fallback scoring.
 - Structured JSON logs now include request/session trace fields (`trace_id`, `request_id`) for HTTP and websocket flows.
