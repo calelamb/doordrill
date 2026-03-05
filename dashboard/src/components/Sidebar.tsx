@@ -1,20 +1,25 @@
 import { LayoutDashboard, BarChart2, History, LogOut, TreePine } from "lucide-react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+
+import { clearStoredAuth, getValidStoredAuth } from "../lib/auth";
 
 export function Sidebar() {
     const location = useLocation();
+    const navigate = useNavigate();
+    const auth = getValidStoredAuth();
+    const user = auth?.user;
+    const initials = user?.name
+        ?.split(" ")
+        .map((chunk) => chunk[0]?.toUpperCase())
+        .slice(0, 2)
+        .join("") || "MG";
 
-    // Determine active state manually (exact match for simplicity here)
-    const isFeed = location.pathname.startsWith("/manager/feed");
+    const isFeed = location.pathname.startsWith("/manager/feed") || location.pathname.includes("/manager/sessions/");
     const isAnalytics = location.pathname.startsWith("/manager/analytics");
     const isActions = location.pathname.startsWith("/manager/actions");
 
-    // Mocked state for the unreviewed count badge per PRD
-    const unreviewedCount = 3; // In a real app this would be derived from a global state/context
-
     return (
         <aside className="w-[220px] shrink-0 bg-white/30 backdrop-blur-2xl border-r border-white/20 h-screen sticky top-0 flex flex-col">
-            {/* Logo Area */}
             <div className="flex items-center gap-2.5 px-6 pt-6 pb-8">
                 <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-accent text-white shadow-lg shadow-accent/25">
                     <TreePine className="h-5 w-5" />
@@ -22,7 +27,6 @@ export function Sidebar() {
                 <span className="text-lg font-bold tracking-tight text-ink">DoorDrill</span>
             </div>
 
-            {/* Nav Links */}
             <nav className="flex-1 px-4 space-y-1">
                 <Link
                     to="/manager/feed"
@@ -33,16 +37,6 @@ export function Sidebar() {
                 >
                     <LayoutDashboard className="w-4.5 h-4.5 min-w-4.5" />
                     Feed
-                    {unreviewedCount > 0 && (
-                        <span
-                            className="bg-accent text-white text-[10px] font-bold tracking-wide rounded-full min-w-[18px] h-[18px] flex items-center justify-center ml-auto px-1.5"
-                            style={{
-                                animation: "scaleIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards", // equivalent to framer-motion scale
-                            }}
-                        >
-                            {unreviewedCount}
-                        </span>
-                    )}
                 </Link>
 
                 <Link
@@ -68,26 +62,24 @@ export function Sidebar() {
                 </Link>
             </nav>
 
-            {/* User Footer */}
             <div className="p-4 mt-auto border-t border-white/20">
-                <button className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-white/40 transition-colors text-left group">
+                <button
+                    onClick={() => {
+                        clearStoredAuth();
+                        navigate("/login", { replace: true });
+                    }}
+                    className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-white/40 transition-colors text-left group"
+                >
                     <div className="w-8 h-8 rounded-full bg-accent text-white flex items-center justify-center text-xs font-bold shrink-0">
-                        MG
+                        {initials}
                     </div>
                     <div className="flex-1 min-w-0">
-                        <div className="text-sm font-bold text-ink truncate">Manager</div>
+                        <div className="text-sm font-bold text-ink truncate">{user?.name ?? "Manager"}</div>
+                        <div className="text-xs text-muted truncate">{user?.role ?? "manager"}</div>
                     </div>
                     <LogOut className="w-4 h-4 text-muted group-hover:text-ink transition-colors" />
                 </button>
             </div>
-
-            {/* Inline scale animation for the badge */}
-            <style>{`
-        @keyframes scaleIn {
-          from { transform: scale(0); opacity: 0; }
-          to { transform: scale(1); opacity: 1; }
-        }
-      `}</style>
         </aside>
     );
 }
