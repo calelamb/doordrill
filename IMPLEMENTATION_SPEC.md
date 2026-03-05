@@ -217,7 +217,7 @@ Stubbed integrations:
 - Deepgram STT (real API path implemented with mock fallback)
 - LLM conversation provider (OpenAI streaming path implemented with mock fallback)
 - ElevenLabs TTS (streaming path implemented with mock fallback)
-- S3/R2 presigned URL generation (currently placeholder URL builder)
+- S3/R2 presigned URL generation (implemented with fallback URL mode for local/dev)
 
 ## Required Next Steps (Priority Order)
 

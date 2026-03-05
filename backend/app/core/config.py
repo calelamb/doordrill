@@ -12,6 +12,13 @@ class Settings(BaseSettings):
     database_url: str = Field(default="sqlite:///./doordrill.db", alias="DATABASE_URL")
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
     storage_bucket: str = Field(default="doordrill-session-artifacts", alias="STORAGE_BUCKET")
+    object_storage_endpoint: str | None = Field(default=None, alias="OBJECT_STORAGE_ENDPOINT")
+    object_storage_region: str = Field(default="us-east-1", alias="OBJECT_STORAGE_REGION")
+    object_storage_access_key: str | None = Field(default=None, alias="OBJECT_STORAGE_ACCESS_KEY")
+    object_storage_secret_key: str | None = Field(default=None, alias="OBJECT_STORAGE_SECRET_KEY")
+    object_storage_force_path_style: bool = Field(default=False, alias="OBJECT_STORAGE_FORCE_PATH_STYLE")
+    object_storage_public_base_url: str | None = Field(default=None, alias="OBJECT_STORAGE_PUBLIC_BASE_URL")
+    default_presign_ttl_seconds: int = Field(default=3600, alias="DEFAULT_PRESIGN_TTL_SECONDS")
     ws_flush_interval_ms: int = Field(default=350, alias="WS_FLUSH_INTERVAL_MS")
     max_ws_event_batch: int = Field(default=200, alias="MAX_WS_EVENT_BATCH")
 
