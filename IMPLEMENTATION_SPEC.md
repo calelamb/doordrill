@@ -207,7 +207,7 @@ Stubbed integrations:
    - configure Redis + Postgres + object storage in deployment
 
 5. Performance and reliability
-   - load test to 200 concurrent sessions
+   - load test to 200 concurrent sessions (initial synthetic harness added at `backend/scripts/load_test_ws.py`)
    - verify p50/p95 first-audio latency
    - test event loss guarantees and reconnect behavior
 
