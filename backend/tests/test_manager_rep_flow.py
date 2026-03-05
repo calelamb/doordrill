@@ -146,3 +146,29 @@ def test_event_persistence_integrity(client, seed_org):
     assert len(event_ids) == len(events)
     assert any(event.event_type == "server.turn.committed" for event in events)
     assert any(event.event_type == "server.session.state" and event.payload.get("transition") for event in events)
+
+
+def test_manager_analytics_and_rep_progress(client, seed_org):
+    assignment = _create_assignment(client, seed_org)
+    _run_session(client, seed_org, assignment["id"])
+
+    analytics = client.get(
+        "/manager/analytics",
+        params={"manager_id": seed_org["manager_id"]},
+        headers={"x-user-id": seed_org["manager_id"], "x-user-role": "manager"},
+    )
+    assert analytics.status_code == 200
+    analytics_body = analytics.json()
+    assert analytics_body["assignment_count"] >= 1
+    assert analytics_body["sessions_count"] >= 1
+    assert analytics_body["active_rep_count"] >= 1
+
+    progress = client.get(
+        f"/manager/reps/{seed_org['rep_id']}/progress",
+        params={"manager_id": seed_org["manager_id"]},
+        headers={"x-user-id": seed_org["manager_id"], "x-user-role": "manager"},
+    )
+    assert progress.status_code == 200
+    progress_body = progress.json()
+    assert progress_body["rep_id"] == seed_org["rep_id"]
+    assert progress_body["session_count"] >= 1

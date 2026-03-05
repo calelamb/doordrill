@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_manager
@@ -11,7 +11,7 @@ from app.models.scenario import Scenario
 from app.models.scorecard import ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionTurn
-from app.models.types import ReviewReason, UserRole
+from app.models.types import AssignmentStatus, ReviewReason, UserRole
 from app.models.user import User
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
 from app.schemas.scorecard import ManagerReviewResponse, ScorecardOverrideRequest
@@ -188,6 +188,104 @@ def get_manager_feed(
 
     items = feed_service.get_feed(db, manager_id=manager_id)
     return ManagerFeedResponse(items=items)
+
+
+@router.get("/reps/{rep_id}/progress")
+def get_rep_progress(
+    rep_id: str,
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own rep progress")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    rep = _get_user_or_404(db, rep_id, "rep")
+    _ensure_same_org(actor, manager.org_id)
+    if manager.org_id != rep.org_id:
+        raise HTTPException(status_code=403, detail="cross-organization access denied")
+
+    stmt = (
+        select(
+            DrillSession.id.label("session_id"),
+            DrillSession.started_at.label("started_at"),
+            DrillSession.status.label("status"),
+            Scorecard.overall_score.label("overall_score"),
+        )
+        .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
+        .where(DrillSession.rep_id == rep_id)
+        .order_by(DrillSession.started_at.desc())
+        .limit(100)
+    )
+    rows = db.execute(stmt).mappings().all()
+    scores = [float(row["overall_score"]) for row in rows if row["overall_score"] is not None]
+    avg_score = round(sum(scores) / len(scores), 2) if scores else None
+
+    return {
+        "rep_id": rep_id,
+        "session_count": len(rows),
+        "scored_session_count": len(scores),
+        "average_score": avg_score,
+        "latest_sessions": [
+            {
+                "session_id": row["session_id"],
+                "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+                "status": row["status"].value if row["status"] else None,
+                "overall_score": row["overall_score"],
+            }
+            for row in rows[:20]
+        ],
+    }
+
+
+@router.get("/analytics")
+def get_manager_analytics(
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+
+    assignment_count = db.scalar(select(func.count(Assignment.id)).where(Assignment.assigned_by == manager_id)) or 0
+    completed_assignments = (
+        db.scalar(
+            select(func.count(Assignment.id)).where(
+                Assignment.assigned_by == manager_id, Assignment.status == AssignmentStatus.COMPLETED
+            )
+        )
+        or 0
+    )
+    sessions_count = (
+        db.scalar(
+            select(func.count(DrillSession.id))
+            .join(Assignment, Assignment.id == DrillSession.assignment_id)
+            .where(Assignment.assigned_by == manager_id)
+        )
+        or 0
+    )
+    avg_score = db.scalar(
+        select(func.avg(Scorecard.overall_score))
+        .join(DrillSession, DrillSession.id == Scorecard.session_id)
+        .join(Assignment, Assignment.id == DrillSession.assignment_id)
+        .where(Assignment.assigned_by == manager_id)
+    )
+
+    unique_reps = db.scalar(select(func.count(func.distinct(Assignment.rep_id))).where(Assignment.assigned_by == manager_id)) or 0
+
+    return {
+        "manager_id": manager_id,
+        "assignment_count": int(assignment_count),
+        "completed_assignment_count": int(completed_assignments),
+        "sessions_count": int(sessions_count),
+        "active_rep_count": int(unique_reps),
+        "average_score": round(float(avg_score), 2) if avg_score is not None else None,
+        "completion_rate": round((completed_assignments / assignment_count), 3) if assignment_count else 0.0,
+    }
 
 
 @router.get("/sessions/{session_id}/replay", response_model=SessionReplayResponse)
