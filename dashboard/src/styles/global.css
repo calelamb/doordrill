@@ -1,11 +1,29 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #f5f2ec;
+  --color-surface: rgba(255, 253, 248, 0.60);
+  --color-surface-solid: #fffdf8;
+  --color-ink: #1a2e1a;
+  --color-muted: #5a6e5a;
+  --color-accent: #2d5a3d;
+  --color-accent-hover: #1f4a2e;
+  --color-accent-soft: #d4e6d4;
+  --color-border: rgba(45, 90, 61, 0.15);
+  --color-border-strong: rgba(45, 90, 61, 0.25);
+  --color-error: #b5331e;
+  --color-rep: #2d5a3d;
+  --color-ai: #8b6914;
+}
+
 :root {
-  --bg: #f6f3eb;
+  --bg: #f5f2ec;
   --panel: #fffdf8;
-  --ink: #1e1a15;
-  --muted: #665f56;
-  --accent: #c64f26;
-  --accent-soft: #f1d8cf;
-  --line: #e4d8c8;
+  --ink: #1a2e1a;
+  --muted: #5a6e5a;
+  --accent: #2d5a3d;
+  --accent-soft: #d4e6d4;
+  --line: rgba(45, 90, 61, 0.15);
 }
 
 * {
@@ -15,7 +33,7 @@
 body {
   margin: 0;
   font-family: "Avenir Next", "Poppins", "Segoe UI", sans-serif;
-  background: radial-gradient(circle at 20% 10%, #fffaf0 0%, var(--bg) 45%, #efe5d9 100%);
+  background: radial-gradient(circle at 20% 10%, #f7f5f0 0%, var(--bg) 45%, #e8e4db 100%);
   color: var(--ink);
 }
 
