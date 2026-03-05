@@ -3,6 +3,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 
 import { useSession } from "../store/session";
 import { AssignmentsScreen } from "../screens/AssignmentsScreen";
+import { PreSessionScreen } from "../screens/PreSessionScreen";
 import { HistoryScreen } from "../screens/HistoryScreen";
 import { LoginScreen } from "../screens/LoginScreen";
 import { ScoreScreen } from "../screens/ScoreScreen";
@@ -30,7 +31,8 @@ export function AppNavigator() {
           }}
         >
           <Stack.Screen name="Assignments" component={AssignmentsScreen} options={{ title: "Assignments" }} />
-          <Stack.Screen name="Session" component={SessionScreen} options={{ title: "Live Drill" }} />
+          <Stack.Screen name="PreSession" component={PreSessionScreen} options={{ title: "Drill Brief" }} />
+          <Stack.Screen name="Session" component={SessionScreen} options={{ headerShown: false }} />
           <Stack.Screen name="Score" component={ScoreScreen} options={{ title: "Scorecard" }} />
           <Stack.Screen name="History" component={HistoryScreen} options={{ title: "History" }} />
         </Stack.Navigator>

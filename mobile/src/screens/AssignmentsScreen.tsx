@@ -4,7 +4,7 @@ import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "rea
 
 import { AssignmentCard } from "../components/AssignmentCard";
 import { RootStackParamList } from "../navigation/types";
-import { createRepSession, fetchRepAssignments } from "../services/api";
+import { fetchRepAssignments } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
 import { RepAssignment } from "../types";
@@ -68,11 +68,9 @@ export function AssignmentsScreen({ navigation }: Props) {
       setLoading(true);
       setError(null);
       try {
-        const session = await createRepSession(repId, assignment.id, assignment.scenario_id);
-        navigation.navigate("Session", {
+        navigation.navigate("PreSession", {
           assignmentId: assignment.id,
           scenarioId: assignment.scenario_id,
-          sessionId: session.id
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to start session");
@@ -100,8 +98,8 @@ export function AssignmentsScreen({ navigation }: Props) {
       <View style={styles.container}>
         <View style={styles.headerRow}>
           <View>
-            <Text style={styles.title}>Rep Assignments</Text>
-            <Text style={styles.subtitle}>Rep {repId?.slice(0, 8)}</Text>
+            <Text style={styles.title}>Your Drills</Text>
+            <Text style={styles.subtitle}>Open a brief, then jump straight into the roleplay.</Text>
           </View>
           <Pressable onPress={clearSession}>
             <Text style={styles.signOut}>Sign Out</Text>

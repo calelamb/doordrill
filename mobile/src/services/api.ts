@@ -1,5 +1,5 @@
 import { API_BASE_URL } from "./config";
-import { RepAssignment, RepSessionDetail } from "../types";
+import { RepAssignment, RepSessionDetail, ScenarioBrief } from "../types";
 
 type HeaderMap = Record<string, string>;
 
@@ -16,6 +16,22 @@ async function parseJson<T>(response: Response, action: string): Promise<T> {
     throw new Error(`${action} failed (${response.status})`);
   }
   return (await response.json()) as T;
+}
+
+export async function checkApiReachable(timeoutMs = 3500): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${API_BASE_URL}/health`, {
+      method: "GET",
+      signal: controller.signal
+    });
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function fetchRepAssignments(repId: string): Promise<RepAssignment[]> {
@@ -40,6 +56,13 @@ export async function createRepSession(
     })
   });
   return parseJson<{ id: string }>(response, "create session");
+}
+
+export async function fetchRepScenario(repId: string, scenarioId: string): Promise<ScenarioBrief> {
+  const response = await fetch(`${API_BASE_URL}/scenarios/${encodeURIComponent(scenarioId)}`, {
+    headers: repHeaders(repId)
+  });
+  return parseJson<ScenarioBrief>(response, "fetch scenario");
 }
 
 export async function fetchRepSession(repId: string, sessionId: string): Promise<RepSessionDetail> {

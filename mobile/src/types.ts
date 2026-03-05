@@ -9,11 +9,30 @@ export type RepAssignment = {
   retry_policy: Record<string, unknown>;
 };
 
+export type ScenarioBrief = {
+  id: string;
+  org_id: string | null;
+  name: string;
+  industry: string;
+  difficulty: number;
+  description: string;
+  persona: Record<string, unknown>;
+  rubric: Record<string, unknown>;
+  stages: string[];
+  created_by_id: string | null;
+};
+
 export type Scorecard = {
   id: string;
   overall_score: number;
-  category_scores: Record<string, number>;
-  highlights: Array<{ type: string; note: string; turn_id?: string | null }>;
+  category_scores: Record<string, number | { score?: number; rationale?: string; evidence_turn_ids?: string[] }>;
+  highlights: Array<{
+    type: string;
+    note: string;
+    turn_id?: string | null;
+    quote?: string | null;
+    transcript_quote?: string | null;
+  }>;
   ai_summary: string;
   evidence_turn_ids: string[];
   weakness_tags: string[];
@@ -30,6 +49,12 @@ export type RepSessionDetail = {
     status: string;
   };
   scorecard: Scorecard | null;
+  manager_review?: {
+    notes?: string | null;
+    override_score?: number | null;
+    reason_code?: string | null;
+  } | null;
+  manager_note?: string | null;
 };
 
 export type WsInboundEvent = {
