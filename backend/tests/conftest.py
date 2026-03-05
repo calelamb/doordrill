@@ -49,6 +49,7 @@ def seed_org() -> dict[str, str]:
     db.commit()
 
     scenario = Scenario(
+        org_id=org.id,
         name="Skeptical Homeowner",
         industry="pest_control",
         difficulty=2,

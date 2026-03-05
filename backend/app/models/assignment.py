@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, JSON, String
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -20,6 +20,7 @@ def _uuid() -> str:
 
 class Assignment(Base, TimestampMixin):
     __tablename__ = "assignments"
+    __table_args__ = (Index("ix_assignments_manager_status", "assigned_by", "status"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     scenario_id: Mapped[str] = mapped_column(ForeignKey("scenarios.id", ondelete="CASCADE"), index=True, nullable=False)

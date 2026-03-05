@@ -1,38 +1,106 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
+import jwt
 from fastapi import Depends, Header, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.db.session import get_db
+from app.models.user import User
 
 
 @dataclass
 class Actor:
     user_id: str | None
     role: str
+    org_id: str | None
+    team_id: str | None
 
 
 ALLOWED_ROLES = {"rep", "manager", "admin"}
 
 
+def _decode_bearer_token(raw_auth: str) -> dict[str, Any]:
+    settings = get_settings()
+    if not settings.jwt_secret:
+        raise HTTPException(status_code=500, detail="JWT_SECRET is required for token auth")
+
+    if not raw_auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="invalid authorization header format")
+    token = raw_auth.split(" ", 1)[1].strip()
+
+    try:
+        options = {"verify_aud": bool(settings.jwt_audience)}
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+            audience=settings.jwt_audience,
+            options=options,
+        )
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail="invalid token") from exc
+
+    return payload
+
+
+def _resolve_identity(
+    *,
+    x_user_id: str | None,
+    x_user_role: str | None,
+    authorization: str | None,
+) -> tuple[str | None, str | None]:
+    settings = get_settings()
+
+    if authorization:
+        payload = _decode_bearer_token(authorization)
+        user_id = str(payload.get("sub") or payload.get("user_id") or "").strip() or None
+        role = str(payload.get("role") or "").lower().strip() or None
+        return user_id, role
+
+    if settings.auth_mode.lower() == "jwt" and settings.auth_required:
+        raise HTTPException(status_code=401, detail="missing bearer token")
+
+    if x_user_id or x_user_role:
+        return x_user_id, x_user_role.lower() if x_user_role else None
+
+    return None, None
+
+
 def get_actor(
     x_user_id: str | None = Header(default=None),
     x_user_role: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
 ) -> Actor:
     settings = get_settings()
+    resolved_user_id, resolved_role = _resolve_identity(
+        x_user_id=x_user_id,
+        x_user_role=x_user_role,
+        authorization=authorization,
+    )
 
-    if not settings.auth_required and not x_user_role:
-        return Actor(user_id=x_user_id, role="admin")
+    if not resolved_user_id and not resolved_role:
+        if settings.auth_required:
+            raise HTTPException(status_code=401, detail="missing authentication")
+        return Actor(user_id=None, role="admin", org_id=None, team_id=None)
 
-    if not x_user_id or not x_user_role:
-        raise HTTPException(status_code=401, detail="missing authentication headers")
-
-    role = x_user_role.lower()
-    if role not in ALLOWED_ROLES:
+    if not resolved_user_id or not resolved_role:
+        raise HTTPException(status_code=401, detail="incomplete authentication identity")
+    if resolved_role not in ALLOWED_ROLES:
         raise HTTPException(status_code=403, detail="invalid role")
 
-    return Actor(user_id=x_user_id, role=role)
+    user = db.scalar(select(User).where(User.id == resolved_user_id))
+    if user is None:
+        raise HTTPException(status_code=401, detail="user not found")
+    if user.role.value != resolved_role and resolved_role != "admin":
+        raise HTTPException(status_code=403, detail="role mismatch")
+
+    return Actor(user_id=user.id, role=resolved_role, org_id=user.org_id, team_id=user.team_id)
 
 
 def require_manager(actor: Actor = Depends(get_actor)) -> Actor:

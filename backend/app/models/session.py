@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -20,6 +20,7 @@ def _uuid() -> str:
 
 class Session(Base, TimestampMixin):
     __tablename__ = "sessions"
+    __table_args__ = (Index("ix_sessions_assignment_started", "assignment_id", "started_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     assignment_id: Mapped[str] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -40,7 +41,10 @@ class Session(Base, TimestampMixin):
 
 class SessionEvent(Base):
     __tablename__ = "session_events"
-    __table_args__ = (UniqueConstraint("event_id", name="uq_session_events_event_id"),)
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_session_events_event_id"),
+        Index("ix_session_events_session_ts", "session_id", "event_ts"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -56,6 +60,7 @@ class SessionEvent(Base):
 
 class SessionTurn(Base):
     __tablename__ = "session_turns"
+    __table_args__ = (UniqueConstraint("session_id", "turn_index", name="uq_session_turns_session_turn_idx"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -72,6 +77,7 @@ class SessionTurn(Base):
 
 class SessionArtifact(Base, TimestampMixin):
     __tablename__ = "session_artifacts"
+    __table_args__ = (Index("ix_session_artifacts_session_type", "session_id", "artifact_type"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True, nullable=False)
