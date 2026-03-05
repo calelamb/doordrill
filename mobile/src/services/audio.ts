@@ -1,5 +1,5 @@
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
-import * as FileSystem from "expo-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 
 export type AudioChunk = {
   codec: "m4a" | "wav";

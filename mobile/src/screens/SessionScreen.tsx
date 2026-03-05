@@ -1,6 +1,6 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
-import * as FileSystem from "expo-file-system";
+import * as FileSystem from "expo-file-system/legacy";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Animated, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 import { Activity, Home, Mic, MicOff, Volume2, WifiOff } from "lucide-react-native";
