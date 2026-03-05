@@ -68,9 +68,11 @@ The initial FastAPI backend foundation has been implemented in [`backend/`](./ba
 - Manager action audit logging (`manager_action_logs`)
 - Org-scoped access control with header/JWT actor resolution
 - Provider adapters for Deepgram/OpenAI/ElevenLabs (real API paths + fallback)
+- LLM-judge grading path with deterministic fallback normalization
 - Interruption-aware WS replay traces (`barge_in_detected`) + transport metrics
 - Structured tracing logs with request/session correlation IDs
 - Ramp/SLO websocket load harness (`backend/scripts/load_test_ws.py`)
+- External IdP JWT readiness via JWKS (`JWT_JWKS_URL`)
 
 ## Dashboard Progress
 

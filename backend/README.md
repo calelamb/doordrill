@@ -69,6 +69,7 @@ Replay additions:
 - JWT mode is also supported:
   - `Authorization: Bearer <token>`
   - token claims: `sub`/`user_id`, `role`
+- External IdP JWT validation is supported via `JWT_JWKS_URL` (JWKS key discovery).
 - `AUTH_MODE=jwt` + `AUTH_REQUIRED=true` enforces bearer auth.
 - `AUTH_REQUIRED=true` enforces header presence.
 - Manager and rep endpoints enforce role- and org-aware access checks.

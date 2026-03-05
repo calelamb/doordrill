@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import jwt
@@ -24,24 +25,44 @@ class Actor:
 ALLOWED_ROLES = {"rep", "manager", "admin"}
 
 
+@lru_cache(maxsize=2)
+def _get_jwks_client(jwks_url: str) -> jwt.PyJWKClient:
+    return jwt.PyJWKClient(jwks_url)
+
+
 def _decode_bearer_token(raw_auth: str) -> dict[str, Any]:
     settings = get_settings()
-    if not settings.jwt_secret:
-        raise HTTPException(status_code=500, detail="JWT_SECRET is required for token auth")
+    if not settings.jwt_secret and not settings.jwt_jwks_url:
+        raise HTTPException(status_code=500, detail="JWT_SECRET or JWT_JWKS_URL is required for token auth")
 
     if not raw_auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="invalid authorization header format")
     token = raw_auth.split(" ", 1)[1].strip()
 
+    options = {
+        "verify_aud": bool(settings.jwt_audience),
+        "verify_iss": bool(settings.jwt_issuer),
+    }
     try:
-        options = {"verify_aud": bool(settings.jwt_audience)}
-        payload = jwt.decode(
-            token,
-            settings.jwt_secret,
-            algorithms=[settings.jwt_algorithm],
-            audience=settings.jwt_audience,
-            options=options,
-        )
+        if settings.jwt_jwks_url:
+            signing_key = _get_jwks_client(settings.jwt_jwks_url).get_signing_key_from_jwt(token).key
+            payload = jwt.decode(
+                token,
+                signing_key,
+                algorithms=[settings.jwt_algorithm],
+                audience=settings.jwt_audience,
+                issuer=settings.jwt_issuer,
+                options=options,
+            )
+        else:
+            payload = jwt.decode(
+                token,
+                settings.jwt_secret,
+                algorithms=[settings.jwt_algorithm],
+                audience=settings.jwt_audience,
+                issuer=settings.jwt_issuer,
+                options=options,
+            )
     except jwt.InvalidTokenError as exc:
         raise HTTPException(status_code=401, detail="invalid token") from exc
 

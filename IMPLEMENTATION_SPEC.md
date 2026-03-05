@@ -233,7 +233,8 @@ Stubbed integrations:
 3. Auth and authorization
    - header + JWT actor resolution implemented
    - org-level endpoint guards implemented
-   - next: wire external identity provider token lifecycle
+   - external IdP validation baseline implemented (`JWT_JWKS_URL`)
+   - next: finalize provider-specific token lifecycle (rotation, tenant issuer policy)
 
 4. Infra readiness
    - add Alembic migrations (implemented through rev `20260305_0003`)

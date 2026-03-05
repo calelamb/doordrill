@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     jwt_secret: str | None = Field(default=None, alias="JWT_SECRET")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     jwt_audience: str | None = Field(default=None, alias="JWT_AUDIENCE")
+    jwt_issuer: str | None = Field(default=None, alias="JWT_ISSUER")
+    jwt_jwks_url: str | None = Field(default=None, alias="JWT_JWKS_URL")
 
     stt_provider: str = Field(default="mock", alias="STT_PROVIDER")
     llm_provider: str = Field(default="mock", alias="LLM_PROVIDER")
