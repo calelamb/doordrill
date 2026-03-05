@@ -2,14 +2,15 @@ import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View, ActivityIndicator, RefreshControl } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
-import { ClipboardList, BookOpenCheck, TreePine } from "lucide-react-native";
+import { ClipboardList, BookOpenCheck, TreePine, Bell, Zap, TrendingUp } from "lucide-react-native";
+import { BlurView } from "expo-blur";
 
 import { AssignmentCard } from "../components/AssignmentCard";
 import { BottomTabParamList } from "../navigation/types";
-import { fetchRepAssignments, fetchAllScenarios } from "../services/api";
+import { fetchRepAssignments, fetchAllScenarios, fetchRepProgress } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { RepAssignment, ScenarioBrief } from "../types";
+import { RepAssignment, ScenarioBrief, RepProgress } from "../types";
 import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
 import { CompositeScreenProps } from "@react-navigation/native";
 import { RootStackParamList } from "../navigation/types";
@@ -38,6 +39,7 @@ export function AssignmentsScreen({ navigation }: Props) {
   const { repId } = useSession();
   const [assignments, setAssignments] = useState<RepAssignment[]>([]);
   const [scenarios, setScenarios] = useState<Record<string, ScenarioBrief>>({});
+  const [progress, setProgress] = useState<RepProgress | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,11 +48,13 @@ export function AssignmentsScreen({ navigation }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const [assignmentsRes, scenariosRes] = await Promise.all([
+      const [assignmentsRes, scenariosRes, progressRes] = await Promise.all([
         fetchRepAssignments(repId),
-        fetchAllScenarios(repId)
+        fetchAllScenarios(repId),
+        fetchRepProgress(repId)
       ]);
       setAssignments(assignmentsRes);
+      setProgress(progressRes);
       
       const scenarioMap: Record<string, ScenarioBrief> = {};
       for (const sc of scenariosRes) {
@@ -106,11 +110,15 @@ export function AssignmentsScreen({ navigation }: Props) {
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.content}>
           <View style={styles.headerRow}>
-            <View style={styles.headerIconContainer}>
-              <TreePine size={32} color={colors.accent} strokeWidth={2.5} />
+            <View style={styles.headerTextContainer}>
+              <Text style={styles.greeting} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
+                {progress?.rep_name ? `Good morning, ${progress.rep_name.split(' ')[0]}!` : "Good morning!"}
+              </Text>
+              <Text style={styles.subtitle}>Let's hit today's targets.</Text>
             </View>
-            <Text style={styles.title}>Your Drills</Text>
-            <Text style={styles.subtitle}>Open a brief, then jump straight in.</Text>
+            <Pressable style={styles.bellButton}>
+              <Bell size={24} color={colors.ink} />
+            </Pressable>
           </View>
 
           {error ? (
@@ -129,6 +137,47 @@ export function AssignmentsScreen({ navigation }: Props) {
               <RefreshControl refreshing={loading && assignments.length > 0} onRefresh={loadData} colors={[colors.accent]} tintColor={colors.accent} />
             }
           >
+            <View style={styles.statsRow}>
+              <BlurView intensity={40} tint="light" style={styles.statCard}>
+                <TrendingUp size={24} color={colors.accent} style={styles.statIcon} />
+                <View>
+                  <Text style={styles.statValue}>{progress?.average_score?.toFixed(1) ?? "0.0"}</Text>
+                  <Text style={styles.statLabel}>Avg Score</Text>
+                </View>
+              </BlurView>
+              <BlurView intensity={40} tint="light" style={styles.statCard}>
+                <BookOpenCheck size={24} color={colors.accent} style={styles.statIcon} />
+                <View>
+                  <Text style={styles.statValue}>{progress?.completed_drills ?? 0}</Text>
+                  <Text style={styles.statLabel}>Completed</Text>
+                </View>
+              </BlurView>
+            </View>
+
+            {Object.values(scenarios).length > 0 && (
+              <Pressable 
+                style={({ pressed }) => [styles.quickTrainCard, pressed && styles.quickTrainCardPressed]}
+                onPress={() => {
+                  const firstScenarioId = Object.keys(scenarios)[0];
+                  if (firstScenarioId) {
+                    navigation.navigate("PreSession", { scenarioId: firstScenarioId });
+                  }
+                }}
+              >
+                <LinearGradient colors={["#166534", "#15803d"]} style={styles.quickTrainGradient} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}>
+                  <View style={styles.quickTrainIcon}>
+                    <Zap size={24} color="#fff" fill="#fff" />
+                  </View>
+                  <View style={styles.quickTrainTextContainer}>
+                    <Text style={styles.quickTrainTitle}>Quick Train</Text>
+                    <Text style={styles.quickTrainSubtitle}>Start an open practice session</Text>
+                  </View>
+                </LinearGradient>
+              </Pressable>
+            )}
+
+            <Text style={styles.sectionHeader}>Up Next</Text>
+
             {loading && assignments.length === 0 ? (
               <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
             ) : (
@@ -138,24 +187,8 @@ export function AssignmentsScreen({ navigation }: Props) {
                     <View style={styles.emptyIconContainer}>
                       <ClipboardList size={32} color={colors.accent} />
                     </View>
-                    <Text style={styles.emptyText}>No drills yet.</Text>
-                    <Text style={styles.emptySubtext}>Your manager will assign scenarios here.</Text>
-                    
-                    {Object.values(scenarios).length > 0 && (
-                      <Pressable 
-                        style={styles.practiceBtn}
-                        onPress={() => {
-                          const firstScenarioId = Object.keys(scenarios)[0];
-                          if (firstScenarioId) {
-                            navigation.navigate("PreSession", {
-                              scenarioId: firstScenarioId,
-                            });
-                          }
-                        }}
-                      >
-                        <Text style={styles.practiceBtnText}>Practice Now</Text>
-                      </Pressable>
-                    )}
+                    <Text style={styles.emptyText}>No drills assigned.</Text>
+                    <Text style={styles.emptySubtext}>Your manager will assign scenarios here. Use Quick Train to practice freely.</Text>
                   </View>
                 ) : null}
 
@@ -203,20 +236,122 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   safeArea: { flex: 1 },
   content: { flex: 1, padding: 20, gap: 16 },
-  headerRow: { alignItems: "center", marginBottom: 16, marginTop: 16 },
-  headerIconContainer: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: "rgba(74, 222, 128, 0.12)",
+  headerRow: { 
+    flexDirection: "row", 
+    justifyContent: "space-between", 
+    alignItems: "center", 
+    marginBottom: 16, 
+    marginTop: 16,
+  },
+  headerTextContainer: {
+    flex: 1,
+    marginRight: 16,
+  },
+  greeting: { 
+    fontSize: 26, 
+    fontFamily: "Poppins_800ExtraBold", 
+    color: colors.ink, 
+    marginBottom: 2 
+  },
+  subtitle: { 
+    color: colors.muted, 
+    fontSize: 15,
+    fontWeight: "500" 
+  },
+  bellButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: "rgba(74, 222, 128, 0.3)"
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
   },
-  title: { fontSize: 32, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 4, textAlign: "center" },
-  subtitle: { color: colors.muted, fontSize: 16, textAlign: "center" },
+  statsRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 8,
+  },
+  statCard: {
+    flex: 1,
+    padding: 16,
+    borderRadius: 20,
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  statIcon: {
+    backgroundColor: colors.accentSoft,
+    padding: 8,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  statValue: {
+    fontSize: 20,
+    fontFamily: "Poppins_800ExtraBold",
+    color: colors.ink,
+  },
+  statLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: colors.muted,
+    textTransform: "uppercase",
+  },
+  quickTrainCard: {
+    borderRadius: 24,
+    overflow: "hidden",
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 4,
+    marginBottom: 8,
+  },
+  quickTrainCardPressed: {
+    opacity: 0.9,
+    transform: [{ scale: 0.98 }],
+  },
+  quickTrainGradient: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 20,
+    gap: 16,
+  },
+  quickTrainIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  quickTrainTextContainer: {
+    flex: 1,
+  },
+  quickTrainTitle: {
+    color: "#fff",
+    fontSize: 18,
+    fontFamily: "Poppins_800ExtraBold",
+    marginBottom: 2,
+  },
+  quickTrainSubtitle: {
+    color: "rgba(255, 255, 255, 0.8)",
+    fontSize: 14,
+    fontWeight: "500",
+  },
+  sectionHeader: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: colors.muted,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    marginTop: 8,
+    marginBottom: 4,
+  },
   errorContainer: {
     backgroundColor: "#FEE2E2",
     borderWidth: 1,
@@ -229,8 +364,8 @@ const styles = StyleSheet.create({
   },
   error: { color: "#991B1B", fontWeight: "600", flex: 1 },
   retryText: { color: "#991B1B", fontWeight: "800", textDecorationLine: "underline" },
-  list: { gap: 16, paddingBottom: 40 },
-  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", marginTop: 80, gap: 12 },
+  list: { gap: 12, paddingBottom: 40 },
+  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", marginTop: 40, gap: 12 },
   emptyIconContainer: {
     width: 64,
     height: 64,
@@ -240,41 +375,26 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: "rgba(74, 222, 128, 0.2)"
+    borderColor: "rgba(22, 101, 52, 0.2)"
   },
   emptyText: { fontSize: 20, fontFamily: "Poppins_700Bold", color: colors.ink },
-  emptySubtext: { fontSize: 15, color: colors.muted, textAlign: "center" },
-  practiceBtn: {
-    marginTop: 24,
-    backgroundColor: colors.accent,
-    paddingHorizontal: 32,
-    paddingVertical: 16,
-    borderRadius: 24, // Apple pill shape
-    shadowColor: colors.accent,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.25,
-    shadowRadius: 16,
-    elevation: 4,
-  },
-  practiceBtnText: {
-    color: "#fff",
-    fontSize: 16,
-    fontFamily: "Poppins_700Bold",
-  },
+  emptySubtext: { fontSize: 15, color: colors.muted, textAlign: "center", paddingHorizontal: 20 },
   completedSection: {
-    marginTop: 32,
-    gap: 16,
+    marginTop: 24,
+    gap: 12,
   },
   completedHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
-    marginBottom: 12,
+    marginBottom: 8,
   },
   sectionTitle: {
-    fontSize: 18,
-    fontFamily: "Poppins_700Bold",
-    color: colors.ink,
+    fontSize: 14,
+    fontWeight: "700",
+    color: colors.muted,
+    textTransform: "uppercase",
+    letterSpacing: 1,
   }
 });

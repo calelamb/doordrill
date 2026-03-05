@@ -45,9 +45,9 @@ function scoreValue(value: number | { score?: number } | undefined): number {
 }
 
 function scoreBand(score: number) {
-  if (score < 5) return { bg: "#FEE2E2", text: "#991B1B", border: "#FECACA" };
-  if (score < 8) return { bg: "#FEF3C7", text: "#92400E", border: "#FDE68A" };
-  return { bg: "#D1FAE5", text: "#065F46", border: "#A7F3D0" };
+  if (score < 5) return { bg: "rgba(220, 38, 38, 0.12)", text: "#dc2626", border: "rgba(220, 38, 38, 0.2)" };
+  if (score < 8) return { bg: "rgba(217, 119, 6, 0.12)", text: "#d97706", border: "rgba(217, 119, 6, 0.2)" };
+  return { bg: "rgba(22, 101, 52, 0.12)", text: "#166534", border: "rgba(22, 101, 52, 0.2)" };
 }
 
 function CategoryBar({ label, score, index }: { label: string; score: number; index: number }) {
@@ -168,7 +168,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   const highlights = (scorecard?.highlights ?? []).slice(0, 4);
 
   return (
-    <LinearGradient colors={["#173322", "#0d1f14", "#050a06"]} style={styles.container}>
+    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         {loading ? (
@@ -180,7 +180,7 @@ export function ScoreScreen({ route, navigation }: Props) {
           <>
             <View style={styles.heroBlock}>
               {/* @ts-ignore */}
-              <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg }]}>
+              <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}>
                 <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
                 <Text style={styles.heroLabel}>Overall Score</Text>
               </Animated.View>
@@ -305,7 +305,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 12,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.08,
+    shadowRadius: 24,
+    elevation: 4,
   },
   heroValue: {
     fontSize: 64,
@@ -489,27 +494,37 @@ const styles = StyleSheet.create({
   primaryCta: {
     flex: 1,
     backgroundColor: colors.accent,
-    borderRadius: 14,
-    paddingVertical: 14,
+    borderRadius: 24,
+    paddingVertical: 16,
     alignItems: "center",
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 4,
   },
   primaryCtaLabel: {
     color: "#fff",
-    fontSize: 15,
-    fontWeight: "700",
+    fontSize: 16,
+    fontFamily: "Poppins_700Bold",
   },
   secondaryCta: {
     flex: 1,
-    backgroundColor: "rgba(255, 255, 255, 0.5)",
-    borderWidth: 1,
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line,
-    borderRadius: 14,
-    paddingVertical: 14,
+    borderRadius: 24,
+    paddingVertical: 16,
     alignItems: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.04,
+    shadowRadius: 12,
+    elevation: 2,
   },
   secondaryCtaLabel: {
     color: colors.ink,
-    fontSize: 15,
-    fontWeight: "700",
+    fontSize: 16,
+    fontFamily: "Poppins_700Bold",
   },
 });

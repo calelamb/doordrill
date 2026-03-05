@@ -134,7 +134,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: "rgba(22, 163, 74, 0.2)"
+    borderColor: "rgba(22, 101, 52, 0.2)"
   },
   emptyText: { fontSize: 20, fontFamily: "Poppins_700Bold", color: colors.ink },
   emptySubtext: { fontSize: 15, color: colors.muted, textAlign: "center", paddingHorizontal: 20 },
@@ -181,9 +181,9 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   newBadge: {
-    backgroundColor: "rgba(22, 163, 74, 0.12)",
+    backgroundColor: "rgba(22, 101, 52, 0.12)",
     borderWidth: 1,
-    borderColor: "rgba(22, 163, 74, 0.3)",
+    borderColor: "rgba(22, 101, 52, 0.3)",
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 999,

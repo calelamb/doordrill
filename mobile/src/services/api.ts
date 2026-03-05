@@ -97,3 +97,41 @@ export async function lookupRepByEmail(email: string): Promise<{ rep_id: string 
   const response = await fetch(`${API_BASE_URL}/rep/lookup?email=${encodeURIComponent(email)}`);
   return parseJson<{ rep_id: string }>(response, "lookup rep");
 }
+
+export async function uploadRepAvatar(repId: string, uri: string): Promise<{ avatar_url: string }> {
+  const ext = uri.split('.').pop() || 'jpg';
+  const formData = new FormData();
+  // @ts-ignore
+  formData.append('file', {
+    uri,
+    name: `avatar.${ext}`,
+    type: `image/${ext}`
+  });
+
+  const response = await fetch(`${API_BASE_URL}/rep/profile/avatar`, {
+    method: "POST",
+    headers: {
+      "x-user-id": repId,
+      "x-user-role": "rep",
+      // Do not set Content-Type, fetch will set it with boundary
+    },
+    body: formData
+  });
+  return parseJson<{ avatar_url: string }>(response, "upload avatar");
+}
+
+export async function updateRepProfile(repId: string, name: string): Promise<{ name: string; avatar_url: string | null }> {
+  const response = await fetch(`${API_BASE_URL}/rep/profile`, {
+    method: "PATCH",
+    headers: repHeaders(repId),
+    body: JSON.stringify({ name })
+  });
+  return parseJson<{ name: string; avatar_url: string | null }>(response, "update profile");
+}
+
+export async function fetchRepHierarchy(repId: string): Promise<import("../types").HierarchyNode[]> {
+  const response = await fetch(`${API_BASE_URL}/rep/hierarchy`, {
+    headers: repHeaders(repId)
+  });
+  return parseJson<import("../types").HierarchyNode[]>(response, "fetch hierarchy");
+}

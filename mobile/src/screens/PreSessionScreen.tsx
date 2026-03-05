@@ -54,17 +54,19 @@ function PulsingOrb({ isReady, isStarting }: { isReady: boolean, isStarting: boo
 
   return (
     <View style={styles.animationContainer}>
-      <Animated.View style={[styles.pulseRing, ring1Style]} />
-      <Animated.View style={[styles.pulseRing, ring2Style]} />
-      <Animated.View 
-        style={[
-          styles.orb, 
-          isReady ? styles.orbReady : undefined,
-          isStarting && styles.orbStarting
-        ]} 
-      >
-        <Radio size={32} color={isReady ? "#fff" : colors.accent} />
-      </Animated.View>
+      <View style={styles.orbWrapper}>
+        <Animated.View style={[styles.pulseRing, ring1Style]} />
+        <Animated.View style={[styles.pulseRing, ring2Style]} />
+        <Animated.View 
+          style={[
+            styles.orb, 
+            isReady ? styles.orbReady : undefined,
+            isStarting && styles.orbStarting
+          ]} 
+        >
+          <Radio size={32} color={isReady ? "#fff" : colors.accent} />
+        </Animated.View>
+      </View>
     </View>
   );
 }
@@ -196,23 +198,16 @@ export function PreSessionScreen({ route, navigation }: Props) {
 
           <PulsingOrb isReady={statusStage === 2} isStarting={starting} />
 
-          <View style={styles.statusBox}>
-            <Animated.Text key={statusStage} entering={FadeIn} exiting={FadeOut} style={styles.statusText}>
-              {getStatusText()}
-            </Animated.Text>
-          </View>
-
-          <View style={styles.detailsCard}>
-            <View style={styles.detailsHeader}>
-              <View style={styles.detailsIconContainer}>
-                <TreePine size={24} color={colors.accent} strokeWidth={2.5} />
-              </View>
-              <View style={styles.detailsTitleContainer}>
-                <Text style={styles.scenarioName}>{scenario?.name ?? "Loading..."}</Text>
-                <Text style={styles.personaInfo}>{persona.name} · {persona.attitude}</Text>
-              </View>
+          <View style={styles.infoContainer}>
+            <Text style={styles.scenarioName}>{scenario?.name ?? "Loading..."}</Text>
+            <Text style={styles.personaInfo}>{persona.name} · {persona.attitude}</Text>
+            
+            <View style={styles.statusBox}>
+              <Animated.Text key={statusStage} entering={FadeIn} exiting={FadeOut} style={styles.statusText}>
+                {getStatusText()}
+              </Animated.Text>
             </View>
-            <View style={styles.divider} />
+
             <Text style={styles.personaHint}>{persona.cue}</Text>
           </View>
 
@@ -286,6 +281,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  orbWrapper: {
+    width: 80,
+    height: 80,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   orb: {
     width: 80,
     height: 80,
@@ -293,6 +294,8 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(74, 222, 128, 0.12)",
     borderWidth: 2,
     borderColor: colors.accent,
+    alignItems: "center",
+    justifyContent: "center",
   },
   orbReady: {
     backgroundColor: colors.accent,
@@ -310,7 +313,7 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: "rgba(22, 163, 74, 0.2)",
+    backgroundColor: "rgba(22, 101, 52, 0.2)",
   },
   statusBox: {
     alignItems: "center",
@@ -324,58 +327,30 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     letterSpacing: 1,
   },
-  detailsCard: {
-    backgroundColor: "rgba(255, 255, 255, 0.7)",
-    borderRadius: 32,
-    padding: 24,
-    gap: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.05,
-    shadowRadius: 24,
-    elevation: 4,
-  },
-  detailsHeader: {
-    flexDirection: "row",
+  infoContainer: {
     alignItems: "center",
-    gap: 12,
-  },
-  detailsIconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 16,
-    backgroundColor: "rgba(74, 222, 128, 0.15)",
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "rgba(74, 222, 128, 0.3)",
-  },
-  detailsTitleContainer: {
-    flex: 1,
+    paddingHorizontal: 20,
   },
   scenarioName: {
-    fontSize: 20,
+    fontSize: 24,
     fontFamily: "Poppins_800ExtraBold",
     color: colors.ink,
-    lineHeight: 24,
-    marginBottom: 2,
+    textAlign: "center",
+    marginBottom: 6,
   },
   personaInfo: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "700",
     color: colors.muted,
-  },
-  divider: {
-    height: 1,
-    backgroundColor: colors.line,
-    marginVertical: 4,
+    textAlign: "center",
+    marginBottom: 8,
   },
   personaHint: {
     fontSize: 15,
     lineHeight: 24,
     color: colors.muted,
+    textAlign: "center",
+    marginTop: 8,
   },
   errorBox: {
     marginTop: 16,

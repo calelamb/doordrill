@@ -1,15 +1,17 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
-import { Award, Target, Zap, LogOut } from "lucide-react-native";
+import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View, TextInput, Image, ScrollView } from "react-native";
+import { Award, Target, Zap, LogOut, Edit2, Check, X, Camera } from "lucide-react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
+import * as ImagePicker from "expo-image-picker";
 
 import { BottomTabParamList, RootStackParamList } from "../navigation/types";
-import { fetchRepProgress } from "../services/api";
+import { fetchRepProgress, updateRepProfile, uploadRepAvatar, fetchRepHierarchy } from "../services/api";
+import { API_BASE_URL } from "../services/config";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { RepProgress } from "../types";
+import { RepProgress, HierarchyNode } from "../types";
 import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
 import { CompositeScreenProps } from "@react-navigation/native";
 
@@ -21,18 +23,29 @@ type Props = CompositeScreenProps<
 export function ProfileScreen({ navigation }: Props) {
   const { repId, clearSession } = useSession();
   const [progress, setProgress] = useState<RepProgress | null>(null);
+  const [hierarchy, setHierarchy] = useState<HierarchyNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
   const loadProgress = useCallback(async () => {
     if (!repId) return;
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchRepProgress(repId);
-      setProgress(data);
+      const [progressData, hierarchyData] = await Promise.all([
+        fetchRepProgress(repId),
+        fetchRepHierarchy(repId)
+      ]);
+      setProgress(progressData);
+      setHierarchy(hierarchyData);
+      setEditName(progressData.rep_name || "");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load progress");
+      setError(err instanceof Error ? err.message : "Failed to load profile");
     } finally {
       setLoading(false);
     }
@@ -42,22 +55,102 @@ export function ProfileScreen({ navigation }: Props) {
     void loadProgress();
   }, [loadProgress]);
 
+  const handleSaveProfile = async () => {
+    if (!repId) return;
+    setSavingProfile(true);
+    try {
+      await updateRepProfile(repId, editName);
+      await loadProgress(); // reload data
+      setIsEditing(false);
+    } catch (err) {
+      alert("Failed to save profile");
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
+  const pickImage = async () => {
+    if (!repId || !isEditing) return;
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images, // Corrected from ['images']
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.5,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        setUploadingAvatar(true);
+        await uploadRepAvatar(repId, result.assets[0].uri);
+        await loadProgress(); // reload data to get new avatar URL
+      }
+    } catch (err) {
+      alert("Failed to upload image");
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
+
   const displayName = progress?.rep_name || "Sales Representative";
   const initials = progress?.rep_name 
     ? progress.rep_name.split(" ").map(n => n[0]).join("").substring(0, 2).toUpperCase()
     : "SR";
   const displayRole = progress?.rep_email || "rep@doordrill.com";
+  const avatarUrl = progress?.rep_avatar_url ? `${API_BASE_URL}${progress.rep_avatar_url}` : null;
 
   return (
     <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <View style={styles.content}>
+        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
           <BlurView intensity={40} tint="light" style={styles.profileCard}>
-            <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{initials}</Text>
-            </View>
-            <Text style={styles.name}>{displayName}</Text>
-            <Text style={styles.role}>{displayRole}</Text>
+            {!isEditing && (
+              <Pressable style={styles.editButton} onPress={() => setIsEditing(true)}>
+                <Edit2 size={18} color={colors.muted} />
+              </Pressable>
+            )}
+            
+            <Pressable onPress={pickImage} disabled={!isEditing} style={[styles.avatar, isEditing && styles.avatarEditing]}>
+              {uploadingAvatar ? (
+                <ActivityIndicator color={colors.accent} />
+              ) : avatarUrl ? (
+                <Image source={{ uri: avatarUrl }} style={styles.avatarImage} />
+              ) : (
+                <Text style={styles.avatarText}>{initials}</Text>
+              )}
+              {isEditing && !uploadingAvatar && (
+                <View style={styles.avatarEditOverlay}>
+                  <Camera size={20} color="#fff" />
+                </View>
+              )}
+            </Pressable>
+            
+            {isEditing ? (
+              <View style={styles.editForm}>
+                <TextInput
+                  style={styles.nameInput}
+                  value={editName}
+                  onChangeText={setEditName}
+                  placeholder="Your Name"
+                  placeholderTextColor={colors.muted}
+                />
+                <View style={styles.editActions}>
+                  <Pressable 
+                    style={[styles.actionBtn, styles.cancelBtn]} 
+                    onPress={() => { setIsEditing(false); setEditName(progress?.rep_name || ""); }}
+                  >
+                    <X size={16} color="#6b7280" />
+                  </Pressable>
+                  <Pressable style={[styles.actionBtn, styles.saveBtn]} onPress={handleSaveProfile} disabled={savingProfile}>
+                    {savingProfile ? <ActivityIndicator size="small" color="#fff" /> : <Check size={16} color="#fff" />}
+                  </Pressable>
+                </View>
+              </View>
+            ) : (
+              <>
+                <Text style={styles.name}>{displayName}</Text>
+                <Text style={styles.role}>{displayRole}</Text>
+              </>
+            )}
           </BlurView>
 
           {loading && !progress ? (
@@ -70,43 +163,72 @@ export function ProfileScreen({ navigation }: Props) {
               </Pressable>
             </View>
           ) : progress ? (
-            <View style={styles.statsContainer}>
-              <Text style={styles.sectionTitle}>Your Progress</Text>
-              
-              <View style={styles.statGrid}>
-                <View style={styles.statCardWrapper}>
-                  <BlurView intensity={40} tint="light" style={styles.statCard}>
-                    <View style={styles.statHeader}>
-                      <Target size={18} color={colors.muted} />
-                      <Text style={styles.statLabel}>Total Drills</Text>
-                    </View>
-                    <Text style={styles.statValue}>{progress.session_count}</Text>
-                  </BlurView>
-                </View>
+            <>
+              <View style={styles.statsContainer}>
+                <Text style={styles.sectionTitle}>Your Progress</Text>
+                
+                <View style={styles.statGrid}>
+                  <View style={styles.statCardWrapper}>
+                    <BlurView intensity={40} tint="light" style={styles.statCard}>
+                      <View style={styles.statHeader}>
+                        <Target size={18} color={colors.muted} />
+                        <Text style={styles.statLabel}>Total Drills</Text>
+                      </View>
+                      <Text style={styles.statValue}>{progress.session_count}</Text>
+                    </BlurView>
+                  </View>
 
-                <View style={styles.statCardWrapper}>
-                  <BlurView intensity={40} tint="light" style={styles.statCard}>
-                    <View style={styles.statHeader}>
-                      <Award size={18} color={colors.accent} />
-                      <Text style={styles.statLabel}>Average Score</Text>
-                    </View>
-                    <Text style={[styles.statValue, { color: colors.accent }]}>
-                      {progress.average_score !== null ? progress.average_score.toFixed(1) : "--"}
-                    </Text>
-                  </BlurView>
-                </View>
-
-                <View style={[styles.statCardWrapper, { width: "100%" }]}>
-                  <BlurView intensity={40} tint="light" style={styles.statCard}>
-                    <View style={styles.statHeader}>
-                      <Zap size={18} color="#D97706" />
-                      <Text style={styles.statLabel}>Scored Sessions</Text>
-                    </View>
-                    <Text style={styles.statValue}>{progress.scored_session_count}</Text>
-                  </BlurView>
+                  <View style={styles.statCardWrapper}>
+                    <BlurView intensity={40} tint="light" style={styles.statCard}>
+                      <View style={styles.statHeader}>
+                        <Award size={18} color={colors.accent} />
+                        <Text style={styles.statLabel}>Avg Score</Text>
+                      </View>
+                      <Text style={[styles.statValue, { color: colors.accent }]}>
+                        {progress.average_score !== null ? progress.average_score.toFixed(1) : "--"}
+                      </Text>
+                    </BlurView>
+                  </View>
                 </View>
               </View>
-            </View>
+
+              {hierarchy && hierarchy.length > 0 && (
+                <View style={styles.hierarchyContainer}>
+                  <Text style={styles.sectionTitle}>Reporting Structure</Text>
+                  <View style={styles.hierarchyWrapper}>
+                    {hierarchy.map((node, index) => {
+                      const isLast = index === hierarchy.length - 1;
+                      const isMe = node.id === repId;
+                      const nodeInitials = node.name.split(" ").map(n => n[0]).join("").substring(0, 2).toUpperCase();
+                      const nodeAvatar = node.avatar_url ? `${API_BASE_URL}${node.avatar_url}` : null;
+                      
+                      return (
+                        <View key={node.id} style={styles.hierarchyRow}>
+                          <View style={styles.hierarchyLineContainer}>
+                            <View style={[styles.hierarchyAvatar, isMe && styles.hierarchyAvatarMe]}>
+                              {nodeAvatar ? (
+                                <Image source={{ uri: nodeAvatar }} style={styles.hierarchyAvatarImage} />
+                              ) : (
+                                <Text style={[styles.hierarchyAvatarText, isMe && styles.hierarchyAvatarTextMe]}>{nodeInitials}</Text>
+                              )}
+                            </View>
+                            {!isLast && <View style={styles.hierarchyLine} />}
+                          </View>
+                          <View style={[styles.hierarchyDetails, isMe && styles.hierarchyDetailsMe]}>
+                            <Text style={[styles.hierarchyName, isMe && styles.hierarchyNameMe]}>
+                              {node.name} {isMe ? "(You)" : ""}
+                            </Text>
+                            <Text style={styles.hierarchyRole}>
+                              {node.role.charAt(0).toUpperCase() + node.role.slice(1)}
+                            </Text>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              )}
+            </>
           ) : null}
 
           <View style={styles.actionsContainer}>
@@ -115,7 +237,7 @@ export function ProfileScreen({ navigation }: Props) {
               <Text style={styles.logoutText}>Sign Out</Text>
             </Pressable>
           </View>
-        </View>
+        </ScrollView>
       </SafeAreaView>
     </LinearGradient>
   );
@@ -145,12 +267,12 @@ const styles = StyleSheet.create({
     width: 100,
     height: 100,
     borderRadius: 50,
-    backgroundColor: "rgba(22, 163, 74, 0.1)",
+    backgroundColor: "rgba(22, 101, 52, 0.1)",
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 16,
     borderWidth: 2,
-    borderColor: "rgba(22, 163, 74, 0.3)",
+    borderColor: "rgba(22, 101, 52, 0.3)",
     shadowColor: colors.accent,
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.15,
@@ -212,4 +334,103 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   logoutText: { fontSize: 16, fontWeight: "700", color: "#991B1B" },
+  editButton: { position: "absolute", top: 20, right: 20, padding: 8 },
+  avatarEditing: { borderWidth: 2, borderColor: colors.accent, borderStyle: "dashed" },
+  avatarImage: { width: "100%", height: "100%", borderRadius: 50 },
+  avatarEditOverlay: {
+    position: "absolute",
+    bottom: 0,
+    right: 0,
+    backgroundColor: colors.accent,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 3,
+    borderColor: "#fff"
+  },
+  editForm: { width: "100%", alignItems: "center", marginTop: 8 },
+  nameInput: {
+    width: "80%",
+    fontSize: 22,
+    fontFamily: "Poppins_800ExtraBold",
+    color: colors.ink,
+    textAlign: "center",
+    borderBottomWidth: 2,
+    borderBottomColor: colors.accent,
+    paddingVertical: 4,
+    marginBottom: 16
+  },
+  editActions: { flexDirection: "row", gap: 12 },
+  actionBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
+  saveBtn: { backgroundColor: colors.accent },
+  cancelBtn: { backgroundColor: "rgba(0,0,0,0.05)", borderWidth: 1, borderColor: "rgba(0,0,0,0.1)" },
+  hierarchyContainer: { marginTop: 32 },
+  hierarchyWrapper: {
+    paddingLeft: 16,
+    paddingTop: 8,
+  },
+  hierarchyRow: {
+    flexDirection: "row",
+    minHeight: 70,
+  },
+  hierarchyLineContainer: {
+    width: 40,
+    alignItems: "center",
+  },
+  hierarchyAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "rgba(22, 101, 52, 0.1)",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(22, 101, 52, 0.3)",
+    zIndex: 2,
+  },
+  hierarchyAvatarMe: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    marginLeft: -4,
+  },
+  hierarchyAvatarImage: { width: "100%", height: "100%", borderRadius: 24 },
+  hierarchyAvatarText: { fontSize: 14, fontWeight: "800", color: colors.accent },
+  hierarchyAvatarTextMe: { color: "#fff", fontSize: 16 },
+  hierarchyLine: {
+    width: 2,
+    flex: 1,
+    backgroundColor: "rgba(22, 101, 52, 0.2)",
+    marginTop: -4,
+    marginBottom: -4,
+    zIndex: 1,
+  },
+  hierarchyDetails: {
+    flex: 1,
+    paddingLeft: 16,
+    paddingTop: 4,
+    paddingBottom: 24,
+  },
+  hierarchyDetailsMe: {
+    paddingTop: 8,
+  },
+  hierarchyName: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: colors.ink,
+    marginBottom: 2,
+  },
+  hierarchyNameMe: {
+    fontFamily: "Poppins_700Bold",
+    fontSize: 18,
+    color: colors.accent,
+  },
+  hierarchyRole: {
+    fontSize: 13,
+    color: colors.muted,
+  }
 });

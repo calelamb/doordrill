@@ -227,7 +227,7 @@ const styles = StyleSheet.create({
     marginLeft: 12,
   },
   sendBtnDisabled: {
-    backgroundColor: "rgba(22, 163, 74, 0.4)",
+    backgroundColor: "rgba(22, 101, 52, 0.4)",
   },
   sendBtnPressed: {
     opacity: 0.8,

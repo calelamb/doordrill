@@ -61,9 +61,17 @@ export type RepProgress = {
   rep_id: string;
   rep_name?: string | null;
   rep_email?: string | null;
+  rep_avatar_url?: string | null;
   session_count: number;
   scored_session_count: number;
   average_score: number | null;
+};
+
+export type HierarchyNode = {
+  id: string;
+  name: string;
+  role: string;
+  avatar_url: string | null;
 };
 
 export type RepSessionHistoryItem = {

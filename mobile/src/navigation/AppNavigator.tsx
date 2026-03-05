@@ -107,7 +107,7 @@ export function AppNavigator() {
             }} 
           />
           <Stack.Screen name="Session" component={SessionScreen} options={{ headerShown: false }} />
-          <Stack.Screen name="Score" component={ScoreScreen} options={{ title: "Scorecard" }} />
+          <Stack.Screen name="Score" component={ScoreScreen} options={{ title: "Scorecard", headerBackTitle: "Back" }} />
           <Stack.Screen name="MessageThread" component={MessageThreadScreen} options={{ headerShown: false }} />
           <Stack.Screen 
             name="NewMessage" 

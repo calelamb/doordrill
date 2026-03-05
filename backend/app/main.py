@@ -4,6 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.auth import router as auth_router
 from app.api.manager import router as manager_router
@@ -40,3 +41,5 @@ app.include_router(rep_router)
 app.include_router(auth_router)
 app.include_router(scenarios_router)
 app.include_router(ws_router)
+
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")

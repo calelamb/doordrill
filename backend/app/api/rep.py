@@ -1,6 +1,9 @@
+import os
+import shutil
+import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -11,9 +14,10 @@ from app.models.prompt_version import PromptVersion
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.types import AssignmentStatus, SessionStatus
-from app.models.user import User
+from app.models.user import User, Team
 from app.schemas.assignment import AssignmentResponse
 from app.schemas.notification import DeviceTokenCreateRequest, DeviceTokenResponse
+from app.schemas.profile import ProfileUpdateRequest, HierarchyNode
 from app.schemas.session import SessionCreateRequest, SessionResponse
 from app.services.notification_service import NotificationService
 from app.services.manager_review_service import ManagerReviewService
@@ -250,6 +254,7 @@ def get_rep_progress(
         "rep_id": rep_id,
         "rep_name": rep_user.name,
         "rep_email": rep_user.email,
+        "rep_avatar_url": getattr(rep_user, "avatar_url", None),
         "session_count": int(sessions_count),
         "scored_session_count": int(scored_count),
         "average_score": round(float(avg_score), 2) if avg_score is not None else None,
@@ -297,3 +302,90 @@ def revoke_device_token(
     if not revoked:
         raise HTTPException(status_code=404, detail="device token not found")
     return {"ok": True, "token_id": token_id}
+
+@router.post("/profile/avatar")
+def upload_avatar(
+    file: UploadFile = File(...),
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db)
+) -> dict:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+    user = _get_user_or_404(db, actor.user_id, "user")
+    
+    ext = file.filename.split(".")[-1] if file.filename else "jpg"
+    filename = f"{user.id}_{uuid.uuid4().hex}.{ext}"
+    filepath = os.path.join("uploads", "avatars", filename)
+    
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    user.avatar_url = f"/uploads/avatars/{filename}"
+    db.commit()
+    
+    return {"avatar_url": user.avatar_url}
+
+@router.patch("/profile")
+def update_profile(
+    payload: ProfileUpdateRequest,
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db)
+) -> dict:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+    user = _get_user_or_404(db, actor.user_id, "user")
+    
+    if payload.name is not None:
+        user.name = payload.name
+        
+    db.commit()
+    return {"name": user.name, "avatar_url": user.avatar_url}
+
+@router.get("/hierarchy", response_model=list[HierarchyNode])
+def get_hierarchy(
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db)
+) -> list[HierarchyNode]:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+    
+    # Start from the current user and go up
+    current_user = _get_user_or_404(db, actor.user_id, "user")
+    
+    chain = []
+    
+    # Add the user themselves
+    chain.append(HierarchyNode(
+        id=current_user.id,
+        name=current_user.name,
+        role=current_user.role,
+        avatar_url=current_user.avatar_url
+    ))
+    
+    # If the user is on a team, find their manager
+    if current_user.team_id:
+        team = db.scalar(select(Team).where(Team.id == current_user.team_id))
+        if team and team.manager_id:
+            manager = db.scalar(select(User).where(User.id == team.manager_id))
+            if manager:
+                chain.insert(0, HierarchyNode(
+                    id=manager.id,
+                    name=manager.name,
+                    role=manager.role,
+                    avatar_url=manager.avatar_url
+                ))
+                
+                # If manager is also on a team, get the director
+                if manager.team_id:
+                    manager_team = db.scalar(select(Team).where(Team.id == manager.team_id))
+                    if manager_team and manager_team.manager_id and manager_team.manager_id != manager.id:
+                        director = db.scalar(select(User).where(User.id == manager_team.manager_id))
+                        if director:
+                            chain.insert(0, HierarchyNode(
+                                id=director.id,
+                                name=director.name,
+                                role=director.role,
+                                avatar_url=director.avatar_url
+                            ))
+                            
+    return chain
