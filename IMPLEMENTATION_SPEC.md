@@ -142,6 +142,9 @@ Supporting tables:
   - `backend/app/voice/ws.py`
 - Core services:
   - `backend/app/services/conversation_orchestrator.py`
+- Migrations:
+  - `backend/alembic/`
+  - `backend/alembic/versions/20260305_0001_initial_schema.py`
   - `backend/app/services/ledger_buffer.py`
   - `backend/app/services/ledger_service.py`
   - `backend/app/services/grading_service.py`
@@ -199,8 +202,8 @@ Stubbed integrations:
    - enforce manager/rep/org access controls on every endpoint
 
 4. Infra readiness
-   - add Alembic migrations
-   - add structured logging + tracing
+   - add Alembic migrations (implemented baseline + initial revision)
+   - add structured logging + tracing (request logging middleware implemented; tracing pending)
    - configure Redis + Postgres + object storage in deployment
 
 5. Performance and reliability
