@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     elevenlabs_base_url: str = Field(default="https://api.elevenlabs.io", alias="ELEVENLABS_BASE_URL")
     deepgram_model: str = Field(default="nova-2", alias="DEEPGRAM_MODEL")
     provider_timeout_seconds: float = Field(default=10.0, alias="PROVIDER_TIMEOUT_SECONDS")
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_json: bool = Field(default=True, alias="LOG_JSON")
 
 
 @lru_cache

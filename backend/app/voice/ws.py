@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -44,6 +45,18 @@ def _normalize_ts(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+def _resolve_trace_id(headers: Any) -> str:
+    traceparent = headers.get("traceparent")
+    if traceparent:
+        parts = traceparent.split("-")
+        if len(parts) == 4 and len(parts[1]) == 32:
+            return parts[1]
+    trace_id = headers.get("x-trace-id")
+    if trace_id:
+        return trace_id
+    return uuid.uuid4().hex
+
+
 async def _send_event(websocket: WebSocket, event_type: str, payload: dict[str, Any], sequence: int) -> None:
     await websocket.send_json(
         {
@@ -58,6 +71,7 @@ async def _send_event(websocket: WebSocket, event_type: str, payload: dict[str, 
 @router.websocket("/ws/sessions/{session_id}")
 async def session_ws(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
+    ws_trace_id = _resolve_trace_id(websocket.headers)
 
     db = SessionLocal()
     session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
@@ -103,7 +117,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
     async def emit_session_state(payload: dict[str, Any]) -> None:
         nonlocal server_sequence
-        body = {"session_id": session_id, **payload}
+        body = {"session_id": session_id, "trace_id": ws_trace_id, **payload}
         server_sequence += 1
         await _send_event(websocket, "server.session.state", body, server_sequence)
         await ledger.buffer_event(
@@ -150,13 +164,16 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 break
             except Exception:
                 disconnected.set()
-                logger.exception("WebSocket receive error", extra={"session_id": session_id})
+                logger.exception("WebSocket receive error", extra={"session_id": session_id, "trace_id": ws_trace_id})
                 break
 
             try:
                 msg = WsEvent.model_validate(raw)
             except Exception:
-                logger.warning("Dropped malformed websocket message", extra={"session_id": session_id, "raw": raw})
+                logger.warning(
+                    "Dropped malformed websocket message",
+                    extra={"session_id": session_id, "trace_id": ws_trace_id, "raw": raw},
+                )
                 continue
 
             if msg.type == "client.vad.state" and bool(msg.payload.get("speaking", False)):
@@ -250,6 +267,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "turn_id": rep_turn.id,
                 "confidence": stt_result.confidence,
                 "provider": stt_result.source,
+                "trace_id": ws_trace_id,
             }
             await _send_event(websocket, "server.stt.final", stt_final_payload, server_sequence)
             await ledger.buffer_event(
@@ -301,6 +319,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "token": chunk,
                     "provider": providers.llm.provider_name,
                     "stage": plan.stage_after,
+                    "trace_id": ws_trace_id,
                 }
                 await _send_event(websocket, "server.ai.text.delta", ai_text_payload, server_sequence)
                 await ledger.buffer_event(
@@ -329,6 +348,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         "payload": audio_chunk.get("payload", ""),
                         "provider": audio_chunk.get("provider", providers.tts.provider_name),
                         "duration_ms": int(audio_chunk.get("duration_ms", 0)),
+                        "trace_id": ws_trace_id,
                     }
                     await _send_event(websocket, "server.ai.audio.chunk", ai_audio_payload, server_sequence)
                     await ledger.buffer_event(
@@ -360,6 +380,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "barge_in_count": barge_in_count,
                     "latency_ms": elapsed_ms,
                     "at": barge_at.isoformat(),
+                    "trace_id": ws_trace_id,
                 }
                 await emit_session_state(interruption_payload)
             else:
@@ -397,6 +418,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "objection_tags": plan.objection_tags,
                 "interrupted": ai_interrupted,
                 "interruption": interruption_payload,
+                "trace_id": ws_trace_id,
             }
             await _send_event(websocket, "server.turn.committed", turn_payload, server_sequence)
             await ledger.buffer_event(
@@ -419,7 +441,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         except asyncio.CancelledError:
             pass
         except Exception:  # pragma: no cover
-            logger.exception("Receiver task cleanup error", extra={"session_id": session_id})
+            logger.exception("Receiver task cleanup error", extra={"session_id": session_id, "trace_id": ws_trace_id})
 
         try:
             await maybe_flush(force=True)
@@ -467,10 +489,11 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "transcript_artifact": transcript_artifact.storage_key,
                     "audio_frames": audio_frame_count,
                     "barge_in_count": barge_in_count,
+                    "trace_id": ws_trace_id,
                 },
             )
         except Exception:  # pragma: no cover
-            logger.exception("Failed to finalize websocket session", extra={"session_id": session_id})
+            logger.exception("Failed to finalize websocket session", extra={"session_id": session_id, "trace_id": ws_trace_id})
             db.rollback()
         finally:
             db.close()
