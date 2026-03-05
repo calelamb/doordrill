@@ -37,18 +37,28 @@ class SessionReplayResponse(BaseModel):
     manager_reviews: list[ManagerReviewResponse] = Field(default_factory=list)
     coaching_notes: list[ManagerCoachingNoteResponse] = Field(default_factory=list)
     latest_coaching_note: ManagerCoachingNoteResponse | None = None
+    rep: dict[str, Any] | None = None
+    scenario: dict[str, Any] | None = None
 
 
 class ManagerFeedItem(BaseModel):
     session_id: str
     rep_id: str
+    rep_name: str | None = None
     assignment_id: str
+    scenario_id: str | None = None
+    scenario_name: str | None = None
     overall_score: float | None
-    category_scores: dict[str, float] = Field(default_factory=dict)
+    category_scores: dict[str, Any] = Field(default_factory=dict)
     highlights: list[dict[str, Any]] = Field(default_factory=list)
     manager_reviewed: bool
     assignment_status: str
     session_status: str
+    started_at: str | None = None
+    ended_at: str | None = None
+    duration_seconds: int | None = None
+    latest_reviewed_at: str | None = None
+    latest_coaching_note_preview: str | None = None
 
 
 class ManagerFeedResponse(BaseModel):

@@ -20,7 +20,12 @@ def _uuid() -> str:
 
 class Session(Base, TimestampMixin):
     __tablename__ = "sessions"
-    __table_args__ = (Index("ix_sessions_assignment_started", "assignment_id", "started_at"),)
+    __table_args__ = (
+        Index("ix_sessions_assignment_started", "assignment_id", "started_at"),
+        Index("ix_sessions_rep_started", "rep_id", "started_at"),
+        Index("ix_sessions_status_started", "status", "started_at"),
+        Index("ix_sessions_scenario_started", "scenario_id", "started_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     assignment_id: Mapped[str] = mapped_column(ForeignKey("assignments.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -45,6 +50,7 @@ class SessionEvent(Base):
     __table_args__ = (
         UniqueConstraint("event_id", name="uq_session_events_event_id"),
         Index("ix_session_events_session_ts", "session_id", "event_ts"),
+        Index("ix_session_events_session_type_ts", "session_id", "event_type", "event_ts"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -61,7 +67,11 @@ class SessionEvent(Base):
 
 class SessionTurn(Base):
     __tablename__ = "session_turns"
-    __table_args__ = (UniqueConstraint("session_id", "turn_index", name="uq_session_turns_session_turn_idx"),)
+    __table_args__ = (
+        UniqueConstraint("session_id", "turn_index", name="uq_session_turns_session_turn_idx"),
+        Index("ix_session_turns_session_started", "session_id", "started_at"),
+        Index("ix_session_turns_session_speaker_started", "session_id", "speaker", "started_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True, nullable=False)

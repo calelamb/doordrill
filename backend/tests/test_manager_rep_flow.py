@@ -82,6 +82,8 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     assert replay["audio_artifacts"]
     assert replay["transcript_turns"]
     assert replay["stage_timeline"]
+    assert replay["rep"]["id"] == seed_org["rep_id"]
+    assert replay["scenario"]["id"] == seed_org["scenario_id"]
     assert replay["transport_metrics"]["audio_frame_count"] > 0
     assert replay["scorecard"] is not None
     assert "weakness_tags" in replay["scorecard"]
@@ -92,7 +94,19 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     assert feed_resp.status_code == 200
     items = feed_resp.json()["items"]
     assert len(items) >= 1
-    assert any(item["session_id"] == session_id and item["overall_score"] is not None for item in items)
+    matching = next(item for item in items if item["session_id"] == session_id)
+    assert matching["overall_score"] is not None
+    assert matching["rep_name"] == "Ray Rep"
+    assert matching["scenario_name"] == "Skeptical Homeowner"
+    assert matching["started_at"] is not None
+    assert "latest_reviewed_at" in matching
+
+    filtered = client.get(
+        "/manager/feed",
+        params={"manager_id": seed_org["manager_id"], "rep_id": seed_org["rep_id"], "reviewed": False},
+    )
+    assert filtered.status_code == 200
+    assert any(item["session_id"] == session_id for item in filtered.json()["items"])
 
 
 def test_manager_override_audit(client, seed_org):
@@ -175,6 +189,9 @@ def test_manager_analytics_and_rep_progress(client, seed_org):
     assert analytics_body["assignment_count"] >= 1
     assert analytics_body["sessions_count"] >= 1
     assert analytics_body["active_rep_count"] >= 1
+    assert "completion_rate_by_rep" in analytics_body
+    assert "scenario_pass_rates" in analytics_body
+    assert "score_distribution_histogram" in analytics_body
 
     progress = client.get(
         f"/manager/reps/{seed_org['rep_id']}/progress",
@@ -185,3 +202,7 @@ def test_manager_analytics_and_rep_progress(client, seed_org):
     progress_body = progress.json()
     assert progress_body["rep_id"] == seed_org["rep_id"]
     assert progress_body["session_count"] >= 1
+    assert progress_body["rep_name"] == "Ray Rep"
+    assert "current_period_category_averages" in progress_body
+    assert "weak_area_tags" in progress_body
+    assert progress_body["latest_sessions"][0]["scenario_name"] == "Skeptical Homeowner"

@@ -20,7 +20,11 @@ def _uuid() -> str:
 
 class Assignment(Base, TimestampMixin):
     __tablename__ = "assignments"
-    __table_args__ = (Index("ix_assignments_manager_status", "assigned_by", "status"),)
+    __table_args__ = (
+        Index("ix_assignments_manager_status", "assigned_by", "status"),
+        Index("ix_assignments_assigned_by_created", "assigned_by", "created_at"),
+        Index("ix_assignments_rep_status_due", "rep_id", "status", "due_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     scenario_id: Mapped[str] = mapped_column(ForeignKey("scenarios.id", ondelete="CASCADE"), index=True, nullable=False)

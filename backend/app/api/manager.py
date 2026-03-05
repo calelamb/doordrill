@@ -1,7 +1,8 @@
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_manager
@@ -36,6 +37,15 @@ storage_service = StorageService()
 action_service = ManagerActionService()
 review_service = ManagerReviewService()
 notification_service = NotificationService()
+RUBRIC_CATEGORY_KEYS = {
+    "opening": "opening",
+    "pitch": "pitch",
+    "pitch_delivery": "pitch",
+    "objection_handling": "objection_handling",
+    "closing": "closing",
+    "closing_technique": "closing",
+    "professionalism": "professionalism",
+}
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -63,6 +73,45 @@ def _serialize_review(review: ManagerReview) -> ManagerReviewResponse:
 
 def _serialize_coaching_note(note: ManagerCoachingNote) -> ManagerCoachingNoteResponse:
     return ManagerCoachingNoteResponse.model_validate(note)
+
+
+def _resolve_period_bounds(
+    *,
+    period: str,
+    date_from: datetime | None,
+    date_to: datetime | None,
+) -> tuple[datetime, datetime, datetime, datetime]:
+    now = datetime.now(timezone.utc)
+    if date_to is None:
+        date_to = now
+    if date_to.tzinfo is None:
+        date_to = date_to.replace(tzinfo=timezone.utc)
+
+    normalized_period = period.lower()
+    if normalized_period == "custom" and date_from is not None:
+        current_start = date_from if date_from.tzinfo else date_from.replace(tzinfo=timezone.utc)
+    else:
+        days = 30
+        if normalized_period == "7":
+            days = 7
+        elif normalized_period == "90":
+            days = 90
+        current_start = date_to - timedelta(days=days)
+
+    current_span = max(timedelta(days=1), date_to - current_start)
+    previous_end = current_start
+    previous_start = previous_end - current_span
+    return current_start, date_to, previous_start, previous_end
+
+
+def _category_score_value(value) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, dict):
+        raw = value.get("score")
+        if isinstance(raw, (int, float)):
+            return float(raw)
+    return None
 
 
 @router.get("/team")
@@ -404,6 +453,12 @@ def create_followup_assignment(
 @router.get("/feed", response_model=ManagerFeedResponse)
 def get_manager_feed(
     manager_id: str = Query(...),
+    rep_id: str | None = Query(default=None),
+    scenario_id: str | None = Query(default=None),
+    reviewed: bool | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
     actor: Actor = Depends(require_manager),
     db: Session = Depends(get_db),
 ) -> ManagerFeedResponse:
@@ -413,7 +468,16 @@ def get_manager_feed(
     manager = _get_user_or_404(db, manager_id, "manager")
     _ensure_same_org(actor, manager.org_id)
 
-    items = feed_service.get_feed(db, manager_id=manager_id)
+    items = feed_service.get_feed(
+        db,
+        manager_id=manager_id,
+        rep_id=rep_id,
+        scenario_id=scenario_id,
+        reviewed=reviewed,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
     return ManagerFeedResponse(items=items)
 
 
@@ -421,6 +485,8 @@ def get_manager_feed(
 def get_rep_progress(
     rep_id: str,
     manager_id: str = Query(...),
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=30, ge=1, le=100),
     actor: Actor = Depends(require_manager),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -433,35 +499,77 @@ def get_rep_progress(
     if manager.org_id != rep.org_id:
         raise HTTPException(status_code=403, detail="cross-organization access denied")
 
+    since = datetime.now(timezone.utc) - timedelta(days=days)
     stmt = (
         select(
             DrillSession.id.label("session_id"),
             DrillSession.started_at.label("started_at"),
             DrillSession.status.label("status"),
             Scorecard.overall_score.label("overall_score"),
+            Scorecard.category_scores.label("category_scores"),
+            DrillSession.scenario_id.label("scenario_id"),
+            Scenario.name.label("scenario_name"),
         )
         .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
+        .join(Scenario, Scenario.id == DrillSession.scenario_id)
         .where(DrillSession.rep_id == rep_id)
         .order_by(DrillSession.started_at.desc())
-        .limit(100)
+        .limit(max(limit, 100))
     )
     rows = db.execute(stmt).mappings().all()
     scores = [float(row["overall_score"]) for row in rows if row["overall_score"] is not None]
     avg_score = round(sum(scores) / len(scores), 2) if scores else None
+    trend_rows = [row for row in rows if row["overall_score"] is not None][:limit]
+
+    category_samples: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        started_at = row["started_at"]
+        if started_at is not None and started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        if started_at is None or started_at < since:
+            continue
+        category_scores = row["category_scores"] or {}
+        for raw_key, normalized in RUBRIC_CATEGORY_KEYS.items():
+            if raw_key not in category_scores:
+                continue
+            value = _category_score_value(category_scores.get(raw_key))
+            if value is not None:
+                category_samples[normalized].append(value)
+
+    category_averages = {
+        key: round(sum(values) / len(values), 2)
+        for key, values in category_samples.items()
+        if values
+    }
+    weak_area_tags = [key for key, value in category_averages.items() if value < 6.0]
 
     return {
         "rep_id": rep_id,
+        "rep_name": rep.name,
+        "days": days,
         "session_count": len(rows),
         "scored_session_count": len(scores),
         "average_score": avg_score,
+        "current_period_category_averages": category_averages,
+        "weak_area_tags": weak_area_tags,
         "latest_sessions": [
             {
                 "session_id": row["session_id"],
+                "scenario_id": row["scenario_id"],
+                "scenario_name": row["scenario_name"],
                 "started_at": row["started_at"].isoformat() if row["started_at"] else None,
                 "status": row["status"].value if row["status"] else None,
                 "overall_score": row["overall_score"],
             }
-            for row in rows[:20]
+            for row in rows[:limit]
+        ],
+        "trend": [
+            {
+                "session_id": row["session_id"],
+                "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+                "overall_score": row["overall_score"],
+            }
+            for row in reversed(trend_rows)
         ],
     }
 
@@ -469,6 +577,9 @@ def get_rep_progress(
 @router.get("/analytics")
 def get_manager_analytics(
     manager_id: str = Query(...),
+    period: str = Query(default="30"),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
     actor: Actor = Depends(require_manager),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -477,6 +588,12 @@ def get_manager_analytics(
 
     manager = _get_user_or_404(db, manager_id, "manager")
     _ensure_same_org(actor, manager.org_id)
+
+    current_start, current_end, previous_start, previous_end = _resolve_period_bounds(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
     assignment_count = db.scalar(select(func.count(Assignment.id)).where(Assignment.assigned_by == manager_id)) or 0
     completed_assignments = (
@@ -504,14 +621,137 @@ def get_manager_analytics(
 
     unique_reps = db.scalar(select(func.count(func.distinct(Assignment.rep_id))).where(Assignment.assigned_by == manager_id)) or 0
 
+    current_avg_score = db.scalar(
+        select(func.avg(Scorecard.overall_score))
+        .join(DrillSession, DrillSession.id == Scorecard.session_id)
+        .join(Assignment, Assignment.id == DrillSession.assignment_id)
+        .where(
+            Assignment.assigned_by == manager_id,
+            DrillSession.started_at >= current_start,
+            DrillSession.started_at <= current_end,
+        )
+    )
+    previous_avg_score = db.scalar(
+        select(func.avg(Scorecard.overall_score))
+        .join(DrillSession, DrillSession.id == Scorecard.session_id)
+        .join(Assignment, Assignment.id == DrillSession.assignment_id)
+        .where(
+            Assignment.assigned_by == manager_id,
+            DrillSession.started_at >= previous_start,
+            DrillSession.started_at < previous_end,
+        )
+    )
+
+    completion_rows = db.execute(
+        select(
+            Assignment.rep_id.label("rep_id"),
+            User.name.label("rep_name"),
+            func.count(Assignment.id).label("assignment_count"),
+            func.sum(case((Assignment.status == AssignmentStatus.COMPLETED, 1), else_=0)).label("completed_count"),
+        )
+        .join(User, User.id == Assignment.rep_id)
+        .where(
+            Assignment.assigned_by == manager_id,
+            Assignment.created_at >= current_start,
+            Assignment.created_at <= current_end,
+        )
+        .group_by(Assignment.rep_id, User.name)
+        .order_by(User.name.asc())
+    ).mappings().all()
+
+    pass_rate_rows = db.execute(
+        select(
+            Scenario.id.label("scenario_id"),
+            Scenario.name.label("scenario_name"),
+            func.count(Scorecard.id).label("scored_session_count"),
+            func.sum(case((Scorecard.overall_score >= 7.0, 1), else_=0)).label("pass_count"),
+        )
+        .join(DrillSession, DrillSession.scenario_id == Scenario.id)
+        .join(Assignment, Assignment.id == DrillSession.assignment_id)
+        .join(Scorecard, Scorecard.session_id == DrillSession.id)
+        .where(
+            Assignment.assigned_by == manager_id,
+            DrillSession.started_at >= current_start,
+            DrillSession.started_at <= current_end,
+        )
+        .group_by(Scenario.id, Scenario.name)
+        .order_by(Scenario.name.asc())
+    ).mappings().all()
+
+    histogram_rows = db.execute(
+        select(Scorecard.overall_score)
+        .join(DrillSession, DrillSession.id == Scorecard.session_id)
+        .join(Assignment, Assignment.id == DrillSession.assignment_id)
+        .where(
+            Assignment.assigned_by == manager_id,
+            DrillSession.started_at >= current_start,
+            DrillSession.started_at <= current_end,
+        )
+    ).all()
+    histogram_bins = [
+        {"label": "0-2", "min": 0.0, "max": 2.0, "count": 0},
+        {"label": "2-4", "min": 2.0, "max": 4.0, "count": 0},
+        {"label": "4-6", "min": 4.0, "max": 6.0, "count": 0},
+        {"label": "6-8", "min": 6.0, "max": 8.0, "count": 0},
+        {"label": "8-10", "min": 8.0, "max": 10.1, "count": 0},
+    ]
+    for (raw_score,) in histogram_rows:
+        if raw_score is None:
+            continue
+        score = float(raw_score)
+        for bucket in histogram_bins:
+            if bucket["min"] <= score < bucket["max"]:
+                bucket["count"] += 1
+                break
+
     return {
         "manager_id": manager_id,
+        "period": period,
+        "date_from": current_start.isoformat(),
+        "date_to": current_end.isoformat(),
         "assignment_count": int(assignment_count),
         "completed_assignment_count": int(completed_assignments),
         "sessions_count": int(sessions_count),
         "active_rep_count": int(unique_reps),
         "average_score": round(float(avg_score), 2) if avg_score is not None else None,
         "completion_rate": round((completed_assignments / assignment_count), 3) if assignment_count else 0.0,
+        "team_average_score": round(float(current_avg_score), 2) if current_avg_score is not None else None,
+        "team_average_delta_vs_previous_period": (
+            round(float(current_avg_score) - float(previous_avg_score), 2)
+            if current_avg_score is not None and previous_avg_score is not None
+            else None
+        ),
+        "completion_rate_by_rep": [
+            {
+                "rep_id": row["rep_id"],
+                "rep_name": row["rep_name"],
+                "assignment_count": int(row["assignment_count"] or 0),
+                "completed_assignment_count": int(row["completed_count"] or 0),
+                "completion_rate": round(
+                    (int(row["completed_count"] or 0) / int(row["assignment_count"] or 1)),
+                    3,
+                )
+                if int(row["assignment_count"] or 0)
+                else 0.0,
+            }
+            for row in completion_rows
+        ],
+        "scenario_pass_rates": [
+            {
+                "scenario_id": row["scenario_id"],
+                "scenario_name": row["scenario_name"],
+                "scored_session_count": int(row["scored_session_count"] or 0),
+                "pass_count": int(row["pass_count"] or 0),
+                "pass_rate": round(
+                    (int(row["pass_count"] or 0) / int(row["scored_session_count"] or 1)),
+                    3,
+                )
+                if int(row["scored_session_count"] or 0)
+                else 0.0,
+            }
+            for row in pass_rate_rows
+        ],
+        "score_distribution_histogram": histogram_bins,
     }
 
 
@@ -527,6 +767,7 @@ def get_session_replay(
 
     rep = _get_user_or_404(db, session.rep_id, "rep")
     _ensure_same_org(actor, rep.org_id)
+    scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
 
     turns = db.scalars(select(SessionTurn).where(SessionTurn.session_id == session_id).order_by(SessionTurn.turn_index.asc())).all()
     scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
@@ -605,6 +846,22 @@ def get_session_replay(
     return SessionReplayResponse(
         session_id=session.id,
         status=session.status.value,
+        rep={
+            "id": rep.id,
+            "name": rep.name,
+            "email": rep.email,
+            "team_id": rep.team_id,
+        },
+        scenario=(
+            {
+                "id": scenario.id,
+                "name": scenario.name,
+                "industry": scenario.industry,
+                "difficulty": scenario.difficulty,
+            }
+            if scenario
+            else None
+        ),
         audio_artifacts=[
             {
                 "artifact_id": a.id,
