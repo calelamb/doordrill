@@ -28,6 +28,7 @@ Plus org/user/team/scenario tables.
 
 REST:
 - `POST /manager/assignments`
+- `POST /manager/scorecards/{scorecard_id}/followup-assignment`
 - `GET /manager/feed?manager_id=...`
 - `GET /manager/sessions/{session_id}/replay`
 - `PATCH /manager/scorecards/{scorecard_id}`
@@ -60,6 +61,7 @@ Server events:
 - `AUTH_REQUIRED=true` enforces header presence.
 - Manager and rep endpoints now enforce role-aware access checks.
 - Current implementation is a scaffold for future JWT/Firebase/Supabase integration.
+- Scorecards now include `weakness_tags`, and follow-up assignments can embed those tags into retry policy metadata.
 
 ## Run
 

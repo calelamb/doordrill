@@ -13,6 +13,14 @@ class AssignmentCreateRequest(BaseModel):
     retry_policy: dict[str, Any] = Field(default_factory=dict)
 
 
+class FollowupAssignmentRequest(BaseModel):
+    scenario_id: str
+    assigned_by: str
+    due_at: datetime | None = None
+    min_score_target: float | None = None
+    retry_policy: dict[str, Any] = Field(default_factory=lambda: {"max_attempts": 1})
+
+
 class AssignmentResponse(BaseModel):
     id: str
     scenario_id: str

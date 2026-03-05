@@ -11,7 +11,7 @@ from app.models.scorecard import ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionTurn
 from app.models.types import ReviewReason
-from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse
+from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
 from app.schemas.scorecard import ManagerReviewResponse, ScorecardOverrideRequest
 from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
 from app.services.manager_feed_service import ManagerFeedService
@@ -43,6 +43,48 @@ def create_assignment(
     db.commit()
     db.refresh(assignment)
     return assignment
+
+
+@router.post("/scorecards/{scorecard_id}/followup-assignment")
+def create_followup_assignment(
+    scorecard_id: str,
+    payload: FollowupAssignmentRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != payload.assigned_by:
+        raise HTTPException(status_code=403, detail="manager can only assign as themselves")
+
+    scorecard = db.scalar(select(Scorecard).where(Scorecard.id == scorecard_id))
+    if scorecard is None:
+        raise HTTPException(status_code=404, detail="scorecard not found")
+
+    session = db.scalar(select(DrillSession).where(DrillSession.id == scorecard.session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="source session not found")
+
+    followup_policy = {
+        **payload.retry_policy,
+        "source_scorecard_id": scorecard.id,
+        "weakness_tags": scorecard.weakness_tags,
+    }
+    assignment = Assignment(
+        scenario_id=payload.scenario_id,
+        rep_id=session.rep_id,
+        assigned_by=payload.assigned_by,
+        due_at=payload.due_at,
+        min_score_target=payload.min_score_target,
+        retry_policy=followup_policy,
+    )
+    db.add(assignment)
+    db.commit()
+    db.refresh(assignment)
+
+    return {
+        "assignment": AssignmentResponse.model_validate(assignment).model_dump(),
+        "source_scorecard_id": scorecard.id,
+        "weakness_tags": scorecard.weakness_tags,
+    }
 
 
 @router.get("/feed", response_model=ManagerFeedResponse)
@@ -142,6 +184,7 @@ def get_session_replay(
                 "highlights": scorecard.highlights,
                 "ai_summary": scorecard.ai_summary,
                 "evidence_turn_ids": scorecard.evidence_turn_ids,
+                "weakness_tags": scorecard.weakness_tags,
             }
             if scorecard
             else None

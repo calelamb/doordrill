@@ -18,6 +18,7 @@ class ScorecardResponse(BaseModel):
     highlights: list[dict]
     ai_summary: str
     evidence_turn_ids: list[str]
+    weakness_tags: list[str]
 
     model_config = {"from_attributes": True}
 

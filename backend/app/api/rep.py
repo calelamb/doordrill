@@ -79,6 +79,7 @@ def get_session_with_feedback(
                 "highlights": scorecard.highlights,
                 "ai_summary": scorecard.ai_summary,
                 "evidence_turn_ids": scorecard.evidence_turn_ids,
+                "weakness_tags": scorecard.weakness_tags,
             }
             if scorecard
             else None

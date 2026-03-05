@@ -60,6 +60,7 @@ Supporting tables:
 ### REST endpoints
 
 - `POST /manager/assignments`
+- `POST /manager/scorecards/{scorecard_id}/followup-assignment`
 - `GET /manager/feed?manager_id=...`
 - `GET /manager/sessions/{session_id}/replay`
 - `PATCH /manager/scorecards/{scorecard_id}`
@@ -123,6 +124,10 @@ Supporting tables:
 - optional override score
 - notes
 - audit row creation in `manager_reviews`
+
+`POST /manager/scorecards/{id}/followup-assignment` supports:
+- creating next-assignment directly from scorecard context
+- embedding `weakness_tags` in retry metadata for adaptive drill routing
 
 ## File Map (Start Here)
 

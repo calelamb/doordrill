@@ -38,6 +38,10 @@ class GradingService:
         }
         overall = round(sum(category_scores.values()) / len(category_scores), 2)
 
+        weakness_tags = [key for key, score in category_scores.items() if score < 7.0]
+        if not weakness_tags and overall < 8.0:
+            weakness_tags = ["consistency"]
+
         evidence = [t.id for t in rep_turns[:3]]
         highlights = [
             {"type": "strong", "note": "Strong rapport and pacing.", "turn_id": evidence[0] if evidence else None},
@@ -57,6 +61,7 @@ class GradingService:
                 highlights=highlights,
                 ai_summary="Solid drill. Improve explicit close attempts and objection reframing.",
                 evidence_turn_ids=[e for e in evidence if e],
+                weakness_tags=weakness_tags,
             )
             db.add(scorecard)
         else:
@@ -65,6 +70,7 @@ class GradingService:
             scorecard.highlights = highlights
             scorecard.ai_summary = "Updated scorecard generated from latest transcript."
             scorecard.evidence_turn_ids = [e for e in evidence if e]
+            scorecard.weakness_tags = weakness_tags
 
         session.status = SessionStatus.GRADED
         session.ended_at = session.ended_at or datetime.now(timezone.utc)

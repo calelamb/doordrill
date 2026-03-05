@@ -27,6 +27,7 @@ class Scorecard(Base, TimestampMixin):
     highlights: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     ai_summary: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_turn_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    weakness_tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
 
     session: Mapped["Session"] = relationship(back_populates="scorecard")
     reviews: Mapped[list["ManagerReview"]] = relationship(back_populates="scorecard", cascade="all, delete-orphan")

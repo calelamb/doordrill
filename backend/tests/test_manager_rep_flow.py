@@ -78,6 +78,7 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     assert replay["stage_timeline"]
     assert replay["transport_metrics"]["audio_frame_count"] > 0
     assert replay["scorecard"] is not None
+    assert "weakness_tags" in replay["scorecard"]
 
     feed_resp = client.get("/manager/feed", params={"manager_id": seed_org["manager_id"]})
     assert feed_resp.status_code == 200
@@ -109,6 +110,27 @@ def test_manager_override_audit(client, seed_org):
     feed = client.get("/manager/feed", params={"manager_id": seed_org["manager_id"]}).json()["items"]
     item = next(i for i in feed if i["session_id"] == session_id)
     assert item["manager_reviewed"] is True
+
+
+def test_followup_assignment_from_scorecard(client, seed_org):
+    assignment = _create_assignment(client, seed_org)
+    session_id = _run_session(client, seed_org, assignment["id"])
+    replay = client.get(f"/manager/sessions/{session_id}/replay").json()
+    scorecard_id = replay["scorecard"]["id"]
+
+    followup = client.post(
+        f"/manager/scorecards/{scorecard_id}/followup-assignment",
+        json={
+            "scenario_id": seed_org["scenario_id"],
+            "assigned_by": seed_org["manager_id"],
+            "retry_policy": {"max_attempts": 2},
+        },
+    )
+    assert followup.status_code == 200
+    body = followup.json()
+    assert body["assignment"]["rep_id"] == seed_org["rep_id"]
+    assert body["assignment"]["retry_policy"]["source_scorecard_id"] == scorecard_id
+    assert "weakness_tags" in body
 
 
 def test_event_persistence_integrity(client, seed_org):
