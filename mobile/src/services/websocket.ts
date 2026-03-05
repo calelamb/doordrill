@@ -1,11 +1,13 @@
-import { WS_BASE_URL } from "./config";
 import { WsInboundEvent } from "../types";
+import { AudioChunk } from "./audio";
+import { WS_BASE_URL } from "./config";
 
 type Listener = (event: WsInboundEvent) => void;
 
 export class SessionWsClient {
   private socket: WebSocket | null = null;
   private sequence = 1;
+  private connectPromise: Promise<void> | null = null;
 
   constructor(private readonly sessionId: string) {}
 
@@ -13,13 +15,20 @@ export class SessionWsClient {
     if (this.socket?.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
+    if (this.connectPromise) {
+      return this.connectPromise;
+    }
+
     const url = `${WS_BASE_URL}/ws/sessions/${encodeURIComponent(this.sessionId)}`;
 
-    return new Promise((resolve, reject) => {
+    this.connectPromise = new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       this.socket = ws;
 
-      ws.onopen = () => resolve();
+      ws.onopen = () => {
+        this.connectPromise = null;
+        resolve();
+      };
       ws.onmessage = (message) => {
         try {
           const parsed = JSON.parse(String(message.data)) as WsInboundEvent;
@@ -28,25 +37,57 @@ export class SessionWsClient {
           listener({ type: "server.error", payload: { message: "invalid message format" } });
         }
       };
-      ws.onerror = () => reject(new Error("websocket connection failed"));
+      ws.onerror = () => {
+        this.connectPromise = null;
+        reject(new Error("websocket connection failed"));
+      };
       ws.onclose = () => {
+        this.connectPromise = null;
         this.socket = null;
         if (onClosed) {
           onClosed();
         }
       };
     });
+
+    return this.connectPromise;
   }
 
-  sendVadState(speaking: boolean) {
+  isConnected(): boolean {
+    return this.socket?.readyState === WebSocket.OPEN;
+  }
+
+  sendVadState(speaking: boolean): void {
     this.send({
       type: "client.vad.state",
       sequence: this.nextSequence(),
+      event_id: this.newEventId(),
       payload: { speaking }
     });
   }
 
-  sendTextUtterance(text: string) {
+  sendAudioChunk(chunk: AudioChunk, transcriptHint?: string): void {
+    const payload: Record<string, unknown> = {
+      codec: chunk.codec,
+      audio_base64: chunk.payload,
+      content_type: chunk.contentType,
+      utterance_duration_ms: chunk.durationMs,
+      captured_at: chunk.createdAt
+    };
+    const hint = transcriptHint?.trim();
+    if (hint) {
+      payload.transcript_hint = hint;
+    }
+
+    this.send({
+      type: "client.audio.chunk",
+      sequence: this.nextSequence(),
+      event_id: this.newEventId(),
+      payload
+    });
+  }
+
+  sendTextUtterance(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) {
       return;
@@ -56,6 +97,7 @@ export class SessionWsClient {
     this.send({
       type: "client.audio.chunk",
       sequence: this.nextSequence(),
+      event_id: this.newEventId(),
       payload: {
         transcript_hint: trimmed,
         codec: "opus",
@@ -65,26 +107,32 @@ export class SessionWsClient {
     this.sendVadState(false);
   }
 
-  endSession() {
+  endSession(): void {
     this.send({
       type: "client.session.end",
       sequence: this.nextSequence(),
+      event_id: this.newEventId(),
       payload: {}
     });
   }
 
-  close() {
+  close(): void {
     this.socket?.close();
     this.socket = null;
+    this.connectPromise = null;
   }
 
-  private nextSequence() {
+  private newEventId(): string {
+    return `${this.sessionId}-client-${this.sequence}`;
+  }
+
+  private nextSequence(): number {
     const seq = this.sequence;
     this.sequence += 1;
     return seq;
   }
 
-  private send(event: Record<string, unknown>) {
+  private send(event: Record<string, unknown>): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return;
     }
