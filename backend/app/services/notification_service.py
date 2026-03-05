@@ -14,7 +14,14 @@ from app.models.notification_delivery import NotificationDelivery
 from app.models.scorecard import Scorecard
 from app.models.session import Session
 from app.models.user import User
-from app.services.notification_providers import ExpoPushProvider, SendGridEmailProvider
+from app.services.notification_providers import (
+    ExpoPushProvider,
+    FcmPushProvider,
+    LogEmailProvider,
+    LogPushProvider,
+    SendGridEmailProvider,
+    SesEmailProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +29,24 @@ logger = logging.getLogger(__name__)
 class NotificationService:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.email_provider = SendGridEmailProvider(self.settings)
-        self.push_provider = ExpoPushProvider(self.settings)
+        self.email_provider = self._build_email_provider()
+        self.push_provider = self._build_push_provider()
+
+    def _build_email_provider(self):
+        provider_name = (self.settings.notification_email_provider or "sendgrid").lower()
+        if provider_name == "ses":
+            return SesEmailProvider(self.settings)
+        if provider_name == "sendgrid":
+            return SendGridEmailProvider(self.settings)
+        return LogEmailProvider()
+
+    def _build_push_provider(self):
+        provider_name = (self.settings.notification_push_provider or "expo").lower()
+        if provider_name == "fcm":
+            return FcmPushProvider(self.settings)
+        if provider_name == "expo":
+            return ExpoPushProvider(self.settings)
+        return LogPushProvider()
 
     async def notify_manager_session_completed(self, db: Session, session_id: str) -> dict:
         session = db.scalar(select(Session).where(Session.id == session_id))
