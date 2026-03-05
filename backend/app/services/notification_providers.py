@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from email.message import EmailMessage
 import smtplib
@@ -13,6 +14,10 @@ import httpx
 from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _network_calls_disabled_for_tests() -> bool:
+    return bool(os.getenv("PYTEST_CURRENT_TEST"))
 
 
 @dataclass
@@ -45,7 +50,7 @@ class SendGridEmailProvider(EmailProvider):
         self._fallback = LogEmailProvider()
 
     async def send(self, *, to_email: str, subject: str, body: str) -> ProviderSendResult:
-        if not self.settings.sendgrid_api_key or not self.settings.sendgrid_from_email:
+        if _network_calls_disabled_for_tests() or not self.settings.sendgrid_api_key or not self.settings.sendgrid_from_email:
             return await self._fallback.send(to_email=to_email, subject=subject, body=body)
 
         payload = {
@@ -91,7 +96,7 @@ class SesEmailProvider(EmailProvider):
         self._fallback = LogEmailProvider()
 
     async def send(self, *, to_email: str, subject: str, body: str) -> ProviderSendResult:
-        if (
+        if _network_calls_disabled_for_tests() or (
             not self.settings.ses_smtp_username
             or not self.settings.ses_smtp_password
             or not self.settings.ses_from_email
@@ -149,7 +154,7 @@ class FcmPushProvider(PushProvider):
         self._fallback = LogPushProvider()
 
     async def send(self, *, push_token: str, title: str, body: str, data: dict[str, Any]) -> ProviderSendResult:
-        if not self.settings.fcm_server_key:
+        if _network_calls_disabled_for_tests() or not self.settings.fcm_server_key:
             return await self._fallback.send(push_token=push_token, title=title, body=body, data=data)
 
         payload = {
@@ -209,7 +214,7 @@ class ExpoPushProvider(PushProvider):
         self._fallback = LogPushProvider()
 
     async def send(self, *, push_token: str, title: str, body: str, data: dict[str, Any]) -> ProviderSendResult:
-        if not self.settings.expo_push_access_token:
+        if _network_calls_disabled_for_tests() or not self.settings.expo_push_access_token:
             return await self._fallback.send(push_token=push_token, title=title, body=body, data=data)
 
         payload = {

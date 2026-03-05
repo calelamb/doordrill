@@ -4,9 +4,12 @@ import asyncio
 import base64
 import json
 from dataclasses import dataclass
+from urllib.parse import urlencode
 from typing import Any, AsyncIterator
+import weakref
 
 import httpx
+import websockets
 
 
 @dataclass
@@ -68,6 +71,42 @@ def _decode_base64_audio(payload: dict) -> bytes | None:
         return None
 
 
+def _emit_handler(payload: dict, key: str, transcript: str, is_final: bool) -> None:
+    handler = payload.get(key)
+    if callable(handler):
+        try:
+            handler(transcript, is_final)
+        except Exception:
+            return
+
+
+class _TaskConversationHistoryMixin:
+    def __init__(self) -> None:
+        self._history_by_task: weakref.WeakKeyDictionary[asyncio.Task[Any], list[dict[str, str]]] = weakref.WeakKeyDictionary()
+
+    def _history_for_current_task(self) -> list[dict[str, str]]:
+        task = asyncio.current_task()
+        if task is None:
+            return []
+        history = self._history_by_task.get(task)
+        if history is None:
+            history = []
+            self._history_by_task[task] = history
+        return history
+
+    def _remember_exchange(self, *, user_text: str, assistant_text: str) -> None:
+        history = self._history_for_current_task()
+        history.extend(
+            [
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": assistant_text},
+            ]
+        )
+        # Keep only the most recent few turns per websocket task.
+        if len(history) > 12:
+            del history[:-12]
+
+
 class MockSttClient(BaseSttClient):
     provider_name = "mock_stt"
 
@@ -88,47 +127,109 @@ class DeepgramSttClient(BaseSttClient):
 
     async def finalize_utterance(self, payload: dict) -> SttTranscript:
         hint = str(payload.get("transcript_hint", "")).strip()
-        if hint:
-            return SttTranscript(text=hint, confidence=0.98, is_final=True, source=self.provider_name)
-
         if not self.api_key:
             return await self._fallback.finalize_utterance(payload)
 
         audio_bytes = _decode_base64_audio(payload)
         if not audio_bytes:
+            if hint:
+                return SttTranscript(text=hint, confidence=0.98, is_final=True, source=self.provider_name)
             return await self._fallback.finalize_utterance(payload)
 
-        content_type = payload.get("content_type") or "audio/wav"
-        url = f"{self.base_url}/v1/listen"
-        headers = {
-            "Authorization": f"Token {self.api_key}",
-            "Content-Type": content_type,
-        }
-        params = {
+        try:
+            return await self._stream_utterance(payload, audio_bytes, hint)
+        except Exception:
+            if hint:
+                return SttTranscript(text=hint, confidence=0.98, is_final=True, source=self.provider_name)
+            return await self._fallback.finalize_utterance(payload)
+
+    async def _stream_utterance(self, payload: dict, audio_bytes: bytes, hint: str) -> SttTranscript:
+        content_type = str(payload.get("content_type") or "").lower()
+        codec = str(payload.get("codec") or "").lower()
+        ws_base = self.base_url.replace("https://", "wss://").replace("http://", "ws://")
+        params: dict[str, str] = {
             "model": self.model,
             "smart_format": "true",
             "punctuate": "true",
+            "interim_results": "true",
+            "endpointing": "300",
         }
+        if content_type:
+            params["mimetype"] = content_type
+        if codec in {"wav", "pcm16"} or content_type in {"audio/wav", "audio/x-wav", "audio/l16", "audio/raw"}:
+            params["encoding"] = "linear16"
+            params["sample_rate"] = str(int(payload.get("sample_rate") or 16000))
+            params["channels"] = str(int(payload.get("channels") or 1))
+        elif codec == "opus" or "opus" in content_type:
+            params["encoding"] = "opus"
+            params["sample_rate"] = str(int(payload.get("sample_rate") or 16000))
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(url, params=params, headers=headers, content=audio_bytes)
-                response.raise_for_status()
-                body = response.json()
-        except Exception:
-            return await self._fallback.finalize_utterance(payload)
+        url = f"{ws_base}/v1/listen?{urlencode(params)}"
+        latest_partial = ""
+        final_segments: list[str] = []
+        confidences: list[float] = []
 
-        alternatives = (
-            body.get("results", {})
-            .get("channels", [{}])[0]
-            .get("alternatives", [{}])
+        async with websockets.connect(
+            url,
+            additional_headers={"Authorization": f"Token {self.api_key}"},
+            open_timeout=self.timeout_seconds,
+            close_timeout=self.timeout_seconds,
+            max_size=4_000_000,
+        ) as ws:
+            for idx in range(0, len(audio_bytes), 8192):
+                await ws.send(audio_bytes[idx : idx + 8192])
+                await asyncio.sleep(0)
+
+            await ws.send(json.dumps({"type": "CloseStream"}))
+
+            while True:
+                try:
+                    raw_message = await asyncio.wait_for(ws.recv(), timeout=self.timeout_seconds)
+                except TimeoutError:
+                    break
+                except websockets.ConnectionClosed:
+                    break
+
+                if isinstance(raw_message, bytes):
+                    continue
+
+                try:
+                    message = json.loads(raw_message)
+                except json.JSONDecodeError:
+                    continue
+
+                message_type = str(message.get("type", ""))
+                if message_type == "Results":
+                    channel = (message.get("channel") or {}).get("alternatives") or []
+                    alternative = channel[0] if channel else {}
+                    transcript = str(alternative.get("transcript", "")).strip()
+                    if not transcript:
+                        continue
+
+                    confidence = float(alternative.get("confidence", 0.0) or 0.0)
+                    is_final = bool(message.get("is_final") or message.get("speech_final"))
+                    if is_final:
+                        final_segments.append(transcript)
+                        confidences.append(confidence)
+                        _emit_handler(payload, "on_final", transcript, True)
+                    else:
+                        latest_partial = transcript
+                        _emit_handler(payload, "on_partial", transcript, False)
+                    continue
+
+                if message_type == "UtteranceEnd":
+                    break
+                if message_type == "Error":
+                    raise RuntimeError(str(message.get("description") or "deepgram_error"))
+
+        transcript = " ".join(final_segments).strip() or latest_partial or hint
+        confidence = sum(confidences) / len(confidences) if confidences else (0.98 if transcript == hint and transcript else 0.0)
+        return SttTranscript(
+            text=transcript,
+            confidence=confidence,
+            is_final=bool(final_segments) or bool(transcript),
+            source=self.provider_name,
         )
-        transcript = str((alternatives[0] if alternatives else {}).get("transcript", "")).strip()
-        confidence = float((alternatives[0] if alternatives else {}).get("confidence", 0.0) or 0.0)
-
-        if transcript:
-            return SttTranscript(text=transcript, confidence=confidence, is_final=True, source=self.provider_name)
-        return await self._fallback.finalize_utterance(payload)
 
 
 class MockLlmClient(BaseLlmClient):
@@ -151,10 +252,11 @@ class MockLlmClient(BaseLlmClient):
             yield token
 
 
-class OpenAiLlmClient(BaseLlmClient):
+class OpenAiLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
     provider_name = "openai"
 
     def __init__(self, api_key: str | None, model: str, base_url: str, timeout_seconds: float) -> None:
+        super().__init__()
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -178,13 +280,11 @@ class OpenAiLlmClient(BaseLlmClient):
             "temperature": 0.4,
             "max_tokens": 180,
             "stream_options": {"include_usage": True},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": rep_text},
-            ],
+            "messages": [{"role": "system", "content": system_prompt}, *self._history_for_current_task(), {"role": "user", "content": rep_text}],
         }
 
         emitted = False
+        emitted_parts: list[str] = []
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
@@ -197,6 +297,7 @@ class OpenAiLlmClient(BaseLlmClient):
                         token = delta.get("content")
                         if isinstance(token, str) and token:
                             emitted = True
+                            emitted_parts.append(token)
                             yield token
                             continue
                         if isinstance(token, list):
@@ -204,19 +305,24 @@ class OpenAiLlmClient(BaseLlmClient):
                             merged = "".join(text_parts).strip()
                             if merged:
                                 emitted = True
+                                emitted_parts.append(merged)
                                 yield merged
         except Exception:
             emitted = False
+
+        if emitted:
+            self._remember_exchange(user_text=rep_text, assistant_text="".join(emitted_parts))
 
         if not emitted:
             async for chunk in self._fallback.stream_reply(rep_text=rep_text, stage=stage, system_prompt=system_prompt):
                 yield chunk
 
 
-class AnthropicLlmClient(BaseLlmClient):
+class AnthropicLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
     provider_name = "anthropic"
 
     def __init__(self, api_key: str | None, model: str, base_url: str, timeout_seconds: float) -> None:
+        super().__init__()
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -242,10 +348,11 @@ class AnthropicLlmClient(BaseLlmClient):
             "temperature": 0.4,
             "stream": True,
             "system": system_prompt,
-            "messages": [{"role": "user", "content": rep_text}],
+            "messages": [*self._history_for_current_task(), {"role": "user", "content": rep_text}],
         }
 
         emitted = False
+        emitted_parts: list[str] = []
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
@@ -265,9 +372,13 @@ class AnthropicLlmClient(BaseLlmClient):
                         token = token.strip()
                         if token:
                             emitted = True
+                            emitted_parts.append(token + " ")
                             yield token + " "
         except Exception:
             emitted = False
+
+        if emitted:
+            self._remember_exchange(user_text=rep_text, assistant_text="".join(emitted_parts).strip())
 
         if not emitted:
             async for chunk in self._fallback.stream_reply(rep_text=rep_text, stage=stage, system_prompt=system_prompt):
@@ -311,22 +422,24 @@ class ElevenLabsTtsClient(BaseTtsClient):
         if not text:
             return
 
-        if not self.api_key or not self.voice_id:
-            async for chunk in self._fallback.stream_audio(text):
+        voice_id, cleaned_text = self._resolve_voice(text)
+
+        if not self.api_key or not voice_id:
+            async for chunk in self._fallback.stream_audio(cleaned_text):
                 out = dict(chunk)
                 out["provider"] = self.provider_name
-                out["voice_id"] = self.voice_id
+                out["voice_id"] = voice_id
                 yield out
             return
 
-        url = f"{self.base_url}/v1/text-to-speech/{self.voice_id}/stream"
+        url = f"{self.base_url}/v1/text-to-speech/{voice_id}/stream"
         headers = {
             "xi-api-key": self.api_key,
             "accept": "audio/mpeg",
             "content-type": "application/json",
         }
         payload = {
-            "text": text,
+            "text": cleaned_text,
             "model_id": self.model_id,
             "optimize_streaming_latency": 3,
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
@@ -347,17 +460,24 @@ class ElevenLabsTtsClient(BaseTtsClient):
                             "payload": base64.b64encode(raw_chunk).decode("utf-8"),
                             "duration_ms": duration_ms,
                             "provider": self.provider_name,
-                            "voice_id": self.voice_id,
+                            "voice_id": voice_id,
                         }
         except Exception:
             emitted = False
 
         if not emitted:
-            async for chunk in self._fallback.stream_audio(text):
+            async for chunk in self._fallback.stream_audio(cleaned_text):
                 out = dict(chunk)
                 out["provider"] = self.provider_name
-                out["voice_id"] = self.voice_id
+                out["voice_id"] = voice_id
                 yield out
+
+    def _resolve_voice(self, text: str) -> tuple[str | None, str]:
+        if text.startswith("[[voice:") and "]]" in text:
+            directive, remainder = text.split("]]", 1)
+            voice_id = directive.removeprefix("[[voice:").strip()
+            return (voice_id or self.voice_id), remainder.lstrip()
+        return self.voice_id, text
 
 
 @dataclass

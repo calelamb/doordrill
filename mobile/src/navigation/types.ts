@@ -1,6 +1,10 @@
 export type RootStackParamList = {
   Login: undefined;
   Assignments: undefined;
+  PreSession: {
+    assignmentId: string;
+    scenarioId: string;
+  };
   Session: {
     assignmentId: string;
     scenarioId: string;
