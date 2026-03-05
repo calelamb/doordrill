@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.provider_clients import DeepgramSttClient, ElevenLabsTtsClient, OpenAiLlmClient
+from app.services.provider_clients import AnthropicLlmClient, DeepgramSttClient, ElevenLabsTtsClient, OpenAiLlmClient
 
 
 @pytest.mark.asyncio
@@ -31,3 +31,16 @@ async def test_elevenlabs_client_falls_back_without_credentials():
     chunks = [chunk async for chunk in client.stream_audio("hello")]
     assert chunks
     assert chunks[0]["provider"] == "elevenlabs"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_falls_back_to_mock_without_key():
+    client = AnthropicLlmClient(
+        api_key=None,
+        model="claude-3-5-sonnet-latest",
+        base_url="https://api.anthropic.com",
+        timeout_seconds=1,
+    )
+    chunks = [chunk async for chunk in client.stream_reply(rep_text="We can cut your price", stage="objection_handling", system_prompt="x")]
+    combined = "".join(chunks)
+    assert "expensive" in combined.lower()
