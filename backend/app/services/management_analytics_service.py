@@ -733,26 +733,46 @@ class ManagementAnalyticsService:
         ).all()
 
         uplift_rows = []
-        tag_uplift: dict[str, list[float]] = defaultdict(list)
+        tag_rollups: dict[str, dict[str, Any]] = defaultdict(lambda: {"deltas": [], "improved_count": 0, "regressed_count": 0, "flat_count": 0})
         recent_notes = []
+        intervention_segments: dict[tuple[str, str], int] = defaultdict(int)
         for fact in coaching_facts:
             source_session = session_map.get(fact.session_id)
             if not source_session:
                 continue
             note = note_map.get(fact.coaching_note_id)
             delta = round(fact.score_delta, 2) if fact.score_delta is not None else None
+            outcome = "unmeasured"
             if delta is not None:
+                if delta > 0.3:
+                    outcome = "improved"
+                elif delta < -0.3:
+                    outcome = "regressed"
+                else:
+                    outcome = "flat"
                 for tag in fact.weakness_tags_json or []:
-                    tag_uplift[tag].append(delta)
+                    rollup = tag_rollups[tag]
+                    rollup["deltas"].append(delta)
+                    if outcome == "improved":
+                        rollup["improved_count"] += 1
+                    elif outcome == "regressed":
+                        rollup["regressed_count"] += 1
+                    else:
+                        rollup["flat_count"] += 1
+            segment_key = ("visible" if fact.visible_to_rep else "internal", outcome)
+            intervention_segments[segment_key] += 1
             uplift_rows.append(
                 {
                     "rep_id": source_session.rep_id,
                     "rep_name": source_session.rep_name,
                     "session_id": source_session.session_id,
+                    "next_session_id": fact.next_session_id,
                     "scenario_name": source_session.scenario_name,
                     "before_score": fact.before_score,
                     "after_score": fact.after_score,
                     "delta": delta,
+                    "outcome": outcome,
+                    "visible_to_rep": bool(fact.visible_to_rep),
                     "note": note.note if note else "",
                     "weakness_tags": list(fact.weakness_tags_json or []),
                     "created_at": fact.note_created_at.isoformat(),
@@ -767,6 +787,8 @@ class ManagementAnalyticsService:
                     "note": note.note if note else "",
                     "visible_to_rep": bool(fact.visible_to_rep),
                     "weakness_tags": list(fact.weakness_tags_json or []),
+                    "delta": delta,
+                    "outcome": outcome,
                     "created_at": fact.note_created_at.isoformat(),
                 }
             )
@@ -800,13 +822,17 @@ class ManagementAnalyticsService:
         reviewers = []
         for reviewer_id, row in reviewer_rows.items():
             reviewer = db.scalar(select(User).where(User.id == reviewer_id))
+            avg_delta = round(sum(row["delta_samples"]) / len(row["delta_samples"]), 2) if row["delta_samples"] else None
+            avg_abs_delta = round(sum(abs(delta) for delta in row["delta_samples"]) / len(row["delta_samples"]), 2) if row["delta_samples"] else None
             reviewers.append(
                 {
                     "reviewer_id": reviewer_id,
                     "reviewer_name": reviewer.name if reviewer else reviewer_id,
                     "review_count": row["review_count"],
                     "override_count": row["override_count"],
-                    "average_override_delta": round(sum(row["delta_samples"]) / len(row["delta_samples"]), 2) if row["delta_samples"] else None,
+                    "average_override_delta": avg_delta,
+                    "absolute_average_delta": avg_abs_delta,
+                    "bias_direction": "lenient" if avg_delta and avg_delta > 0 else "harsh" if avg_delta and avg_delta < 0 else "neutral",
                     "harsh_adjustments": row["harsh_adjustments"],
                     "lenient_adjustments": row["lenient_adjustments"],
                 }
@@ -823,6 +849,108 @@ class ManagementAnalyticsService:
             timeline_buckets[key]["date"] = key
             timeline_buckets[key]["coaching_note_count"] += 1
 
+        retry_rows = []
+        retry_deltas: list[float] = []
+        coached_retry_deltas: list[float] = []
+        sessions_by_rep_scenario: dict[tuple[str, str], list[SessionRecord]] = defaultdict(list)
+        for session in sessions:
+            if session.overall_score is not None:
+                sessions_by_rep_scenario[(session.rep_id, session.scenario_id)].append(session)
+
+        coached_pairs = {
+            (fact.session_id, fact.next_session_id)
+            for fact in coaching_facts
+            if fact.next_session_id and fact.score_delta is not None
+        }
+        for items in sessions_by_rep_scenario.values():
+            items.sort(key=lambda item: item.started_at or datetime.min.replace(tzinfo=timezone.utc))
+            for previous, current in zip(items, items[1:]):
+                if previous.overall_score is None or current.overall_score is None:
+                    continue
+                delta = round(current.overall_score - previous.overall_score, 2)
+                coached = (previous.session_id, current.session_id) in coached_pairs
+                retry_deltas.append(delta)
+                if coached:
+                    coached_retry_deltas.append(delta)
+                retry_rows.append(
+                    {
+                        "rep_id": current.rep_id,
+                        "rep_name": current.rep_name,
+                        "scenario_id": current.scenario_id,
+                        "scenario_name": current.scenario_name,
+                        "from_session_id": previous.session_id,
+                        "to_session_id": current.session_id,
+                        "before_score": previous.overall_score,
+                        "after_score": current.overall_score,
+                        "delta": delta,
+                        "coached_between_attempts": coached,
+                        "days_between": (
+                            max(
+                                0,
+                                int(
+                                    (
+                                        (current.started_at or datetime.min.replace(tzinfo=timezone.utc))
+                                        - (previous.started_at or datetime.min.replace(tzinfo=timezone.utc))
+                                    ).total_seconds()
+                                    / 86400
+                                ),
+                            )
+                            if current.started_at and previous.started_at
+                            else None
+                        ),
+                    }
+                )
+
+        calibration_drift_timeline_map: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {"date": "", "review_count": 0, "average_delta": None, "average_absolute_delta": None, "_deltas": []}
+        )
+        scenario_drift_map: dict[str, dict[str, Any]] = {}
+        for review in calibration_facts:
+            if review.delta_score is None:
+                continue
+            timeline_key = review.reviewed_at.date().isoformat()
+            timeline_row = calibration_drift_timeline_map[timeline_key]
+            timeline_row["date"] = timeline_key
+            timeline_row["review_count"] += 1
+            timeline_row["_deltas"].append(float(review.delta_score))
+
+            source_session = session_map.get(review.session_id)
+            scenario_key = source_session.scenario_id if source_session else "unknown"
+            scenario_row = scenario_drift_map.setdefault(
+                scenario_key,
+                {
+                    "scenario_id": scenario_key,
+                    "scenario_name": source_session.scenario_name if source_session else "Unknown",
+                    "review_count": 0,
+                    "delta_samples": [],
+                },
+            )
+            scenario_row["review_count"] += 1
+            scenario_row["delta_samples"].append(float(review.delta_score))
+
+        calibration_drift_timeline = []
+        for key in sorted(calibration_drift_timeline_map):
+            row = calibration_drift_timeline_map[key]
+            deltas = row.pop("_deltas")
+            row["average_delta"] = round(sum(deltas) / len(deltas), 2) if deltas else None
+            row["average_absolute_delta"] = round(sum(abs(delta) for delta in deltas) / len(deltas), 2) if deltas else None
+            calibration_drift_timeline.append(row)
+
+        score_drift_by_scenario = []
+        for row in scenario_drift_map.values():
+            deltas = row.pop("delta_samples")
+            score_drift_by_scenario.append(
+                {
+                    **row,
+                    "average_delta": round(sum(deltas) / len(deltas), 2) if deltas else None,
+                    "average_absolute_delta": round(sum(abs(delta) for delta in deltas) / len(deltas), 2) if deltas else None,
+                }
+            )
+        score_drift_by_scenario.sort(key=lambda item: item["average_absolute_delta"] or 0, reverse=True)
+
+        measured_interventions = [row for row in coaching_facts if row.score_delta is not None]
+        improved_interventions = [row for row in measured_interventions if row.score_delta is not None and row.score_delta > 0.3]
+
         return {
             "manager_id": manager_id,
             "period": period,
@@ -836,19 +964,41 @@ class ManagementAnalyticsService:
                     3,
                 ) if calibration_facts else 0.0,
                 "average_override_delta": round(sum(override_deltas) / len(override_deltas), 2) if override_deltas else None,
+                "calibration_drift_score": round(sum(abs(delta) for delta in override_deltas) / len(override_deltas), 2) if override_deltas else None,
+                "intervention_improved_rate": round(len(improved_interventions) / len(measured_interventions), 3) if measured_interventions else None,
+                "retry_uplift_avg": round(sum(retry_deltas) / len(retry_deltas), 2) if retry_deltas else None,
+                "coached_retry_uplift_avg": round(sum(coached_retry_deltas) / len(coached_retry_deltas), 2) if coached_retry_deltas else None,
             },
             "coaching_uplift": uplift_rows[:36],
             "weakness_tag_uplift": [
                 {
                     "tag": tag,
-                    "delta": round(sum(values) / len(values), 2),
-                    "sample_size": len(values),
+                    "delta": round(sum(values["deltas"]) / len(values["deltas"]), 2),
+                    "sample_size": len(values["deltas"]),
+                    "improved_count": values["improved_count"],
+                    "flat_count": values["flat_count"],
+                    "regressed_count": values["regressed_count"],
                 }
-                for tag, values in sorted(tag_uplift.items(), key=lambda item: sum(item[1]) / len(item[1]), reverse=True)
-                if values
+                for tag, values in sorted(
+                    tag_rollups.items(),
+                    key=lambda item: (sum(item[1]["deltas"]) / len(item[1]["deltas"])) if item[1]["deltas"] else 0,
+                    reverse=True,
+                )
+                if values["deltas"]
             ],
             "manager_calibration": reviewers,
             "intervention_timeline": [timeline_buckets[key] for key in sorted(timeline_buckets)],
+            "calibration_drift_timeline": calibration_drift_timeline,
+            "retry_impact": retry_rows[:36],
+            "intervention_segments": [
+                {
+                    "visibility": visibility,
+                    "outcome": outcome,
+                    "count": count,
+                }
+                for (visibility, outcome), count in sorted(intervention_segments.items())
+            ],
+            "score_drift_by_scenario": score_drift_by_scenario[:12],
             "recent_notes": recent_notes[:20],
         }
 

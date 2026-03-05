@@ -80,6 +80,18 @@ def test_management_intelligence_endpoints(client, seed_org):
     )
     assert coaching.status_code == 200
 
+    override = client.patch(
+        f"/manager/scorecards/{first_scorecard.id}",
+        json={
+            "reviewer_id": seed_org["manager_id"],
+            "reason_code": "manager_coaching",
+            "override_score": 7.2,
+            "notes": "Adjusted for a better close than the base model credited.",
+        },
+        headers={"x-user-id": seed_org["manager_id"], "x-user-role": "manager"},
+    )
+    assert override.status_code == 200
+
     second_assignment = _create_assignment(client, seed_org)
     _run_session(
         client,
@@ -123,6 +135,10 @@ def test_management_intelligence_endpoints(client, seed_org):
     assert coaching_body["summary"]["coaching_note_count"] >= 1
     assert "manager_calibration" in coaching_body
     assert "recent_notes" in coaching_body
+    assert coaching_body["retry_impact"]
+    assert coaching_body["intervention_segments"]
+    assert "calibration_drift_timeline" in coaching_body
+    assert "score_drift_by_scenario" in coaching_body
 
     explorer = client.get(
         "/manager/analytics/explorer",
