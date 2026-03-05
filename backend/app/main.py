@@ -5,8 +5,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.auth import router as auth_router
 from app.api.manager import router as manager_router
 from app.api.rep import router as rep_router
+from app.api.scenarios import router as scenarios_router
 from app.core.config import get_settings
 from app.core.logging_config import configure_logging
 from app.db.init_db import init_db
@@ -35,4 +37,6 @@ def health() -> dict[str, str]:
 
 app.include_router(manager_router)
 app.include_router(rep_router)
+app.include_router(auth_router)
+app.include_router(scenarios_router)
 app.include_router(ws_router)

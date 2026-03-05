@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_rep_or_manager
@@ -112,4 +112,73 @@ def get_session_with_feedback(
             if scorecard
             else None
         ),
+    }
+
+
+@router.get("/sessions")
+def list_rep_sessions(
+    rep_id: str = Query(...),
+    limit: int = Query(default=100, ge=1, le=500),
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "rep" and actor.user_id != rep_id:
+        raise HTTPException(status_code=403, detail="rep can only access their own sessions")
+
+    rep_user = _get_user_or_404(db, rep_id, "rep")
+    _ensure_same_org(actor, rep_user.org_id)
+
+    rows = (
+        db.execute(
+            select(DrillSession, Scorecard)
+            .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
+            .where(DrillSession.rep_id == rep_id)
+            .order_by(DrillSession.started_at.desc())
+            .limit(limit)
+        )
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "session_id": session.id,
+                "assignment_id": session.assignment_id,
+                "scenario_id": session.scenario_id,
+                "status": session.status.value,
+                "started_at": session.started_at.isoformat() if session.started_at else None,
+                "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+                "overall_score": scorecard.overall_score if scorecard else None,
+            }
+            for session, scorecard in rows
+        ]
+    }
+
+
+@router.get("/progress")
+def get_rep_progress(
+    rep_id: str = Query(...),
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "rep" and actor.user_id != rep_id:
+        raise HTTPException(status_code=403, detail="rep can only access their own progress")
+
+    rep_user = _get_user_or_404(db, rep_id, "rep")
+    _ensure_same_org(actor, rep_user.org_id)
+
+    sessions_count = db.scalar(select(func.count(DrillSession.id)).where(DrillSession.rep_id == rep_id)) or 0
+    scored_count = (
+        db.scalar(
+            select(func.count(Scorecard.id)).join(DrillSession, DrillSession.id == Scorecard.session_id).where(DrillSession.rep_id == rep_id)
+        )
+        or 0
+    )
+    avg_score = db.scalar(
+        select(func.avg(Scorecard.overall_score)).join(DrillSession, DrillSession.id == Scorecard.session_id).where(DrillSession.rep_id == rep_id)
+    )
+    return {
+        "rep_id": rep_id,
+        "session_count": int(sessions_count),
+        "scored_session_count": int(scored_count),
+        "average_score": round(float(avg_score), 2) if avg_score is not None else None,
     }

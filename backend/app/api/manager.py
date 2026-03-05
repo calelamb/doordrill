@@ -11,8 +11,8 @@ from app.models.scenario import Scenario
 from app.models.scorecard import ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionEvent, SessionTurn
-from app.models.types import AssignmentStatus, ReviewReason, UserRole
-from app.models.user import User
+from app.models.types import AssignmentStatus, ReviewReason, SessionStatus, UserRole
+from app.models.user import Team, User
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
 from app.schemas.scorecard import ManagerReviewResponse, ScorecardOverrideRequest
 from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
@@ -43,6 +43,213 @@ def _get_scenario_or_404(db: Session, scenario_id: str) -> Scenario:
     if scenario is None:
         raise HTTPException(status_code=404, detail="scenario not found")
     return scenario
+
+
+@router.get("/team")
+def get_manager_team(
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own team")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    team = db.scalar(select(Team).where(Team.id == manager.team_id)) if manager.team_id else None
+    if team is None:
+        return {"manager_id": manager_id, "team_id": None, "items": []}
+
+    reps = db.scalars(
+        select(User).where(User.team_id == team.id, User.role == UserRole.REP).order_by(User.created_at.desc())
+    ).all()
+    return {
+        "manager_id": manager_id,
+        "team_id": team.id,
+        "team_name": team.name,
+        "items": [
+            {
+                "id": rep.id,
+                "name": rep.name,
+                "email": rep.email,
+                "team_id": rep.team_id,
+                "org_id": rep.org_id,
+                "created_at": rep.created_at.isoformat() if rep.created_at else None,
+            }
+            for rep in reps
+        ],
+    }
+
+
+@router.get("/assignments")
+def list_manager_assignments(
+    manager_id: str = Query(...),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own assignments")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+
+    stmt = select(Assignment).where(Assignment.assigned_by == manager_id).order_by(Assignment.created_at.desc()).limit(limit)
+    if status:
+        try:
+            stmt = stmt.where(Assignment.status == AssignmentStatus(status))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid assignment status") from exc
+
+    items = db.scalars(stmt).all()
+    return {
+        "items": [
+            {
+                "id": assignment.id,
+                "scenario_id": assignment.scenario_id,
+                "rep_id": assignment.rep_id,
+                "assigned_by": assignment.assigned_by,
+                "due_at": assignment.due_at.isoformat() if assignment.due_at else None,
+                "status": assignment.status.value,
+                "min_score_target": assignment.min_score_target,
+                "retry_policy": assignment.retry_policy,
+                "created_at": assignment.created_at.isoformat() if assignment.created_at else None,
+            }
+            for assignment in items
+        ]
+    }
+
+
+@router.get("/sessions")
+def list_manager_sessions(
+    manager_id: str = Query(...),
+    rep_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own sessions")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+
+    stmt = (
+        select(DrillSession, Assignment, Scorecard)
+        .join(Assignment, Assignment.id == DrillSession.assignment_id)
+        .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
+        .where(Assignment.assigned_by == manager_id)
+        .order_by(DrillSession.started_at.desc())
+        .limit(limit)
+    )
+    if rep_id:
+        stmt = stmt.where(DrillSession.rep_id == rep_id)
+    if status:
+        try:
+            stmt = stmt.where(DrillSession.status == SessionStatus(status))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid session status") from exc
+
+    rows = db.execute(stmt).all()
+    return {
+        "items": [
+            {
+                "session_id": session.id,
+                "assignment_id": assignment.id,
+                "rep_id": session.rep_id,
+                "scenario_id": session.scenario_id,
+                "status": session.status.value,
+                "started_at": session.started_at.isoformat() if session.started_at else None,
+                "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+                "overall_score": scorecard.overall_score if scorecard else None,
+            }
+            for session, assignment, scorecard in rows
+        ]
+    }
+
+
+@router.get("/sessions/{session_id}")
+def get_manager_session_detail(
+    session_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    rep = _get_user_or_404(db, session.rep_id, "rep")
+    _ensure_same_org(actor, rep.org_id)
+    assignment = db.scalar(select(Assignment).where(Assignment.id == session.assignment_id))
+    scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
+
+    return {
+        "session": {
+            "id": session.id,
+            "assignment_id": session.assignment_id,
+            "rep_id": session.rep_id,
+            "scenario_id": session.scenario_id,
+            "status": session.status.value,
+            "started_at": session.started_at.isoformat() if session.started_at else None,
+            "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+            "duration_seconds": session.duration_seconds,
+        },
+        "assignment": (
+            {
+                "id": assignment.id,
+                "status": assignment.status.value,
+                "due_at": assignment.due_at.isoformat() if assignment.due_at else None,
+                "min_score_target": assignment.min_score_target,
+                "retry_policy": assignment.retry_policy,
+            }
+            if assignment
+            else None
+        ),
+        "scorecard": (
+            {
+                "id": scorecard.id,
+                "overall_score": scorecard.overall_score,
+                "category_scores": scorecard.category_scores,
+                "highlights": scorecard.highlights,
+                "ai_summary": scorecard.ai_summary,
+                "evidence_turn_ids": scorecard.evidence_turn_ids,
+                "weakness_tags": scorecard.weakness_tags,
+            }
+            if scorecard
+            else None
+        ),
+    }
+
+
+@router.get("/sessions/{session_id}/audio")
+def get_manager_session_audio(
+    session_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    rep = _get_user_or_404(db, session.rep_id, "rep")
+    _ensure_same_org(actor, rep.org_id)
+
+    artifact = db.scalar(
+        select(SessionArtifact)
+        .where(SessionArtifact.session_id == session_id, SessionArtifact.artifact_type == "audio")
+        .order_by(SessionArtifact.created_at.desc())
+    )
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="audio artifact not found")
+
+    return {
+        "session_id": session_id,
+        "artifact_id": artifact.id,
+        "storage_key": artifact.storage_key,
+        "url": storage_service.get_presigned_url(artifact.storage_key),
+        "metadata": artifact.metadata_json,
+    }
 
 
 @router.post("/assignments", response_model=AssignmentResponse)

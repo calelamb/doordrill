@@ -24,11 +24,13 @@ class Settings(BaseSettings):
 
     auth_required: bool = Field(default=False, alias="AUTH_REQUIRED")
     auth_mode: str = Field(default="headers", alias="AUTH_MODE")
-    jwt_secret: str | None = Field(default=None, alias="JWT_SECRET")
+    jwt_secret: str | None = Field(default="dev-jwt-secret-change-me", alias="JWT_SECRET")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     jwt_audience: str | None = Field(default=None, alias="JWT_AUDIENCE")
     jwt_issuer: str | None = Field(default=None, alias="JWT_ISSUER")
     jwt_jwks_url: str | None = Field(default=None, alias="JWT_JWKS_URL")
+    access_token_ttl_minutes: int = Field(default=30, alias="ACCESS_TOKEN_TTL_MINUTES")
+    refresh_token_ttl_days: int = Field(default=14, alias="REFRESH_TOKEN_TTL_DAYS")
 
     stt_provider: str = Field(default="mock", alias="STT_PROVIDER")
     llm_provider: str = Field(default="mock", alias="LLM_PROVIDER")

@@ -53,6 +53,8 @@ class User(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    auth_provider: Mapped[str] = mapped_column(String(50), nullable=False, default="local")
 
     organization: Mapped[Organization] = relationship(back_populates="users")
     team: Mapped[Team | None] = relationship(back_populates="members", foreign_keys=[team_id])
