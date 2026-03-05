@@ -73,6 +73,26 @@ def get_session_replay(session_id: str, db: Session = Depends(get_db)) -> Sessio
         if t.objection_tags
     ]
 
+    stage_timeline: list[dict] = []
+    last_stage = None
+    for turn in turns:
+        if turn.stage != last_stage:
+            stage_timeline.append(
+                {
+                    "stage": turn.stage,
+                    "entered_at": turn.started_at.isoformat(),
+                    "turn_index": turn.turn_index,
+                    "speaker": turn.speaker.value,
+                }
+            )
+            last_stage = turn.stage
+
+    total_audio_duration_ms = 0
+    total_audio_frames = 0
+    for artifact in artifacts:
+        total_audio_duration_ms += int(artifact.metadata_json.get("duration_ms", 0))
+        total_audio_frames += int(artifact.metadata_json.get("frame_count", 0))
+
     return SessionReplayResponse(
         session_id=session.id,
         status=session.status.value,
@@ -87,6 +107,13 @@ def get_session_replay(session_id: str, db: Session = Depends(get_db)) -> Sessio
         ],
         transcript_turns=transcript_turns,
         objection_timeline=objection_timeline,
+        stage_timeline=stage_timeline,
+        transport_metrics={
+            "audio_duration_ms": total_audio_duration_ms,
+            "audio_frame_count": total_audio_frames,
+            "turn_count": len(transcript_turns),
+            "objection_turn_count": len(objection_timeline),
+        },
         scorecard=(
             {
                 "id": scorecard.id,

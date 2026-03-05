@@ -43,7 +43,7 @@ def _run_session(client, seed_org: dict[str, str], assignment_id: str) -> str:
         )
 
         saw_commit = False
-        for _ in range(20):
+        for _ in range(30):
             msg = ws.receive_json()
             if msg["type"] == "server.turn.committed":
                 saw_commit = True
@@ -75,6 +75,8 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     assert replay["session_id"] == session_id
     assert replay["audio_artifacts"]
     assert replay["transcript_turns"]
+    assert replay["stage_timeline"]
+    assert replay["transport_metrics"]["audio_frame_count"] > 0
     assert replay["scorecard"] is not None
 
     feed_resp = client.get("/manager/feed", params={"manager_id": seed_org["manager_id"]})
@@ -121,3 +123,4 @@ def test_event_persistence_integrity(client, seed_org):
     event_ids = {event.event_id for event in events}
     assert len(event_ids) == len(events)
     assert any(event.event_type == "server.turn.committed" for event in events)
+    assert any(event.event_type == "server.session.state" and event.payload.get("transition") for event in events)
