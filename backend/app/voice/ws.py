@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -86,6 +86,14 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             },
         )
 
+    def _derive_rep_turn_window(msg: WsEvent) -> tuple[datetime, datetime]:
+        rep_started_at = msg.timestamp if msg.timestamp.tzinfo else msg.timestamp.replace(tzinfo=timezone.utc)
+        duration_ms = int(msg.payload.get("utterance_duration_ms", 0) or 0)
+        if duration_ms <= 0:
+            duration_ms = max(150, len(str(msg.payload.get("transcript_hint", ""))) * 22)
+        rep_ended_at = rep_started_at + timedelta(milliseconds=duration_ms)
+        return rep_started_at, rep_ended_at
+
     try:
         server_sequence += 1
         await _send_event(websocket, "server.session.state", {"state": "connected", "session_id": session_id}, server_sequence)
@@ -160,8 +168,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 continue
 
             plan = orchestrator.prepare_rep_turn(session_id=session_id, rep_text=rep_text)
-            now = datetime.now(timezone.utc)
             next_turn_index = (db.scalar(select(func.count(SessionTurn.id)).where(SessionTurn.session_id == session_id)) or 0) + 1
+            rep_started_at, rep_ended_at = _derive_rep_turn_window(msg)
 
             rep_turn = ledger.commit_turn(
                 db,
@@ -170,8 +178,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 speaker=TurnSpeaker.REP,
                 text=rep_text,
                 stage=plan.stage_after,
-                started_at=now,
-                ended_at=now,
+                started_at=rep_started_at,
+                ended_at=rep_ended_at,
                 objection_tags=plan.objection_tags,
             )
 
@@ -214,6 +222,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 await maybe_flush()
 
             ai_text_parts: list[str] = []
+            ai_started_at: datetime | None = None
+            turn_audio_duration_ms = 0
             async for chunk in providers.llm.stream_reply(
                 rep_text=rep_text,
                 stage=plan.stage_after,
@@ -221,6 +231,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             ):
                 if not chunk:
                     continue
+                if ai_started_at is None:
+                    ai_started_at = datetime.now(timezone.utc)
                 ai_text_parts.append(chunk)
 
                 server_sequence += 1
@@ -242,7 +254,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
                 async for audio_chunk in providers.tts.stream_audio(chunk):
                     audio_frame_count += 1
-                    total_audio_duration_ms += int(audio_chunk.get("duration_ms", 0))
+                    chunk_duration_ms = int(audio_chunk.get("duration_ms", 0))
+                    total_audio_duration_ms += chunk_duration_ms
+                    turn_audio_duration_ms += chunk_duration_ms
 
                     server_sequence += 1
                     ai_audio_payload = {
@@ -267,6 +281,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             ai_text = "".join(ai_text_parts).strip()
             orchestrator.mark_ai_turn(session_id=session_id)
             ai_now = datetime.now(timezone.utc)
+            ai_started_at = ai_started_at or ai_now
+            ai_duration_ms = max(120, turn_audio_duration_ms)
+            ai_ended_at = ai_started_at + timedelta(milliseconds=ai_duration_ms)
             ai_turn = ledger.commit_turn(
                 db,
                 session_id=session_id,
@@ -274,8 +291,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 speaker=TurnSpeaker.AI,
                 text=ai_text,
                 stage=plan.stage_after,
-                started_at=ai_now,
-                ended_at=ai_now,
+                started_at=ai_started_at,
+                ended_at=max(ai_ended_at, ai_now),
                 objection_tags=[],
             )
 
