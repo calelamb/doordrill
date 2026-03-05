@@ -42,17 +42,23 @@ export function ProfileScreen({ navigation }: Props) {
     void loadProgress();
   }, [loadProgress]);
 
+  const displayName = progress?.rep_name || "Sales Representative";
+  const initials = progress?.rep_name 
+    ? progress.rep_name.split(" ").map(n => n[0]).join("").substring(0, 2).toUpperCase()
+    : "SR";
+  const displayRole = progress?.rep_email || "rep@doordrill.com";
+
   return (
     <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.content}>
-          <View style={styles.avatarContainer}>
+          <BlurView intensity={40} tint="light" style={styles.profileCard}>
             <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{repId?.slice(0, 2).toUpperCase()}</Text>
+              <Text style={styles.avatarText}>{initials}</Text>
             </View>
-            <Text style={styles.name}>{repId}</Text>
-            <Text style={styles.role}>Sales Representative</Text>
-          </View>
+            <Text style={styles.name}>{displayName}</Text>
+            <Text style={styles.role}>{displayRole}</Text>
+          </BlurView>
 
           {loading && !progress ? (
             <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
@@ -119,20 +125,40 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   safeArea: { flex: 1 },
   content: { flex: 1, padding: 20 },
-  avatarContainer: { alignItems: "center", marginTop: 24, marginBottom: 32 },
+  profileCard: { 
+    alignItems: "center", 
+    marginTop: 12, 
+    marginBottom: 32,
+    padding: 32,
+    borderRadius: 32,
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.04,
+    shadowRadius: 24,
+    elevation: 4,
+    overflow: "hidden"
+  },
   avatar: {
-    width: 88,
-    height: 88,
-    borderRadius: 44,
-    backgroundColor: "rgba(74, 222, 128, 0.12)",
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: "rgba(22, 163, 74, 0.1)",
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 16,
-    borderWidth: 1,
-    borderColor: "rgba(74, 222, 128, 0.3)",
+    borderWidth: 2,
+    borderColor: "rgba(22, 163, 74, 0.3)",
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
+    elevation: 8,
   },
-  avatarText: { fontSize: 32, fontWeight: "800", color: colors.accent },
-  name: { fontSize: 24, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 4 },
+  avatarText: { fontSize: 36, fontWeight: "800", color: colors.accent },
+  name: { fontSize: 26, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 6 },
   role: { fontSize: 15, color: colors.muted },
   errorContainer: {
     backgroundColor: "#FEE2E2",
@@ -153,11 +179,16 @@ const styles = StyleSheet.create({
   statCardWrapper: {
     flex: 1,
     minWidth: "45%",
-    borderRadius: 20,
+    borderRadius: 24,
     overflow: "hidden",
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line,
-    backgroundColor: "rgba(255, 255, 255, 0.5)",
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.04,
+    shadowRadius: 16,
+    elevation: 3,
   },
   statCard: {
     padding: 18,

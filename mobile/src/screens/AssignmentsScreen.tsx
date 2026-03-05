@@ -2,7 +2,7 @@ import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View, ActivityIndicator, RefreshControl } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
-import { ClipboardList, BookOpenCheck, Target } from "lucide-react-native";
+import { ClipboardList, BookOpenCheck, TreePine } from "lucide-react-native";
 
 import { AssignmentCard } from "../components/AssignmentCard";
 import { BottomTabParamList } from "../navigation/types";
@@ -107,7 +107,7 @@ export function AssignmentsScreen({ navigation }: Props) {
         <View style={styles.content}>
           <View style={styles.headerRow}>
             <View style={styles.headerIconContainer}>
-              <Target size={36} color={colors.accent} strokeWidth={2.5} />
+              <TreePine size={32} color={colors.accent} strokeWidth={2.5} />
             </View>
             <Text style={styles.title}>Your Drills</Text>
             <Text style={styles.subtitle}>Open a brief, then jump straight in.</Text>
@@ -140,6 +140,22 @@ export function AssignmentsScreen({ navigation }: Props) {
                     </View>
                     <Text style={styles.emptyText}>No drills yet.</Text>
                     <Text style={styles.emptySubtext}>Your manager will assign scenarios here.</Text>
+                    
+                    {Object.values(scenarios).length > 0 && (
+                      <Pressable 
+                        style={styles.practiceBtn}
+                        onPress={() => {
+                          const firstScenarioId = Object.keys(scenarios)[0];
+                          if (firstScenarioId) {
+                            navigation.navigate("PreSession", {
+                              scenarioId: firstScenarioId,
+                            });
+                          }
+                        }}
+                      >
+                        <Text style={styles.practiceBtnText}>Practice Now</Text>
+                      </Pressable>
+                    )}
                   </View>
                 ) : null}
 
@@ -228,6 +244,23 @@ const styles = StyleSheet.create({
   },
   emptyText: { fontSize: 20, fontFamily: "Poppins_700Bold", color: colors.ink },
   emptySubtext: { fontSize: 15, color: colors.muted, textAlign: "center" },
+  practiceBtn: {
+    marginTop: 24,
+    backgroundColor: colors.accent,
+    paddingHorizontal: 32,
+    paddingVertical: 16,
+    borderRadius: 24, // Apple pill shape
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 4,
+  },
+  practiceBtnText: {
+    color: "#fff",
+    fontSize: 16,
+    fontFamily: "Poppins_700Bold",
+  },
   completedSection: {
     marginTop: 32,
     gap: 16,

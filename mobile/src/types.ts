@@ -59,9 +59,21 @@ export type RepSessionDetail = {
 
 export type RepProgress = {
   rep_id: string;
+  rep_name?: string | null;
+  rep_email?: string | null;
   session_count: number;
   scored_session_count: number;
   average_score: number | null;
+};
+
+export type RepSessionHistoryItem = {
+  session_id: string;
+  assignment_id: string | null;
+  scenario_id: string;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  overall_score: number | null;
 };
 
 export type WsInboundEvent = {

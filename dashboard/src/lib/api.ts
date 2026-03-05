@@ -1,6 +1,11 @@
 import { clearStoredAuth, createAuthRequiredError, getValidStoredAuth, storeAuth } from "./auth";
 import type { AuthSession } from "./auth";
 import type {
+  AlertItem,
+  BenchmarksResponse,
+  CoachingAnalyticsResponse,
+  CommandCenterResponse,
+  ExplorerResponse,
   FeedItem,
   ManagerActionLog,
   ManagerAnalytics,
@@ -11,6 +16,7 @@ import type {
   RepProgress,
   RepSessionDetail,
   ScenarioSummary,
+  ScenarioIntelligenceResponse,
   SessionDetail,
 } from "./types";
 
@@ -257,6 +263,113 @@ export async function createFollowup(
 export async function fetchManagerAnalytics(managerId: string): Promise<ManagerAnalytics> {
   return requestJson<ManagerAnalytics>(
     `/manager/analytics?manager_id=${encodeURIComponent(managerId)}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchManagerCommandCenter(
+  managerId: string,
+  options: { period?: string; dateFrom?: string; dateTo?: string } = {}
+): Promise<CommandCenterResponse> {
+  const params = new URLSearchParams({ manager_id: managerId, period: options.period ?? "30" });
+  if (options.dateFrom) params.set("date_from", new Date(`${options.dateFrom}T00:00:00`).toISOString());
+  if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
+  return requestJson<CommandCenterResponse>(
+    `/manager/command-center?${params.toString()}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchManagerScenarioIntelligence(
+  managerId: string,
+  options: { period?: string; dateFrom?: string; dateTo?: string } = {}
+): Promise<ScenarioIntelligenceResponse> {
+  const params = new URLSearchParams({ manager_id: managerId, period: options.period ?? "30" });
+  if (options.dateFrom) params.set("date_from", new Date(`${options.dateFrom}T00:00:00`).toISOString());
+  if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
+  return requestJson<ScenarioIntelligenceResponse>(
+    `/manager/analytics/scenarios?${params.toString()}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchManagerCoachingAnalytics(
+  managerId: string,
+  options: { period?: string; dateFrom?: string; dateTo?: string } = {}
+): Promise<CoachingAnalyticsResponse> {
+  const params = new URLSearchParams({ manager_id: managerId, period: options.period ?? "30" });
+  if (options.dateFrom) params.set("date_from", new Date(`${options.dateFrom}T00:00:00`).toISOString());
+  if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
+  return requestJson<CoachingAnalyticsResponse>(
+    `/manager/analytics/coaching?${params.toString()}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchManagerExplorer(
+  managerId: string,
+  options: {
+    period?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    repId?: string;
+    scenarioId?: string;
+    reviewed?: "true" | "false" | "all";
+    weaknessTag?: string;
+    scoreMin?: number;
+    scoreMax?: number;
+    bargeInOnly?: boolean;
+    search?: string;
+    limit?: number;
+  } = {}
+): Promise<ExplorerResponse> {
+  const params = new URLSearchParams({ manager_id: managerId, period: options.period ?? "30" });
+  if (options.dateFrom) params.set("date_from", new Date(`${options.dateFrom}T00:00:00`).toISOString());
+  if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
+  if (options.repId) params.set("rep_id", options.repId);
+  if (options.scenarioId) params.set("scenario_id", options.scenarioId);
+  if (options.reviewed && options.reviewed !== "all") params.set("reviewed", String(options.reviewed === "true"));
+  if (options.weaknessTag) params.set("weakness_tag", options.weaknessTag);
+  if (typeof options.scoreMin === "number") params.set("score_min", String(options.scoreMin));
+  if (typeof options.scoreMax === "number") params.set("score_max", String(options.scoreMax));
+  if (options.bargeInOnly) params.set("barge_in_only", "true");
+  if (options.search) params.set("search", options.search);
+  if (options.limit) params.set("limit", String(options.limit));
+  return requestJson<ExplorerResponse>(
+    `/manager/analytics/explorer?${params.toString()}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchManagerAlerts(
+  managerId: string,
+  options: { period?: string; dateFrom?: string; dateTo?: string } = {}
+): Promise<AlertItem[]> {
+  const params = new URLSearchParams({ manager_id: managerId, period: options.period ?? "30" });
+  if (options.dateFrom) params.set("date_from", new Date(`${options.dateFrom}T00:00:00`).toISOString());
+  if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
+  const response = await requestJson<{ items: AlertItem[] }>(
+    `/manager/alerts?${params.toString()}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+  return response.items ?? [];
+}
+
+export async function fetchManagerBenchmarks(
+  managerId: string,
+  options: { period?: string; dateFrom?: string; dateTo?: string } = {}
+): Promise<BenchmarksResponse> {
+  const params = new URLSearchParams({ manager_id: managerId, period: options.period ?? "30" });
+  if (options.dateFrom) params.set("date_from", new Date(`${options.dateFrom}T00:00:00`).toISOString());
+  if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
+  return requestJson<BenchmarksResponse>(
+    `/manager/benchmarks?${params.toString()}`,
     {},
     { userId: managerId, role: "manager" }
   );

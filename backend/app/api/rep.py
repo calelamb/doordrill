@@ -35,6 +35,36 @@ def _ensure_same_org(actor: Actor, org_id: str | None) -> None:
         raise HTTPException(status_code=403, detail="cross-organization access denied")
 
 
+@router.get("/lookup")
+def lookup_rep_by_email(email: str = Query(...), db: Session = Depends(get_db)) -> dict:
+    # Development only endpoint to lookup a rep by email without auth
+    user = db.scalar(select(User).where(User.email == email.lower(), User.role == "rep"))
+    if not user:
+        # If user doesn't exist, create a mock user for them automatically for testing purposes
+        from app.models.user import Organization
+        from app.models.types import UserRole
+        # Find any organization to attach them to, or create one
+        org = db.scalar(select(Organization).limit(1))
+        if not org:
+            org = Organization(name="Test Org", industry="Solar", plan_tier="starter")
+            db.add(org)
+            db.flush()
+            
+        user = User(
+            org_id=org.id,
+            role=UserRole.REP,
+            name=email.split("@")[0].replace(".", " ").title(),
+            email=email.lower(),
+            password_hash="mock",
+            auth_provider="local",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        
+    return {"rep_id": user.id}
+
+
 @router.get("/assignments", response_model=list[AssignmentResponse])
 def get_rep_assignments(
     rep_id: str = Query(...),
@@ -62,18 +92,29 @@ def create_session(
     if actor.user_id and actor.role == "rep" and actor.user_id != payload.rep_id:
         raise HTTPException(status_code=403, detail="rep can only start their own session")
 
-    assignment = db.scalar(select(Assignment).where(Assignment.id == payload.assignment_id))
-    if assignment is None:
-        raise HTTPException(status_code=404, detail="assignment not found")
+    if payload.assignment_id:
+        assignment = db.scalar(select(Assignment).where(Assignment.id == payload.assignment_id))
+        if assignment is None:
+            raise HTTPException(status_code=404, detail="assignment not found")
 
-    if assignment.rep_id != payload.rep_id:
-        raise HTTPException(status_code=400, detail="assignment does not belong to rep")
+        if assignment.rep_id != payload.rep_id:
+            raise HTTPException(status_code=400, detail="assignment does not belong to rep")
 
-    if assignment.scenario_id != payload.scenario_id:
-        raise HTTPException(status_code=400, detail="session scenario must match assignment scenario")
+        if assignment.scenario_id != payload.scenario_id:
+            raise HTTPException(status_code=400, detail="session scenario must match assignment scenario")
+    else:
+        # Auto-create a practice assignment
+        assignment = Assignment(
+            scenario_id=payload.scenario_id,
+            rep_id=payload.rep_id,
+            assigned_by=payload.rep_id,
+            status=AssignmentStatus.ASSIGNED,
+        )
+        db.add(assignment)
+        db.flush()
 
     session = DrillSession(
-        assignment_id=payload.assignment_id,
+        assignment_id=assignment.id,
         rep_id=payload.rep_id,
         scenario_id=payload.scenario_id,
         prompt_version=(
@@ -207,6 +248,8 @@ def get_rep_progress(
     )
     return {
         "rep_id": rep_id,
+        "rep_name": rep_user.name,
+        "rep_email": rep_user.email,
         "session_count": int(sessions_count),
         "scored_session_count": int(scored_count),
         "average_score": round(float(avg_score), 2) if avg_score is not None else None,

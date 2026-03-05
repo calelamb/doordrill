@@ -7,7 +7,7 @@ from app.schemas.scorecard import ManagerCoachingNoteResponse, ManagerReviewResp
 
 
 class SessionCreateRequest(BaseModel):
-    assignment_id: str
+    assignment_id: str | None = None
     rep_id: str
     scenario_id: str
 

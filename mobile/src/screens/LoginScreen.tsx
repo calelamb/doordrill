@@ -5,23 +5,30 @@ import { LinearGradient } from "expo-linear-gradient";
 import { TreePine, Mail, Lock } from "lucide-react-native";
 
 import { useSession } from "../store/session";
+import { lookupRepByEmail } from "../services/api";
 
 export function LoginScreen() {
   const { setRepId } = useSession();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   const canContinue = email.trim().length > 0 && password.trim().length > 0 && !loading;
 
-  const handleLogin = () => {
+  const handleLogin = async () => {
     setLoading(true);
-    setTimeout(() => {
-      // Hardcode the repId to match the seed data in the local database
-      // This prevents the 401 error since the user will actually exist
-      const hardcodedRepId = "31b9fd7f-06c0-46f4-a536-059b8936ff83";
-      setRepId(hardcodedRepId);
-    }, 600);
+    setError("");
+    try {
+      // In a real app we'd call /auth/login with the password
+      // Since this is a dev prototype using an x-user-id mock auth, 
+      // we just look up the user by email to get their ID.
+      const { rep_id } = await lookupRepByEmail(email.trim());
+      setRepId(rep_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to log in");
+      setLoading(false);
+    }
   };
 
   return (
@@ -74,6 +81,10 @@ export function LoginScreen() {
                   />
                 </View>
               </View>
+
+              {error ? (
+                <Text style={styles.errorText}>{error}</Text>
+              ) : null}
 
               <Pressable
                 style={({ pressed }) => [
@@ -205,4 +216,10 @@ const styles = StyleSheet.create({
     fontSize: 17,
     letterSpacing: 0.3,
   },
+  errorText: {
+    color: "#dc2626",
+    marginBottom: 16,
+    textAlign: "center",
+    fontWeight: "500",
+  }
 });

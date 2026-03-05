@@ -2,10 +2,10 @@ import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Audio } from "expo-av";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
-import { ChevronLeft } from "lucide-react-native";
+import { ChevronLeft, Radar, Radio, TreePine } from "lucide-react-native";
 import BottomSheet, { BottomSheetBackdrop, BottomSheetView } from "@gorhom/bottom-sheet";
 import * as Haptics from "expo-haptics";
-import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
+import Animated, { FadeIn, FadeOut, useSharedValue, useAnimatedStyle, withRepeat, withTiming, Easing, withDelay } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
 
 import { RootStackParamList } from "../navigation/types";
@@ -26,6 +26,47 @@ function personaSummary(scenario: ScenarioBrief | null): { name: string; attitud
         "They will warm up if you sound credible, concise, and focused on the home."
     ),
   };
+}
+
+function PulsingOrb({ isReady, isStarting }: { isReady: boolean, isStarting: boolean }) {
+  const pulse1 = useSharedValue(0);
+  const pulse2 = useSharedValue(0);
+
+  useEffect(() => {
+    if (!isReady && !isStarting) {
+      pulse1.value = withRepeat(withTiming(1, { duration: 2000, easing: Easing.out(Easing.ease) }), -1, false);
+      pulse2.value = withDelay(1000, withRepeat(withTiming(1, { duration: 2000, easing: Easing.out(Easing.ease) }), -1, false));
+    } else {
+      pulse1.value = withTiming(0);
+      pulse2.value = withTiming(0);
+    }
+  }, [isReady, isStarting, pulse1, pulse2]);
+
+  const ring1Style = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 + pulse1.value * 1.5 }],
+    opacity: 1 - pulse1.value,
+  }));
+
+  const ring2Style = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 + pulse2.value * 1.5 }],
+    opacity: 1 - pulse2.value,
+  }));
+
+  return (
+    <View style={styles.animationContainer}>
+      <Animated.View style={[styles.pulseRing, ring1Style]} />
+      <Animated.View style={[styles.pulseRing, ring2Style]} />
+      <Animated.View 
+        style={[
+          styles.orb, 
+          isReady ? styles.orbReady : undefined,
+          isStarting && styles.orbStarting
+        ]} 
+      >
+        <Radio size={32} color={isReady ? "#fff" : colors.accent} />
+      </Animated.View>
+    </View>
+  );
 }
 
 export function PreSessionScreen({ route, navigation }: Props) {
@@ -83,7 +124,7 @@ export function PreSessionScreen({ route, navigation }: Props) {
   const persona = useMemo(() => personaSummary(scenario), [scenario]);
 
   const startDrill = useCallback(async () => {
-    if (!repId || !assignment || starting) return;
+    if (!repId || starting) return;
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     setStarting(true);
@@ -97,15 +138,15 @@ export function PreSessionScreen({ route, navigation }: Props) {
       const granted = permission.granted ? permission : await Audio.requestPermissionsAsync();
       if (!granted.granted) throw new Error("Microphone access is required.");
 
-      const session = await createRepSession(repId, assignment.id, assignment.scenario_id);
+      const session = await createRepSession(repId, assignmentId ?? null, scenarioId);
       
       bottomSheetRef.current?.close();
       
       // Delay slightly for bottom sheet close animation
       setTimeout(() => {
         navigation.replace("Session", {
-          assignmentId: assignment.id,
-          scenarioId: assignment.scenario_id,
+          assignmentId: assignmentId ?? undefined,
+          scenarioId: scenarioId,
           sessionId: session.id,
         });
       }, 300);
@@ -114,7 +155,7 @@ export function PreSessionScreen({ route, navigation }: Props) {
       setError(err instanceof Error ? err.message : "Failed to start drill");
       setStarting(false);
     }
-  }, [assignment, navigation, repId, starting]);
+  }, [assignmentId, scenarioId, navigation, repId, starting]);
 
   const renderBackdrop = useCallback(
     (props: any) => (
@@ -153,16 +194,7 @@ export function PreSessionScreen({ route, navigation }: Props) {
             <View style={{ width: 40 }} />
           </View>
 
-          <View style={styles.animationContainer}>
-            {/* Simple orb placeholder for now, we'll upgrade with Reanimated/Lottie later if needed */}
-            <Animated.View 
-              style={[
-                styles.orb, 
-                statusStage === 2 ? styles.orbReady : undefined,
-                starting && styles.orbStarting
-              ]} 
-            />
-          </View>
+          <PulsingOrb isReady={statusStage === 2} isStarting={starting} />
 
           <View style={styles.statusBox}>
             <Animated.Text key={statusStage} entering={FadeIn} exiting={FadeOut} style={styles.statusText}>
@@ -171,8 +203,16 @@ export function PreSessionScreen({ route, navigation }: Props) {
           </View>
 
           <View style={styles.detailsCard}>
-            <Text style={styles.scenarioName}>{scenario?.name ?? "Loading..."}</Text>
-            <Text style={styles.personaInfo}>{persona.name} · {persona.attitude}</Text>
+            <View style={styles.detailsHeader}>
+              <View style={styles.detailsIconContainer}>
+                <TreePine size={24} color={colors.accent} strokeWidth={2.5} />
+              </View>
+              <View style={styles.detailsTitleContainer}>
+                <Text style={styles.scenarioName}>{scenario?.name ?? "Loading..."}</Text>
+                <Text style={styles.personaInfo}>{persona.name} · {persona.attitude}</Text>
+              </View>
+            </View>
+            <View style={styles.divider} />
             <Text style={styles.personaHint}>{persona.cue}</Text>
           </View>
 
@@ -184,9 +224,9 @@ export function PreSessionScreen({ route, navigation }: Props) {
 
           <View style={styles.footer}>
             <Pressable
-              style={[styles.startBtn, (starting || loading || !assignment || statusStage < 2) && styles.startBtnDisabled]}
+              style={[styles.startBtn, (starting || loading || statusStage < 2 || (assignmentId && !assignment)) && styles.startBtnDisabled]}
               onPress={startDrill}
-              disabled={starting || loading || !assignment || statusStage < 2}
+              disabled={starting || loading || statusStage < 2 || (!!assignmentId && !assignment)}
             >
               {starting ? (
                 <ActivityIndicator color="#fff" />
@@ -265,6 +305,13 @@ const styles = StyleSheet.create({
     transform: [{ scale: 1.5 }],
     opacity: 0.8,
   },
+  pulseRing: {
+    position: "absolute",
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: "rgba(22, 163, 74, 0.2)",
+  },
   statusBox: {
     alignItems: "center",
     marginVertical: 16,
@@ -278,28 +325,57 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   detailsCard: {
-    backgroundColor: "rgba(255, 255, 255, 0.5)",
-    borderRadius: 24,
-    padding: 20,
-    gap: 8,
-    borderWidth: 1,
+    backgroundColor: "rgba(255, 255, 255, 0.7)",
+    borderRadius: 32,
+    padding: 24,
+    gap: 16,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.05,
+    shadowRadius: 24,
+    elevation: 4,
+  },
+  detailsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  detailsIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: "rgba(74, 222, 128, 0.15)",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(74, 222, 128, 0.3)",
+  },
+  detailsTitleContainer: {
+    flex: 1,
   },
   scenarioName: {
-    fontSize: 22,
+    fontSize: 20,
     fontFamily: "Poppins_800ExtraBold",
     color: colors.ink,
+    lineHeight: 24,
+    marginBottom: 2,
   },
   personaInfo: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "700",
     color: colors.muted,
   },
+  divider: {
+    height: 1,
+    backgroundColor: colors.line,
+    marginVertical: 4,
+  },
   personaHint: {
-    fontSize: 14,
-    lineHeight: 22,
+    fontSize: 15,
+    lineHeight: 24,
     color: colors.muted,
-    marginTop: 4,
   },
   errorBox: {
     marginTop: 16,

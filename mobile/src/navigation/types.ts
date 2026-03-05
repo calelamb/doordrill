@@ -11,11 +11,11 @@ export type RootStackParamList = {
   Login: undefined;
   MainTabs: NavigatorScreenParams<BottomTabParamList>;
   PreSession: {
-    assignmentId: string;
+    assignmentId?: string;
     scenarioId: string;
   };
   Session: {
-    assignmentId: string;
+    assignmentId?: string;
     scenarioId: string;
     sessionId: string;
   };

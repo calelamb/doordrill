@@ -43,7 +43,7 @@ export async function fetchRepAssignments(repId: string): Promise<RepAssignment[
 
 export async function createRepSession(
   repId: string,
-  assignmentId: string,
+  assignmentId: string | null,
   scenarioId: string
 ): Promise<{ id: string }> {
   const response = await fetch(`${API_BASE_URL}/rep/sessions`, {
@@ -84,4 +84,16 @@ export async function fetchRepProgress(repId: string): Promise<RepProgress> {
     headers: repHeaders(repId)
   });
   return parseJson<RepProgress>(response, "fetch progress");
+}
+
+export async function fetchRepSessionsHistory(repId: string): Promise<{ items: import("../types").RepSessionHistoryItem[] }> {
+  const response = await fetch(`${API_BASE_URL}/rep/sessions?rep_id=${encodeURIComponent(repId)}`, {
+    headers: repHeaders(repId)
+  });
+  return parseJson<{ items: import("../types").RepSessionHistoryItem[] }>(response, "fetch history");
+}
+
+export async function lookupRepByEmail(email: string): Promise<{ rep_id: string }> {
+  const response = await fetch(`${API_BASE_URL}/rep/lookup?email=${encodeURIComponent(email)}`);
+  return parseJson<{ rep_id: string }>(response, "lookup rep");
 }

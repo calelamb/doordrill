@@ -116,16 +116,16 @@ export function AssignmentCard({ assignment, scenario, disabled = false, onStart
 
 const styles = StyleSheet.create({
   cardWrapper: {
-    borderRadius: 20,
+    borderRadius: 24, // Increased for squircle look
     overflow: "hidden",
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth, // Apple style thin border
     borderColor: colors.line,
-    backgroundColor: "rgba(255, 255, 255, 0.5)",
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 4,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.04, // Ultra soft shadow
+    shadowRadius: 16,
+    elevation: 3,
   },
   cardWrapperCompleted: {
     opacity: 0.85,
