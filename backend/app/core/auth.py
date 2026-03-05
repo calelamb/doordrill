@@ -124,6 +124,36 @@ def get_actor(
     return Actor(user_id=user.id, role=resolved_role, org_id=user.org_id, team_id=user.team_id)
 
 
+def resolve_ws_actor(headers) -> Actor:
+    """Resolve actor from WebSocket headers without FastAPI DI.
+
+    Returns an admin Actor when auth is not required and no credentials are
+    provided, matching the REST ``get_actor`` behaviour.
+    """
+    settings = get_settings()
+    authorization = headers.get("authorization")
+    x_user_id = headers.get("x-user-id")
+    x_user_role = headers.get("x-user-role")
+
+    resolved_user_id, resolved_role = _resolve_identity(
+        x_user_id=x_user_id,
+        x_user_role=x_user_role,
+        authorization=authorization,
+    )
+
+    if not resolved_user_id and not resolved_role:
+        if settings.auth_required:
+            return None  # type: ignore[return-value]
+        return Actor(user_id=None, role="admin", org_id=None, team_id=None)
+
+    if not resolved_user_id or not resolved_role:
+        return None  # type: ignore[return-value]
+    if resolved_role not in ALLOWED_ROLES:
+        return None  # type: ignore[return-value]
+
+    return Actor(user_id=resolved_user_id, role=resolved_role, org_id=None, team_id=None)
+
+
 def require_manager(actor: Actor = Depends(get_actor)) -> Actor:
     if actor.role not in {"manager", "admin"}:
         raise HTTPException(status_code=403, detail="manager role required")

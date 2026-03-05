@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.scorecard import Scorecard
-from app.models.session import Session
+from app.models.session import Session as DrillSession
 from app.models.types import SessionStatus
 
 CATEGORY_KEYS = [
@@ -29,7 +29,7 @@ class GradingService:
         self.settings = get_settings()
 
     async def grade_session(self, db: Session, session_id: str) -> Scorecard:
-        session = db.scalar(select(Session).where(Session.id == session_id))
+        session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
         if session is None:
             raise ValueError("session not found")
 

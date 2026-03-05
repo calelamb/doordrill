@@ -12,7 +12,7 @@ from app.models.assignment import Assignment
 from app.models.device_token import DeviceToken
 from app.models.notification_delivery import NotificationDelivery
 from app.models.scorecard import Scorecard
-from app.models.session import Session
+from app.models.session import Session as DrillSession
 from app.models.user import User
 from app.services.notification_providers import (
     ExpoPushProvider,
@@ -49,7 +49,7 @@ class NotificationService:
         return LogPushProvider()
 
     async def notify_manager_session_completed(self, db: Session, session_id: str) -> dict:
-        session = db.scalar(select(Session).where(Session.id == session_id))
+        session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
         if session is None:
             return {"sent": False, "reason": "session_not_found"}
 

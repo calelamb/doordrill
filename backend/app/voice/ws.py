@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import func, select
 
+from app.core.auth import resolve_ws_actor
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.assignment import Assignment
@@ -71,6 +72,11 @@ async def _send_event(websocket: WebSocket, event_type: str, payload: dict[str, 
 @router.websocket("/ws/sessions/{session_id}")
 @router.websocket("/ws/session/{session_id}")
 async def session_ws(websocket: WebSocket, session_id: str) -> None:
+    actor = resolve_ws_actor(websocket.headers)
+    if actor is None:
+        await websocket.close(code=4401)
+        return
+
     await websocket.accept()
     ws_trace_id = _resolve_trace_id(websocket.headers)
 
