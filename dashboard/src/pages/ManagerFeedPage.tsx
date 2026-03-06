@@ -6,8 +6,8 @@ import { useNavigate } from "react-router-dom";
 import { FeedList } from "../components/FeedList";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
-import { fetchManagerAnalytics, fetchManagerFeed } from "../lib/api";
-import type { FeedItem, ManagerAnalytics } from "../lib/types";
+import { fetchManagerAnalytics, fetchManagerFeed, fetchRepRiskDetail } from "../lib/api";
+import type { FeedItem, ManagerAnalytics, RepRiskDetail } from "../lib/types";
 
 type ReviewFilter = "all" | "reviewed" | "unreviewed";
 
@@ -26,6 +26,7 @@ export function ManagerFeedPage() {
 
     const [feed, setFeed] = useState<FeedItem[]>([]);
     const [analytics, setAnalytics] = useState<ManagerAnalytics | null>(null);
+    const [riskByRepId, setRiskByRepId] = useState<Map<string, RepRiskDetail["risk_level"]>>(new Map());
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -47,18 +48,37 @@ export function ManagerFeedPage() {
         }
         setError(null);
         try {
-            const [items, analyticsData] = await Promise.all([
+            const [itemsResult, analyticsResult, riskResult] = await Promise.allSettled([
                 fetchManagerFeed(managerId),
-                fetchManagerAnalytics(managerId)
+                fetchManagerAnalytics(managerId),
+                fetchRepRiskDetail(managerId),
             ]);
-            setFeed(items);
-            setAnalytics(analyticsData);
-        } catch (err) {
-            if (isAuthError(err)) {
+
+            const authFailure = [itemsResult, analyticsResult, riskResult].find(
+                (result) => result.status === "rejected" && isAuthError(result.reason)
+            );
+            if (authFailure) {
                 clearStoredAuth();
                 navigate("/login", { replace: true });
                 return;
             }
+
+            if (itemsResult.status === "rejected") {
+                throw itemsResult.reason;
+            }
+
+            if (analyticsResult.status === "rejected") {
+                throw analyticsResult.reason;
+            }
+
+            setFeed(itemsResult.value);
+            setAnalytics(analyticsResult.value);
+            setRiskByRepId(
+                riskResult.status === "fulfilled"
+                    ? new Map(riskResult.value.reps.map((rep) => [rep.rep_id, rep.risk_level]))
+                    : new Map()
+            );
+        } catch (err) {
             setError(err instanceof Error ? err.message : "Failed to load manager feed");
         } finally {
             setLoading(false);
@@ -286,6 +306,7 @@ export function ManagerFeedPage() {
                 <FeedList
                     items={filteredFeed}
                     activeSessionId={null}
+                    riskByRepId={riskByRepId}
                     onSelect={(sessionId) => navigate(`/manager/sessions/${sessionId}/replay`)}
                 />
             )}

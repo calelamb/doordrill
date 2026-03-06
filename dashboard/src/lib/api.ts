@@ -17,6 +17,7 @@ import type {
   RepInsightResponse,
   RepAssignment,
   RepProgress,
+  RepRiskDetailResponse,
   RepSessionDetail,
   ScenarioSummary,
   ScenarioIntelligenceResponse,
@@ -375,6 +376,18 @@ export async function fetchManagerAnalytics(
   if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
   return requestJson<ManagerAnalytics>(
     `/manager/analytics/team?${params.toString()}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchRepRiskDetail(
+  managerId: string,
+  options: { period?: string } = {}
+): Promise<RepRiskDetailResponse> {
+  const params = new URLSearchParams({ manager_id: managerId, period: options.period ?? "30" });
+  return requestJson<RepRiskDetailResponse>(
+    `/manager/analytics/rep-risk-detail?${params.toString()}`,
     {},
     { userId: managerId, role: "manager" }
   );

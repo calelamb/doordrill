@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { Check, ChevronRight, Search, AlertCircle, Loader2, X } from "lucide-react";
 
@@ -7,6 +7,7 @@ import { DifficultyBadge } from "../components/shared/DifficultyBadge";
 import { EmptyState } from "../components/shared/EmptyState";
 import { SkillChip } from "../components/shared/SkillChip";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
+import { normalizeCategoryKey, type AnalyticsCategoryKey } from "../lib/analytics";
 import { createManagerAssignment, fetchManagerTeam, fetchScenarios } from "../lib/api";
 import type { ManagerTeamMember, ScenarioSummary } from "../lib/types";
 
@@ -15,14 +16,27 @@ type AssignmentPrefillState = {
     prefillScenarioId?: string;
     prefillDifficulty?: number;
     prefillRepIds?: string[];
+    prefillCategoryKey?: string;
 } | null;
+
+function scenarioTargetsCategory(scenario: ScenarioSummary, categoryKey: AnalyticsCategoryKey | null): boolean {
+    if (!categoryKey) {
+        return false;
+    }
+
+    return Object.keys(scenario.rubric ?? {}).some((key) => normalizeCategoryKey(key) === categoryKey);
+}
 
 export function AssignmentCreatePage() {
     const navigate = useNavigate();
     const location = useLocation();
+    const [searchParams] = useSearchParams();
     const auth = getValidStoredAuth();
     const managerId = auth?.user.id ?? "";
     const prefillState = location.state as AssignmentPrefillState;
+    const queryPrefillRepIds = useMemo(() => searchParams.getAll("repId").filter(Boolean), [searchParams]);
+    const queryPrefillCategory = normalizeCategoryKey(searchParams.get("category"));
+    const prefillCategory = normalizeCategoryKey(prefillState?.prefillCategoryKey) ?? queryPrefillCategory;
 
     const [step, setStep] = useState<1 | 2 | 3>(1);
     const [scenarioId, setScenarioId] = useState<string | null>(null);
@@ -69,42 +83,44 @@ export function AssignmentCreatePage() {
     }, [loadData]);
 
     useEffect(() => {
-        if (!prefillState) {
+        if (!prefillState && !queryPrefillRepIds.length) {
             return;
         }
-        if (prefillState.prefillScenarioSearch) {
+        if (prefillState?.prefillScenarioSearch) {
             setScenarioSearch(prefillState.prefillScenarioSearch);
         }
-        if (prefillState.prefillRepIds?.length) {
-            setSelectedReps(prefillState.prefillRepIds);
+        const repIds = prefillState?.prefillRepIds?.length ? prefillState.prefillRepIds : queryPrefillRepIds;
+        if (repIds.length) {
+            setSelectedReps(repIds);
         }
-    }, [prefillState]);
+    }, [prefillState, queryPrefillRepIds]);
 
     useEffect(() => {
-        if (!prefillState || !scenarios.length || scenarioId) {
+        if (!scenarios.length || scenarioId || (!prefillState && !queryPrefillRepIds.length && !prefillCategory)) {
             return;
         }
-        const explicitScenario = prefillState.prefillScenarioId
+        const explicitScenario = prefillState?.prefillScenarioId
             ? scenarios.find((scenario) => scenario.id === prefillState.prefillScenarioId)
             : null;
-        const search = prefillState.prefillScenarioSearch?.trim().toLowerCase() ?? "";
+        const search = prefillState?.prefillScenarioSearch?.trim().toLowerCase() ?? "";
         const matchedScenario = explicitScenario ?? scenarios.find((scenario) => {
             const nameMatches = search ? scenario.name.toLowerCase().includes(search) : false;
-            const difficultyMatches = prefillState.prefillDifficulty
+            const difficultyMatches = prefillState?.prefillDifficulty
                 ? scenario.difficulty === prefillState.prefillDifficulty
                 : true;
             return nameMatches && difficultyMatches;
-        }) ?? scenarios.find((scenario) => search && scenario.name.toLowerCase() === search);
+        }) ?? scenarios.find((scenario) => search && scenario.name.toLowerCase() === search)
+            ?? scenarios.find((scenario) => scenarioTargetsCategory(scenario, prefillCategory));
 
         if (!matchedScenario) {
             return;
         }
 
         setScenarioId(matchedScenario.id);
-        if (prefillState.prefillRepIds?.length) {
+        if ((prefillState?.prefillRepIds?.length ?? 0) > 0 || queryPrefillRepIds.length > 0) {
             setStep(2);
         }
-    }, [prefillState, scenarioId, scenarios]);
+    }, [prefillCategory, prefillState, queryPrefillRepIds.length, scenarioId, scenarios]);
 
     const filteredScenarios = useMemo(
         () => scenarios.filter((s) => s.name.toLowerCase().includes(scenarioSearch.toLowerCase())),

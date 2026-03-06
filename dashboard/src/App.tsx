@@ -11,6 +11,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { ManagerReplayPage } from "./pages/ManagerReplayPage";
 import { RepProgressPage } from "./pages/RepProgressPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { RiskIntelligencePage } from "./pages/RiskIntelligencePage";
 import { ScenarioIntelligencePage } from "./pages/ScenarioIntelligencePage";
 
 function RootRedirect() {
@@ -53,6 +54,7 @@ export function App() {
           <Route path="/manager/sessions/:id/replay" element={<ManagerReplayPage />} />
           <Route path="/manager/reps/:id/progress" element={<RepProgressPage />} />
           <Route path="/manager/analytics" element={<AnalyticsPage />} />
+          <Route path="/manager/risk" element={<RiskIntelligencePage />} />
           <Route path="/manager/scenarios" element={<ScenarioIntelligencePage />} />
           <Route path="/manager/coaching" element={<CoachingLabPage />} />
           <Route path="/manager/explorer" element={<ExplorerPage />} />

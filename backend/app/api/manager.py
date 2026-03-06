@@ -1,5 +1,6 @@
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from statistics import pstdev
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
@@ -21,6 +22,7 @@ from app.schemas.adaptive_training import (
     AdaptiveTrainingPlanResponse,
 )
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
+from app.schemas.manager_analytics import RepRiskDetailResponse
 from app.schemas.notification import NotificationDeliveryResponse
 from app.schemas.manager_ai import (
     RepInsightRequest,
@@ -72,6 +74,7 @@ RUBRIC_CATEGORY_KEYS = {
     "closing_technique": "closing",
     "professionalism": "professionalism",
 }
+TEAM_RISK_CATEGORY_KEYS = ("opening", "pitch", "objection_handling", "closing", "professionalism")
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -145,6 +148,35 @@ def _category_score_value(value) -> float | None:
 def _ensure_actor_matches_manager(actor: Actor, manager_id: str) -> None:
     if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
         raise HTTPException(status_code=403, detail="manager can only access their own AI insights")
+
+
+def _normalize_category_scores(category_scores: dict | None) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for raw_key, category_key in RUBRIC_CATEGORY_KEYS.items():
+        value = _category_score_value((category_scores or {}).get(raw_key))
+        if value is not None and category_key not in normalized:
+            normalized[category_key] = value
+    return normalized
+
+
+def _linear_regression_slope(scores: list[float]) -> float | None:
+    if len(scores) < 2:
+        return None
+    x_mean = (len(scores) - 1) / 2
+    y_mean = sum(scores) / len(scores)
+    numerator = sum((index - x_mean) * (score - y_mean) for index, score in enumerate(scores))
+    denominator = sum((index - x_mean) ** 2 for index in range(len(scores)))
+    if denominator <= 0:
+        return None
+    return numerator / denominator
+
+
+def _clamp_score(value: float) -> float:
+    return max(0.0, min(10.0, value))
+
+
+def _volatility_label_score(value: float) -> float:
+    return round(value, 2) if value > 0 else 0.0
 
 
 @router.get("/team")
@@ -539,13 +571,17 @@ def get_rep_progress(
     current_end = date_to or datetime.now(timezone.utc)
     if current_end.tzinfo is None:
         current_end = current_end.replace(tzinfo=timezone.utc)
-    current_end = current_end.replace(microsecond=0)
 
     if date_from is not None:
         current_start = date_from if date_from.tzinfo else date_from.replace(tzinfo=timezone.utc)
     else:
         current_start = current_end - timedelta(days=days)
-    current_start = current_start.replace(microsecond=0)
+
+    # Strip timezone for comparison — SQLite stores datetimes as naive UTC strings,
+    # and passing tz-aware datetimes as bind parameters can produce incorrect string
+    # comparisons.  Always normalise to UTC-naive before building the WHERE clause.
+    current_start_naive = current_start.astimezone(timezone.utc).replace(tzinfo=None, microsecond=0)
+    current_end_naive = current_end.astimezone(timezone.utc).replace(tzinfo=None)
 
     stmt = (
         select(
@@ -559,8 +595,8 @@ def get_rep_progress(
         )
         .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
         .join(Scenario, Scenario.id == DrillSession.scenario_id)
-        .where(DrillSession.started_at >= current_start)
-        .where(DrillSession.started_at <= current_end)
+        .where(DrillSession.started_at >= current_start_naive)
+        .where(DrillSession.started_at <= current_end_naive)
         .where(DrillSession.rep_id == rep_id)
         .order_by(DrillSession.started_at.desc())
     )
@@ -756,6 +792,254 @@ def get_coaching_analytics(
     )
 
 
+@router.get("/analytics/rep-risk-detail", response_model=RepRiskDetailResponse)
+def get_rep_risk_detail(
+    manager_id: str = Query(...),
+    period: int = Query(default=30, ge=1, le=365),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> RepRiskDetailResponse:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+
+    team = db.scalar(select(Team).where(Team.id == manager.team_id)) if manager.team_id else None
+    if team is None:
+        return RepRiskDetailResponse(
+            manager_id=manager_id,
+            period=str(period),
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            reps=[],
+            team_avg_score=None,
+            team_category_averages={},
+        )
+
+    reps = db.scalars(
+        select(User).where(User.team_id == team.id, User.role == UserRole.REP).order_by(User.name.asc())
+    ).all()
+    if not reps:
+        return RepRiskDetailResponse(
+            manager_id=manager_id,
+            period=str(period),
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            reps=[],
+            team_avg_score=None,
+            team_category_averages={},
+        )
+
+    rep_ids = [rep.id for rep in reps]
+    current_end = datetime.now(timezone.utc).replace(microsecond=0)
+    current_start = current_end - timedelta(days=period)
+    stall_cutoff = current_end - timedelta(days=14)
+
+    session_rows = db.execute(
+        select(
+            DrillSession.id.label("session_id"),
+            DrillSession.rep_id.label("rep_id"),
+            DrillSession.started_at.label("started_at"),
+            DrillSession.ended_at.label("ended_at"),
+            DrillSession.status.label("status"),
+            Scorecard.overall_score.label("overall_score"),
+            Scorecard.category_scores.label("category_scores"),
+        )
+        .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
+        .where(
+            DrillSession.rep_id.in_(rep_ids),
+            DrillSession.started_at <= current_end,
+        )
+        .order_by(DrillSession.rep_id.asc(), DrillSession.started_at.asc(), DrillSession.id.asc())
+    ).mappings().all()
+
+    sessions_by_rep: dict[str, list[dict]] = defaultdict(list)
+    team_period_scores: list[float] = []
+    team_category_samples: dict[str, list[float]] = defaultdict(list)
+
+    for row in session_rows:
+        started_at = row["started_at"]
+        normalized_started_at = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+        record = {
+            "session_id": row["session_id"],
+            "rep_id": row["rep_id"],
+            "started_at": normalized_started_at,
+            "ended_at": row["ended_at"],
+            "status": row["status"],
+            "overall_score": float(row["overall_score"]) if row["overall_score"] is not None else None,
+            "category_scores": row["category_scores"] or {},
+        }
+        sessions_by_rep[row["rep_id"]].append(record)
+
+        if normalized_started_at < current_start or record["overall_score"] is None:
+            continue
+        team_period_scores.append(record["overall_score"])
+        for category_key, value in _normalize_category_scores(record["category_scores"]).items():
+            team_category_samples[category_key].append(value)
+
+    team_avg_score = round(sum(team_period_scores) / len(team_period_scores), 2) if team_period_scores else None
+    team_category_averages = {
+        category_key: round(sum(values) / len(values), 2)
+        for category_key, values in team_category_samples.items()
+        if values
+    }
+
+    response_rows = []
+    for rep in reps:
+        rep_sessions = sessions_by_rep.get(rep.id, [])
+        period_sessions = [row for row in rep_sessions if row["started_at"] >= current_start]
+        scored_period_sessions = [row for row in period_sessions if row["overall_score"] is not None]
+        scored_sessions = [row for row in rep_sessions if row["overall_score"] is not None]
+
+        period_scores = [row["overall_score"] for row in scored_period_sessions]
+        current_avg_score = round(sum(period_scores) / len(period_scores), 2) if period_scores else None
+
+        recent_eight_scores = [row["overall_score"] for row in scored_sessions[-8:]]
+        recent_ten_scores = [row["overall_score"] for row in scored_sessions[-10:]]
+
+        recent_average_score = (
+            round(sum(recent_ten_scores) / len(recent_ten_scores), 2) if recent_ten_scores else None
+        )
+        current_score_reference = current_avg_score if current_avg_score is not None else recent_average_score
+
+        score_volatility = (
+            _volatility_label_score(pstdev(recent_eight_scores))
+            if len(recent_eight_scores) >= 2
+            else 0.0
+        )
+        score_trend_slope = _linear_regression_slope(recent_ten_scores)
+        rounded_slope = round(score_trend_slope, 4) if score_trend_slope is not None else None
+
+        plateau_detected = len(recent_eight_scores) >= 8 and pstdev(recent_eight_scores) < 0.4
+        decline_detected = rounded_slope is not None and rounded_slope < -0.15
+        breakthrough_detected = (
+            rounded_slope is not None
+            and rounded_slope > 0.2
+            and current_score_reference is not None
+            and current_score_reference > 7.5
+        )
+
+        last_session = rep_sessions[-1] if rep_sessions else None
+        days_since_last_session = (
+            max(0, (current_end.date() - last_session["started_at"].date()).days)
+            if last_session is not None
+            else None
+        )
+        stall_detected = bool(rep_sessions) and not any(
+            row["started_at"] >= stall_cutoff for row in rep_sessions
+        )
+
+        projected_score_10_sessions = (
+            round(_clamp_score(current_score_reference + (rounded_slope * 10)), 2)
+            if current_score_reference is not None and rounded_slope is not None
+            else None
+        )
+
+        category_source_sessions = scored_period_sessions if scored_period_sessions else scored_sessions[-10:]
+        rep_category_samples: dict[str, list[float]] = defaultdict(list)
+        for row in category_source_sessions:
+            for category_key, value in _normalize_category_scores(row["category_scores"]).items():
+                rep_category_samples[category_key].append(value)
+
+        most_vulnerable_category: str | None = None
+        category_gap_vs_team: float | None = None
+        for category_key in TEAM_RISK_CATEGORY_KEYS:
+            rep_values = rep_category_samples.get(category_key)
+            team_average = team_category_averages.get(category_key)
+            if not rep_values or team_average is None:
+                continue
+            rep_average = sum(rep_values) / len(rep_values)
+            gap = round(team_average - rep_average, 2)
+            if gap <= 0:
+                continue
+            if category_gap_vs_team is None or gap > category_gap_vs_team:
+                category_gap_vs_team = gap
+                most_vulnerable_category = category_key
+
+        risk_score = 0.0
+        if current_score_reference is not None:
+            if current_score_reference < 6.0:
+                risk_score += 20
+            elif current_score_reference < 7.0:
+                risk_score += 12
+        if decline_detected:
+            risk_score += 22
+        if plateau_detected:
+            risk_score += 10
+        if stall_detected:
+            risk_score += 35 + min(15, max(0, (days_since_last_session or 14) - 14) * 2)
+        if projected_score_10_sessions is not None:
+            if projected_score_10_sessions < 6.0:
+                risk_score += 15
+            elif projected_score_10_sessions < 7.0:
+                risk_score += 8
+        if score_volatility >= 1.2:
+            risk_score += 8
+        if category_gap_vs_team is not None:
+            if category_gap_vs_team >= 1.5:
+                risk_score += 10
+            elif category_gap_vs_team >= 0.75:
+                risk_score += 5
+        if breakthrough_detected:
+            risk_score -= 18
+        elif rounded_slope is not None and rounded_slope > 0.1:
+            risk_score -= 5
+
+        risk_score = round(max(0.0, min(100.0, risk_score)), 2)
+
+        red_flag_count = sum(
+            1
+            for condition in (
+                plateau_detected,
+                decline_detected,
+                stall_detected,
+                current_score_reference is not None and current_score_reference < 6.0,
+                projected_score_10_sessions is not None and projected_score_10_sessions < 6.0,
+                category_gap_vs_team is not None and category_gap_vs_team >= 1.5,
+            )
+            if condition
+        )
+
+        if risk_score >= 45:
+            risk_level = "high"
+        elif risk_score >= 22:
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+
+        response_rows.append(
+            {
+                "rep_id": rep.id,
+                "rep_name": rep.name,
+                "current_avg_score": current_avg_score,
+                "score_trend_slope": round(rounded_slope, 4) if rounded_slope is not None else None,
+                "score_volatility": score_volatility,
+                "projected_score_10_sessions": projected_score_10_sessions,
+                "plateau_detected": plateau_detected,
+                "decline_detected": decline_detected,
+                "breakthrough_detected": breakthrough_detected,
+                "stall_detected": stall_detected,
+                "days_since_last_session": days_since_last_session,
+                "most_vulnerable_category": most_vulnerable_category,
+                "category_gap_vs_team": category_gap_vs_team,
+                "risk_level": risk_level,
+                "risk_score": risk_score,
+                "session_count": len(period_sessions),
+                "red_flag_count": red_flag_count,
+            }
+        )
+
+    response_rows.sort(key=lambda item: (item["risk_score"], item["red_flag_count"], item["session_count"]), reverse=True)
+
+    return RepRiskDetailResponse(
+        manager_id=manager_id,
+        period=str(period),
+        generated_at=current_end.isoformat(),
+        reps=response_rows,
+        team_avg_score=team_avg_score,
+        team_category_averages=team_category_averages,
+    )
+
+
 @router.post("/ai/rep-insight", response_model=RepInsightResponse)
 def get_ai_rep_insight(
     payload: RepInsightRequest,
@@ -853,6 +1137,8 @@ def get_rep_analytics(
         manager_id=manager_id,
         days=days,
         limit=limit,
+        date_from=None,
+        date_to=None,
         actor=actor,
         db=db,
     )

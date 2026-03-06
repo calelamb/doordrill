@@ -4,17 +4,18 @@ import { AlertTriangle, CalendarDays, CheckCircle2, CheckSquare, Clock3, Flag, U
 
 import { getValidStoredAuth } from "../lib/auth";
 import { fetchManagerSessionDetail, submitOverride } from "../lib/api";
-import type { FeedItem } from "../lib/types";
+import type { FeedItem, RepRiskDetail } from "../lib/types";
 import { EmptyState } from "./shared/EmptyState";
 import { ScoreChip } from "./shared/ScoreChip";
 
 type Props = {
   items: FeedItem[];
   activeSessionId: string | null;
+  riskByRepId?: Map<string, RepRiskDetail["risk_level"]>;
   onSelect: (sessionId: string) => void;
 };
 
-export function FeedList({ items, activeSessionId, onSelect }: Props) {
+export function FeedList({ items, activeSessionId, riskByRepId, onSelect }: Props) {
   const auth = getValidStoredAuth();
   const managerId = auth?.user.id ?? "";
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -140,6 +141,7 @@ export function FeedList({ items, activeSessionId, onSelect }: Props) {
           const isReviewed = item.manager_reviewed;
           const isSelected = selectedIds.includes(item.session_id);
           const isRedFlag = typeof item.overall_score === "number" && item.overall_score < 6.0;
+          const isHighRiskRep = riskByRepId?.get(item.rep_id) === "high";
 
           return (
             <motion.li
@@ -184,6 +186,15 @@ export function FeedList({ items, activeSessionId, onSelect }: Props) {
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-semibold text-ink">{item.rep_name ?? item.rep_id}</span>
+                        {isHighRiskRep ? (
+                          <span
+                            title="At risk — view rep profile"
+                            aria-label="At risk rep"
+                            className="inline-flex items-center text-red-600"
+                          >
+                            ●
+                          </span>
+                        ) : null}
                         <span className="rounded-full border border-white/40 bg-white/50 px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide text-muted">
                           {item.scenario_name ?? item.scenario_id ?? "Unknown scenario"}
                         </span>

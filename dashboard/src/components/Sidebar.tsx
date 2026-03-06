@@ -1,4 +1,4 @@
-import { ActivitySquare, BarChart2, Compass, History, LayoutDashboard, LogOut, Scale, TreePine } from "lucide-react";
+import { ActivitySquare, BarChart2, Compass, History, LayoutDashboard, LogOut, Scale, Shield, TreePine } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { clearStoredAuth, getValidStoredAuth } from "../lib/auth";
@@ -16,6 +16,7 @@ export function Sidebar() {
 
     const isFeed = location.pathname.startsWith("/manager/feed") || location.pathname.includes("/manager/sessions/");
     const isAnalytics = location.pathname.startsWith("/manager/analytics");
+    const isRisk = location.pathname.startsWith("/manager/risk");
     const isScenarios = location.pathname.startsWith("/manager/scenarios");
     const isCoaching = location.pathname.startsWith("/manager/coaching");
     const isExplorer = location.pathname.startsWith("/manager/explorer");
@@ -54,14 +55,14 @@ export function Sidebar() {
                 </Link>
 
                 <Link
-                    to="/manager/scenarios"
-                    className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-200 text-sm ${isScenarios
+                    to="/manager/risk"
+                    className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-200 text-sm ${isRisk
                             ? "bg-accent-soft text-accent font-semibold"
                             : "text-muted hover:bg-white/40 font-medium"
                         }`}
                 >
-                    <ActivitySquare className="w-4.5 h-4.5 min-w-4.5" />
-                    Scenarios
+                    <Shield className="w-4.5 h-4.5 min-w-4.5" />
+                    Risk Intelligence
                 </Link>
 
                 <Link
@@ -73,6 +74,17 @@ export function Sidebar() {
                 >
                     <Scale className="w-4.5 h-4.5 min-w-4.5" />
                     Coaching
+                </Link>
+
+                <Link
+                    to="/manager/scenarios"
+                    className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-200 text-sm ${isScenarios
+                            ? "bg-accent-soft text-accent font-semibold"
+                            : "text-muted hover:bg-white/40 font-medium"
+                        }`}
+                >
+                    <ActivitySquare className="w-4.5 h-4.5 min-w-4.5" />
+                    Scenarios
                 </Link>
 
                 <Link

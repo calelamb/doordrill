@@ -133,6 +133,35 @@ export type RepInsightResponse = {
   data_summary: Record<string, unknown>;
 };
 
+export type RepRiskDetail = {
+  rep_id: string;
+  rep_name: string;
+  current_avg_score: number | null;
+  score_trend_slope: number | null;
+  score_volatility: number;
+  projected_score_10_sessions: number | null;
+  plateau_detected: boolean;
+  decline_detected: boolean;
+  breakthrough_detected: boolean;
+  stall_detected: boolean;
+  days_since_last_session: number | null;
+  most_vulnerable_category: string | null;
+  category_gap_vs_team: number | null;
+  risk_level: "high" | "medium" | "low";
+  risk_score: number;
+  session_count: number;
+  red_flag_count: number;
+};
+
+export type RepRiskDetailResponse = {
+  manager_id: string;
+  period: string;
+  generated_at: string;
+  reps: RepRiskDetail[];
+  team_avg_score: number | null;
+  team_category_averages: Record<string, number>;
+};
+
 export type SessionAnnotation = {
   turn_id: string;
   type: "strength" | "weakness";

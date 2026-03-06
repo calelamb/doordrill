@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowRight, Check, Copy, RefreshCcw, Sparkles, TrendingDown, TrendingUp } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, Copy, RefreshCcw, Sparkles, TrendingDown, TrendingUp } from "lucide-react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -15,10 +15,11 @@ import {
 import { RepRadarChart } from "../components/RepRadarChart";
 import { ChartSkeleton } from "../components/shared/ChartSkeleton";
 import { EmptyState } from "../components/shared/EmptyState";
+import { ScoreTrajectoryBar } from "../components/shared/ScoreTrajectoryBar";
 import { ScoreChip } from "../components/shared/ScoreChip";
 import { SkillChip } from "../components/shared/SkillChip";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
-import { fetchManagerFeed, fetchRepInsight, fetchRepProgress } from "../lib/api";
+import { fetchManagerFeed, fetchRepInsight, fetchRepProgress, fetchRepRiskDetail } from "../lib/api";
 import {
   CATEGORY_META,
   PASSING_SCORE,
@@ -30,7 +31,7 @@ import {
 } from "../lib/analytics";
 import { cardVariants, pageVariants } from "../lib/motion";
 import { resolvePeriodWindow } from "../lib/periods";
-import type { FeedItem, RepInsightResponse, RepProgress } from "../lib/types";
+import type { FeedItem, RepInsightResponse, RepProgress, RepRiskDetail } from "../lib/types";
 
 const PERIOD_OPTIONS = [
   { key: "7", label: "7D" },
@@ -84,6 +85,23 @@ function parseDrillRecommendation(recommendation: string): { scenarioSearch: str
   };
 }
 
+function formatTrajectoryScore(value: number | null | undefined): string {
+  if (typeof value !== "number") {
+    return "--";
+  }
+  return value.toFixed(1);
+}
+
+function volatilityLabel(value: number): string {
+  if (value < 0.45) {
+    return "low";
+  }
+  if (value < 1.1) {
+    return "moderate";
+  }
+  return "high";
+}
+
 function InsightSkeleton() {
   return (
     <div className="space-y-4">
@@ -123,6 +141,10 @@ function RepProgressSkeleton() {
       </motion.section>
 
       <motion.section variants={cardVariants}>
+        <ChartSkeleton heightClass="h-[160px]" className="rounded-[32px]" />
+      </motion.section>
+
+      <motion.section variants={cardVariants}>
         <ChartSkeleton heightClass="h-[320px]" className="rounded-[32px]" />
       </motion.section>
 
@@ -149,6 +171,7 @@ export function RepProgressPage() {
   const [period, setPeriod] = useState<PeriodKey>("30");
   const [progress, setProgress] = useState<RepProgress | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [riskDetail, setRiskDetail] = useState<RepRiskDetail | null>(null);
   const [insight, setInsight] = useState<RepInsightResponse | null>(null);
   const [insightLoading, setInsightLoading] = useState(true);
   const [insightError, setInsightError] = useState<string | null>(null);
@@ -202,9 +225,10 @@ export function RepProgressPage() {
     const requestId = ++coreRequestRef.current;
     setLoading(true);
     setError(null);
+    setRiskDetail(null);
     void loadInsight();
 
-    const [progressResult, feedResult] = await Promise.allSettled([
+    const [progressResult, feedResult, riskResult] = await Promise.allSettled([
       fetchRepProgress(managerId, repId, {
         days: periodWindow.current.spanDays,
         dateFrom: periodWindow.current.startInput,
@@ -217,13 +241,14 @@ export function RepProgressPage() {
         dateTo: periodWindow.current.endInput,
         limit: 500,
       }),
+      fetchRepRiskDetail(managerId, { period: String(periodWindow.current.spanDays) }),
     ]);
 
     if (coreRequestRef.current !== requestId) {
       return;
     }
 
-    const authFailure = [progressResult, feedResult].find(
+    const authFailure = [progressResult, feedResult, riskResult].find(
       (result) => result.status === "rejected" && isAuthError(result.reason)
     );
     if (authFailure) {
@@ -246,6 +271,11 @@ export function RepProgressPage() {
 
     setProgress(progressResult.value);
     setFeed(feedResult.value.filter((item) => item.rep_id === repId));
+    setRiskDetail(
+      riskResult.status === "fulfilled"
+        ? riskResult.value.reps.find((item) => item.rep_id === repId) ?? null
+        : null
+    );
     setLoading(false);
   }, [loadInsight, managerId, navigate, periodWindow.current.endInput, periodWindow.current.spanDays, periodWindow.current.startInput, periodWindow.previous.startInput, repId]);
 
@@ -384,6 +414,12 @@ export function RepProgressPage() {
     return Number((scores[scores.length - 1] - scores[0]).toFixed(2));
   }, [progress?.trend]);
 
+  const trajectoryCurrentScore = riskDetail?.current_avg_score ?? progress?.average_score ?? null;
+  const trajectoryProjectedScore = riskDetail?.projected_score_10_sessions ?? null;
+  const trajectorySlope = riskDetail?.score_trend_slope ?? null;
+  const trajectoryWarning =
+    typeof trajectoryProjectedScore === "number" && trajectoryProjectedScore < 6;
+
   const sessionRows = useMemo(() => {
     const feedBySessionId = new Map(feed.map((item) => [item.session_id, item]));
     return (progress?.latest_sessions ?? []).map((session, index, sessions) => {
@@ -512,6 +548,40 @@ export function RepProgressPage() {
             )}
           </motion.div>
         ))}
+      </motion.section>
+
+      <motion.section
+        variants={cardVariants}
+        className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+      >
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Score Trajectory</div>
+            <h2 className="mt-2 text-xl font-black tracking-tight text-ink">
+              {formatTrajectoryScore(trajectoryCurrentScore)} today → {formatTrajectoryScore(trajectoryProjectedScore)} projected
+            </h2>
+          </div>
+          {trajectoryWarning ? (
+            <div className="inline-flex items-center gap-2 rounded-full border border-red-200 bg-red-50/80 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] text-red-700">
+              <AlertTriangle className="h-4 w-4" />
+              Watch Trend
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-6">
+          <ScoreTrajectoryBar
+            currentScore={trajectoryCurrentScore}
+            projectedScore={trajectoryProjectedScore}
+            size="md"
+          />
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted">
+          <span>Trend: {trajectorySlope !== null ? `${trajectorySlope >= 0 ? "+" : ""}${trajectorySlope.toFixed(2)}/session` : "--"}</span>
+          <span>Volatility: {riskDetail ? volatilityLabel(riskDetail.score_volatility) : "--"}</span>
+          <span>Projection window: 10 sessions</span>
+        </div>
       </motion.section>
 
       <motion.section
