@@ -6,10 +6,27 @@ import { useNavigate } from "react-router-dom";
 import { FeedList } from "../components/FeedList";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
-import { fetchManagerAnalytics, fetchManagerFeed, fetchRepRiskDetail } from "../lib/api";
-import type { FeedItem, ManagerAnalytics, RepRiskDetail } from "../lib/types";
+import { dispatchFeedRefresh, FEED_REFRESH_EVENT, LEGACY_FEED_REFRESH_EVENT } from "../lib/feedEvents";
+import { fetchLiveSessions, fetchManagerAnalytics, fetchManagerFeed, fetchRepRiskDetail, getManagerLiveSessionsStreamUrl } from "../lib/api";
+import type { FeedItem, LiveSessionCard, LiveSessionsResponse, ManagerAnalytics, RepRiskDetail } from "../lib/types";
 
 type ReviewFilter = "all" | "reviewed" | "unreviewed";
+
+function formatElapsed(seconds: number): string {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes}:${String(remainingSeconds).padStart(2, "0")} elapsed`;
+}
+
+function formatStageLabel(stage: string | null | undefined): string {
+    if (!stage) {
+        return "Waiting for first turn";
+    }
+    return stage
+        .split("_")
+        .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+        .join(" ");
+}
 
 function averageScore(items: FeedItem[]): number | null {
     const scores = items.map((item) => item.overall_score).filter((score): score is number => typeof score === "number");
@@ -30,12 +47,50 @@ export function ManagerFeedPage() {
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [liveSnapshot, setLiveSnapshot] = useState<LiveSessionsResponse | null>(null);
+    const [liveLoading, setLiveLoading] = useState(true);
+    const [liveError, setLiveError] = useState<string | null>(null);
+    const [elapsedNow, setElapsedNow] = useState(() => Date.now());
     const [query, setQuery] = useState("");
     const [repFilter, setRepFilter] = useState("all");
     const [scenarioFilter, setScenarioFilter] = useState("all");
     const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
     const [startDate, setStartDate] = useState("");
     const [endDate, setEndDate] = useState("");
+
+    const updateLiveSnapshot = useCallback((next: LiveSessionsResponse) => {
+        setLiveSnapshot((current) => {
+            const currentIds = new Set(current?.live_sessions.map((session) => session.session_id) ?? []);
+            const nextIds = new Set(next.live_sessions.map((session) => session.session_id));
+            const sawEndedSession = currentIds.size > 0 && Array.from(currentIds).some((sessionId) => !nextIds.has(sessionId));
+            if (sawEndedSession) {
+                dispatchFeedRefresh();
+            }
+            return next;
+        });
+        setLiveLoading(false);
+        setLiveError(null);
+    }, []);
+
+    const loadLiveSessions = useCallback(async () => {
+        if (!managerId) {
+            setLiveSnapshot(null);
+            setLiveLoading(false);
+            return;
+        }
+        try {
+            const response = await fetchLiveSessions(managerId);
+            updateLiveSnapshot(response);
+        } catch (err) {
+            if (isAuthError(err)) {
+                clearStoredAuth();
+                navigate("/login", { replace: true });
+                return;
+            }
+            setLiveError(err instanceof Error ? err.message : "Failed to load live sessions");
+            setLiveLoading(false);
+        }
+    }, [managerId, navigate, updateLiveSnapshot]);
 
     const loadFeed = useCallback(async (silent = false) => {
         if (!managerId) {
@@ -91,6 +146,10 @@ export function ManagerFeedPage() {
     }, [loadFeed]);
 
     useEffect(() => {
+        void loadLiveSessions();
+    }, [loadLiveSessions]);
+
+    useEffect(() => {
         const intervalId = window.setInterval(() => {
             void loadFeed(true);
         }, 60_000);
@@ -98,13 +157,63 @@ export function ManagerFeedPage() {
         const refreshListener = () => {
             void loadFeed(true);
         };
-        window.addEventListener("manager-feed:refresh", refreshListener);
+        window.addEventListener(FEED_REFRESH_EVENT, refreshListener);
+        window.addEventListener(LEGACY_FEED_REFRESH_EVENT, refreshListener);
 
         return () => {
             window.clearInterval(intervalId);
-            window.removeEventListener("manager-feed:refresh", refreshListener);
+            window.removeEventListener(FEED_REFRESH_EVENT, refreshListener);
+            window.removeEventListener(LEGACY_FEED_REFRESH_EVENT, refreshListener);
         };
     }, [loadFeed]);
+
+    useEffect(() => {
+        const intervalId = window.setInterval(() => {
+            setElapsedNow(Date.now());
+        }, 1000);
+        return () => {
+            window.clearInterval(intervalId);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!managerId) {
+            return;
+        }
+
+        let isDisposed = false;
+        let eventSource: EventSource | null = null;
+
+        try {
+            eventSource = new EventSource(getManagerLiveSessionsStreamUrl(managerId));
+        } catch (err) {
+            setLiveError(err instanceof Error ? err.message : "Failed to connect live monitor");
+            return;
+        }
+
+        eventSource.onmessage = (event) => {
+            if (isDisposed) {
+                return;
+            }
+            try {
+                const payload = JSON.parse(event.data) as LiveSessionsResponse;
+                updateLiveSnapshot(payload);
+            } catch {
+                setLiveError("Received an invalid live session update");
+            }
+        };
+
+        eventSource.onerror = () => {
+            if (!isDisposed && eventSource?.readyState === EventSource.CLOSED) {
+                setLiveError("Live session stream disconnected");
+            }
+        };
+
+        return () => {
+            isDisposed = true;
+            eventSource?.close();
+        };
+    }, [managerId, updateLiveSnapshot]);
 
     const repOptions = useMemo(
         () => Array.from(new Set(feed.map((item) => item.rep_name ?? item.rep_id))).sort((a, b) => a.localeCompare(b)),
@@ -145,6 +254,17 @@ export function ManagerFeedPage() {
             completionRate: analytics?.completion_rate ?? null,
         };
     }, [analytics, feed]);
+
+    const liveSessions = liveSnapshot?.live_sessions ?? [];
+    const liveCheckedAtMs = liveSnapshot?.checked_at ? new Date(liveSnapshot.checked_at).getTime() : elapsedNow;
+    const liveSessionCountLabel = `${liveSessions.length} rep${liveSessions.length === 1 ? " is" : "s are"} drilling right now`;
+
+    const displayElapsedSeconds = useCallback((session: LiveSessionCard) => {
+        const offsetSeconds = Number.isFinite(liveCheckedAtMs)
+            ? Math.max(0, Math.floor((elapsedNow - liveCheckedAtMs) / 1000))
+            : 0;
+        return session.elapsed_seconds + offsetSeconds;
+    }, [elapsedNow, liveCheckedAtMs]);
 
     if (loading && !feed.length) {
         return (
@@ -195,6 +315,67 @@ export function ManagerFeedPage() {
                     </div>
                 ))}
             </section>
+
+            {liveLoading && !liveSnapshot ? (
+                <section className="mb-6 rounded-3xl border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
+                    <div className="h-4 w-28 animate-pulse rounded-full bg-white/45" />
+                    <div className="mt-4 h-12 animate-pulse rounded-2xl bg-white/35" />
+                </section>
+            ) : null}
+
+            {liveError ? (
+                <div className="mb-6 rounded-2xl border border-error/15 bg-error/[0.06] px-5 py-3.5 text-sm text-error">
+                    Live monitor unavailable: {liveError}
+                </div>
+            ) : null}
+
+            {liveSessions.length ? (
+                <motion.section
+                    className="mb-6 rounded-3xl border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.25, ease: "easeOut" }}
+                >
+                    <div className="flex flex-col gap-2 border-b border-white/30 pb-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-red-700">
+                                <span className="animate-pulse text-red-600" aria-hidden="true">●</span>
+                                Live Now
+                            </div>
+                            <p className="mt-2 text-lg font-semibold text-ink">{liveSessionCountLabel}</p>
+                        </div>
+                        <span className="text-xs text-muted">
+                            Snapshot {new Date(liveSnapshot?.checked_at ?? Date.now()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}
+                        </span>
+                    </div>
+
+                    <div className="mt-4 grid gap-3">
+                        {liveSessions.map((session) => (
+                            <div
+                                key={session.session_id}
+                                className="flex flex-col gap-3 rounded-2xl border border-white/30 bg-white/35 p-4 sm:flex-row sm:items-center sm:justify-between"
+                            >
+                                <div>
+                                    <p className="text-sm font-semibold text-ink">
+                                        {session.rep_name} {"\u2014"} {session.scenario_name} {"\u2014"} {formatElapsed(displayElapsedSeconds(session))}
+                                    </p>
+                                    <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-muted">
+                                        <span>Stage: <span className="font-semibold text-ink">{formatStageLabel(session.stage)}</span></span>
+                                        <span>{session.turn_count} turn{session.turn_count === 1 ? "" : "s"}</span>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => navigate(`/manager/sessions/${session.session_id}/live`)}
+                                    aria-label={`Watch ${session.rep_name} live session`}
+                                    className="inline-flex items-center justify-center rounded-full bg-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-hover"
+                                >
+                                    Watch Live →
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </motion.section>
+            ) : null}
 
             <section className="mb-6 rounded-3xl border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-ink">

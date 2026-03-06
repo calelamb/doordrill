@@ -8,6 +8,7 @@ import { AssignmentCreatePage } from "./pages/AssignmentCreatePage";
 import { CoachingLabPage } from "./pages/CoachingLabPage";
 import { ExplorerPage } from "./pages/ExplorerPage";
 import { LoginPage } from "./pages/LoginPage";
+import { LiveSessionPage } from "./pages/LiveSessionPage";
 import { ManagerReplayPage } from "./pages/ManagerReplayPage";
 import { RepProgressPage } from "./pages/RepProgressPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
@@ -51,6 +52,7 @@ export function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route element={<ProtectedLayout />}>
           <Route path="/manager/feed" element={<ManagerFeedPage />} />
+          <Route path="/manager/sessions/:id/live" element={<LiveSessionPage />} />
           <Route path="/manager/sessions/:id/replay" element={<ManagerReplayPage />} />
           <Route path="/manager/reps/:id/progress" element={<RepProgressPage />} />
           <Route path="/manager/analytics" element={<AnalyticsPage />} />

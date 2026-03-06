@@ -8,6 +8,8 @@ import type {
   CommandCenterResponse,
   ExplorerResponse,
   FeedItem,
+  LiveSessionsResponse,
+  LiveTranscriptResponse,
   ManagerAnalyticsOperations,
   ManagerActionLog,
   ManagerAnalytics,
@@ -273,6 +275,22 @@ export async function fetchReplay(managerId: string, sessionId: string): Promise
     session: detail.session,
     assignment: detail.assignment
   };
+}
+
+export async function fetchLiveSessions(managerId: string): Promise<LiveSessionsResponse> {
+  return requestJson<LiveSessionsResponse>(
+    `/manager/sessions/live?manager_id=${encodeURIComponent(managerId)}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchLiveTranscript(managerId: string, sessionId: string): Promise<LiveTranscriptResponse> {
+  return requestJson<LiveTranscriptResponse>(
+    `/manager/sessions/${encodeURIComponent(sessionId)}/live-transcript?manager_id=${encodeURIComponent(managerId)}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
 }
 
 export async function fetchRepInsight(
@@ -596,4 +614,17 @@ export async function fetchRepSession(repId: string, sessionId: string): Promise
 
 export function getRepSessionWsUrl(sessionId: string): string {
   return `${WS_BASE}/ws/sessions/${encodeURIComponent(sessionId)}`;
+}
+
+export function getManagerLiveSessionsStreamUrl(managerId: string): string {
+  const auth = getValidStoredAuth();
+  if (!auth) {
+    throw createAuthRequiredError();
+  }
+
+  const params = new URLSearchParams({
+    manager_id: managerId,
+    access_token: auth.access_token,
+  });
+  return `${API_BASE}/manager/sessions/live/stream?${params.toString()}`;
 }

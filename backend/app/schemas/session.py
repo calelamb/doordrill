@@ -43,6 +43,67 @@ class SessionReplayResponse(BaseModel):
     scenario: dict[str, Any] | None = None
 
 
+class TranscriptTurnResponse(BaseModel):
+    turn_id: str
+    turn_index: int
+    speaker: str
+    stage: str
+    text: str
+    started_at: str
+    ended_at: str
+
+
+class StageTimelineEntryResponse(BaseModel):
+    stage: str
+    entered_at: str
+    turn_index: int
+    speaker: str
+
+
+class LiveSessionCard(BaseModel):
+    session_id: str
+    rep_id: str
+    rep_name: str
+    scenario_id: str
+    scenario_name: str
+    scenario_difficulty: int
+    started_at: str
+    elapsed_seconds: int
+    stage: str | None = None
+    turn_count: int = 0
+
+
+class LiveSessionsResponse(BaseModel):
+    manager_id: str
+    live_sessions: list[LiveSessionCard] = Field(default_factory=list)
+    checked_at: str
+
+
+class LiveSessionRepResponse(BaseModel):
+    id: str
+    name: str
+
+
+class LiveSessionScenarioResponse(BaseModel):
+    id: str
+    name: str
+    difficulty: int
+
+
+class LiveSessionTranscriptResponse(BaseModel):
+    session_id: str
+    status: str
+    started_at: str | None = None
+    ended_at: str | None = None
+    elapsed_seconds: int = 0
+    stage: str | None = None
+    turn_count: int = 0
+    rep: LiveSessionRepResponse
+    scenario: LiveSessionScenarioResponse | None = None
+    turns: list[TranscriptTurnResponse] = Field(default_factory=list)
+    stage_timeline: list[StageTimelineEntryResponse] = Field(default_factory=list)
+
+
 class ManagerFeedItem(BaseModel):
     session_id: str
     rep_id: str

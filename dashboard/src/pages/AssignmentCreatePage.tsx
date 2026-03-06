@@ -9,6 +9,7 @@ import { SkillChip } from "../components/shared/SkillChip";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { normalizeCategoryKey, type AnalyticsCategoryKey } from "../lib/analytics";
 import { createManagerAssignment, fetchManagerTeam, fetchScenarios } from "../lib/api";
+import { dispatchFeedRefresh } from "../lib/feedEvents";
 import type { ManagerTeamMember, ScenarioSummary } from "../lib/types";
 
 type AssignmentPrefillState = {
@@ -157,7 +158,7 @@ export function AssignmentCreatePage() {
                 min_score_target: minScore ? Number(minScore) : undefined,
                 retry_policy: { max_attempts: maxAttempts ? Number(maxAttempts) : 2 },
             })));
-            window.dispatchEvent(new Event("manager-feed:refresh"));
+            dispatchFeedRefresh();
             navigate("/manager/feed");
         } catch (err) {
             if (isAuthError(err)) {

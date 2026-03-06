@@ -63,6 +63,13 @@ export type TranscriptTurn = {
   ended_at: string;
 };
 
+export type StageTimelineEntry = {
+  stage: string;
+  entered_at: string;
+  turn_index: number;
+  speaker: string;
+};
+
 export type ReplayResponse = {
   session_id: string;
   status: string;
@@ -97,12 +104,7 @@ export type ReplayResponse = {
     latency_ms: number;
     sequence: number;
   }>;
-  stage_timeline: Array<{
-    stage: string;
-    entered_at: string;
-    turn_index: number;
-    speaker: string;
-  }>;
+  stage_timeline: StageTimelineEntry[];
   transport_metrics: Record<string, number>;
   scorecard: null | {
     id: string;
@@ -118,6 +120,46 @@ export type ReplayResponse = {
   manager_reviews?: ManagerReview[];
   coaching_notes?: ManagerCoachingNote[];
   latest_coaching_note?: ManagerCoachingNote | null;
+};
+
+export type LiveSessionCard = {
+  session_id: string;
+  rep_id: string;
+  rep_name: string;
+  scenario_id: string;
+  scenario_name: string;
+  scenario_difficulty: number;
+  started_at: string;
+  elapsed_seconds: number;
+  stage: string | null;
+  turn_count: number;
+};
+
+export type LiveSessionsResponse = {
+  manager_id: string;
+  live_sessions: LiveSessionCard[];
+  checked_at: string;
+};
+
+export type LiveTranscriptResponse = {
+  session_id: string;
+  status: string;
+  started_at: string | null;
+  ended_at: string | null;
+  elapsed_seconds: number;
+  stage: string | null;
+  turn_count: number;
+  rep: {
+    id: string;
+    name: string;
+  };
+  scenario: {
+    id: string;
+    name: string;
+    difficulty: number;
+  } | null;
+  turns: TranscriptTurn[];
+  stage_timeline: StageTimelineEntry[];
 };
 
 export type RepInsightResponse = {

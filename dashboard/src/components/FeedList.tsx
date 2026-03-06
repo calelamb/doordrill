@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { AlertTriangle, CalendarDays, CheckCircle2, CheckSquare, Clock3, Flag, Users } from "lucide-react";
 
 import { getValidStoredAuth } from "../lib/auth";
+import { dispatchFeedRefresh } from "../lib/feedEvents";
 import { fetchManagerSessionDetail, submitOverride } from "../lib/api";
 import type { FeedItem, RepRiskDetail } from "../lib/types";
 import { EmptyState } from "./shared/EmptyState";
@@ -58,7 +59,7 @@ export function FeedList({ items, activeSessionId, riskByRepId, onSelect }: Prop
         })
       );
       setSelectedIds([]);
-      window.dispatchEvent(new Event("manager-feed:refresh"));
+      dispatchFeedRefresh();
     } catch (error) {
       setBatchError(error instanceof Error ? error.message : "Failed to mark selected sessions reviewed");
     } finally {

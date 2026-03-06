@@ -113,6 +113,79 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     assert any(item["session_id"] == session_id for item in filtered.json()["items"])
 
 
+def test_live_session_endpoints(client, seed_org):
+    assignment = _create_assignment(client, seed_org)
+    session_resp = client.post(
+        "/rep/sessions",
+        json={
+            "assignment_id": assignment["id"],
+            "rep_id": seed_org["rep_id"],
+            "scenario_id": seed_org["scenario_id"],
+        },
+    )
+    assert session_resp.status_code == 200
+    session_id = session_resp.json()["id"]
+    manager_headers = {"x-user-id": seed_org["manager_id"], "x-user-role": "manager"}
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        ws.receive_json()
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 1,
+                "payload": {
+                    "transcript_hint": "I'm with Acme Pest Control and can lower your rate with broader coverage today.",
+                    "codec": "opus",
+                },
+            }
+        )
+
+        for _ in range(80):
+            message = ws.receive_json()
+            if message["type"] == "server.turn.committed":
+                break
+
+        live_resp = client.get(
+            "/manager/sessions/live",
+            params={"manager_id": seed_org["manager_id"]},
+            headers=manager_headers,
+        )
+        assert live_resp.status_code == 200
+        live_body = live_resp.json()
+        live_card = next(item for item in live_body["live_sessions"] if item["session_id"] == session_id)
+        assert live_card["rep_name"] == "Ray Rep"
+        assert live_card["scenario_name"] == "Skeptical Homeowner"
+        assert live_card["elapsed_seconds"] >= 0
+        assert live_card["turn_count"] >= 1
+
+        transcript_resp = client.get(
+            f"/manager/sessions/{session_id}/live-transcript",
+            params={"manager_id": seed_org["manager_id"]},
+            headers=manager_headers,
+        )
+        assert transcript_resp.status_code == 200
+        transcript_body = transcript_resp.json()
+        assert transcript_body["status"] == "active"
+        assert transcript_body["rep"]["id"] == seed_org["rep_id"]
+        assert transcript_body["turns"]
+        assert transcript_body["stage_timeline"]
+
+        ws.send_json({"type": "client.session.end", "sequence": 2, "payload": {}})
+
+    for _ in range(20):
+        live_after = client.get(
+            "/manager/sessions/live",
+            params={"manager_id": seed_org["manager_id"]},
+            headers=manager_headers,
+        )
+        assert live_after.status_code == 200
+        if session_id not in {item["session_id"] for item in live_after.json()["live_sessions"]}:
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("session remained in live sessions after ending")
+
+
 def test_manager_override_audit(client, seed_org):
     assignment = _create_assignment(client, seed_org)
     session_id = _run_session(client, seed_org, assignment["id"])

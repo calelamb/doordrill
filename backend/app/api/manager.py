@@ -1,12 +1,16 @@
+import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+import json
 from statistics import pstdev
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session
 
-from app.core.auth import Actor, require_manager
+from app.core.auth import Actor, require_manager, resolve_ws_actor_with_query
 from app.db.session import get_db
 from app.models.analytics import AnalyticsFactAlert
 from app.models.assignment import Assignment
@@ -40,7 +44,13 @@ from app.schemas.scorecard import (
     ManagerReviewResponse,
     ScorecardOverrideRequest,
 )
-from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
+from app.schemas.session import (
+    LiveSessionCard,
+    LiveSessionsResponse,
+    LiveSessionTranscriptResponse,
+    ManagerFeedResponse,
+    SessionReplayResponse,
+)
 from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.manager_action_service import ManagerActionService
 from app.services.manager_ai_coaching_service import (
@@ -150,6 +160,11 @@ def _ensure_actor_matches_manager(actor: Actor, manager_id: str) -> None:
         raise HTTPException(status_code=403, detail="manager can only access their own AI insights")
 
 
+def _ensure_actor_matches_manager_scope(actor: Actor, manager_id: str, detail: str) -> None:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail=detail)
+
+
 def _normalize_category_scores(category_scores: dict | None) -> dict[str, float]:
     normalized: dict[str, float] = {}
     for raw_key, category_key in RUBRIC_CATEGORY_KEYS.items():
@@ -177,6 +192,127 @@ def _clamp_score(value: float) -> float:
 
 def _volatility_label_score(value: float) -> float:
     return round(value, 2) if value > 0 else 0.0
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _serialize_transcript_turns(turns: list[SessionTurn]) -> list[dict[str, Any]]:
+    return [
+        {
+            "turn_id": turn.id,
+            "turn_index": turn.turn_index,
+            "speaker": turn.speaker.value,
+            "stage": turn.stage,
+            "text": turn.text,
+            "started_at": turn.started_at.isoformat(),
+            "ended_at": turn.ended_at.isoformat(),
+        }
+        for turn in turns
+    ]
+
+
+def _build_stage_timeline(turns: list[SessionTurn]) -> list[dict[str, Any]]:
+    stage_timeline: list[dict[str, Any]] = []
+    last_stage = None
+    for turn in turns:
+        if turn.stage == last_stage:
+            continue
+        stage_timeline.append(
+            {
+                "stage": turn.stage,
+                "entered_at": turn.started_at.isoformat(),
+                "turn_index": turn.turn_index,
+                "speaker": turn.speaker.value,
+            }
+        )
+        last_stage = turn.stage
+    return stage_timeline
+
+
+def _get_authorized_manager(db: Session, actor: Actor, manager_id: str, detail: str) -> User:
+    _ensure_actor_matches_manager_scope(actor, manager_id, detail)
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    return manager
+
+
+def _get_live_sessions_payload(db: Session, manager_id: str, actor: Actor) -> LiveSessionsResponse:
+    manager = _get_authorized_manager(db, actor, manager_id, "manager can only access their own live sessions")
+    checked_at = datetime.now(timezone.utc)
+    if not manager.team_id:
+        return LiveSessionsResponse(manager_id=manager_id, live_sessions=[], checked_at=checked_at.isoformat())
+
+    turn_stats_subquery = (
+        select(
+            SessionTurn.session_id.label("session_id"),
+            func.count(SessionTurn.id).label("turn_count"),
+            func.max(SessionTurn.turn_index).label("max_turn_index"),
+        )
+        .group_by(SessionTurn.session_id)
+        .subquery()
+    )
+    latest_stage_subquery = (
+        select(
+            SessionTurn.session_id.label("session_id"),
+            SessionTurn.stage.label("stage"),
+        )
+        .join(
+            turn_stats_subquery,
+            and_(
+                turn_stats_subquery.c.session_id == SessionTurn.session_id,
+                turn_stats_subquery.c.max_turn_index == SessionTurn.turn_index,
+            ),
+        )
+        .subquery()
+    )
+
+    rows = db.execute(
+        select(
+            DrillSession,
+            User.name.label("rep_name"),
+            Scenario.name.label("scenario_name"),
+            Scenario.difficulty.label("scenario_difficulty"),
+            turn_stats_subquery.c.turn_count,
+            latest_stage_subquery.c.stage,
+        )
+        .join(User, User.id == DrillSession.rep_id)
+        .join(Scenario, Scenario.id == DrillSession.scenario_id)
+        .outerjoin(turn_stats_subquery, turn_stats_subquery.c.session_id == DrillSession.id)
+        .outerjoin(latest_stage_subquery, latest_stage_subquery.c.session_id == DrillSession.id)
+        .where(
+            DrillSession.status == SessionStatus.ACTIVE,
+            User.role == UserRole.REP,
+            User.team_id == manager.team_id,
+        )
+        .order_by(DrillSession.started_at.desc())
+    ).all()
+
+    live_sessions = [
+        LiveSessionCard(
+            session_id=session.id,
+            rep_id=session.rep_id,
+            rep_name=rep_name,
+            scenario_id=session.scenario_id,
+            scenario_name=scenario_name,
+            scenario_difficulty=scenario_difficulty,
+            started_at=(_as_utc(session.started_at) or checked_at).isoformat(),
+            elapsed_seconds=max(0, int((checked_at - (_as_utc(session.started_at) or checked_at)).total_seconds())),
+            stage=stage,
+            turn_count=int(turn_count or 0),
+        )
+        for session, rep_name, scenario_name, scenario_difficulty, turn_count, stage in rows
+    ]
+    return LiveSessionsResponse(
+        manager_id=manager_id,
+        live_sessions=live_sessions,
+        checked_at=checked_at.isoformat(),
+    )
 
 
 @router.get("/team")
@@ -301,88 +437,6 @@ def list_manager_sessions(
             }
             for session, assignment, scorecard in rows
         ]
-    }
-
-
-@router.get("/sessions/{session_id}")
-def get_manager_session_detail(
-    session_id: str,
-    actor: Actor = Depends(require_manager),
-    db: Session = Depends(get_db),
-) -> dict:
-    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
-    if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
-
-    rep = _get_user_or_404(db, session.rep_id, "rep")
-    _ensure_same_org(actor, rep.org_id)
-    assignment = db.scalar(select(Assignment).where(Assignment.id == session.assignment_id))
-    scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
-
-    return {
-        "session": {
-            "id": session.id,
-            "assignment_id": session.assignment_id,
-            "rep_id": session.rep_id,
-            "scenario_id": session.scenario_id,
-            "status": session.status.value,
-            "started_at": session.started_at.isoformat() if session.started_at else None,
-            "ended_at": session.ended_at.isoformat() if session.ended_at else None,
-            "duration_seconds": session.duration_seconds,
-        },
-        "assignment": (
-            {
-                "id": assignment.id,
-                "status": assignment.status.value,
-                "due_at": assignment.due_at.isoformat() if assignment.due_at else None,
-                "min_score_target": assignment.min_score_target,
-                "retry_policy": assignment.retry_policy,
-            }
-            if assignment
-            else None
-        ),
-        "scorecard": (
-            {
-                "id": scorecard.id,
-                "overall_score": scorecard.overall_score,
-                "category_scores": scorecard.category_scores,
-                "highlights": scorecard.highlights,
-                "ai_summary": scorecard.ai_summary,
-                "evidence_turn_ids": scorecard.evidence_turn_ids,
-                "weakness_tags": scorecard.weakness_tags,
-            }
-            if scorecard
-            else None
-        ),
-    }
-
-
-@router.get("/sessions/{session_id}/audio")
-def get_manager_session_audio(
-    session_id: str,
-    actor: Actor = Depends(require_manager),
-    db: Session = Depends(get_db),
-) -> dict:
-    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
-    if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    rep = _get_user_or_404(db, session.rep_id, "rep")
-    _ensure_same_org(actor, rep.org_id)
-
-    artifact = db.scalar(
-        select(SessionArtifact)
-        .where(SessionArtifact.session_id == session_id, SessionArtifact.artifact_type == "audio")
-        .order_by(SessionArtifact.created_at.desc())
-    )
-    if artifact is None:
-        raise HTTPException(status_code=404, detail="audio artifact not found")
-
-    return {
-        "session_id": session_id,
-        "artifact_id": artifact.id,
-        "storage_key": artifact.storage_key,
-        "url": storage_service.get_presigned_url(artifact.storage_key),
-        "metadata": artifact.metadata_json,
     }
 
 
@@ -1329,6 +1383,178 @@ def get_manager_metric_definitions(
     return management_analytics_service.get_metric_definitions(db, manager_id=manager_id)
 
 
+@router.get("/sessions/live", response_model=LiveSessionsResponse)
+def get_live_sessions(
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> LiveSessionsResponse:
+    return _get_live_sessions_payload(db, manager_id, actor)
+
+
+@router.get("/sessions/live/stream")
+async def stream_live_sessions(
+    request: Request,
+    manager_id: str = Query(...),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    actor = resolve_ws_actor_with_query(request.headers, request.query_params, db)
+    if actor is None:
+        raise HTTPException(status_code=401, detail="missing authentication")
+    if actor.role not in {"manager", "admin"}:
+        raise HTTPException(status_code=403, detail="manager role required")
+
+    _get_authorized_manager(db, actor, manager_id, "manager can only stream their own live sessions")
+
+    async def event_generator():
+        while True:
+            if await request.is_disconnected():
+                break
+            db.rollback()
+            payload = _get_live_sessions_payload(db, manager_id, actor)
+            yield f"data: {json.dumps(payload.model_dump(mode='json'))}\n\n"
+            await asyncio.sleep(5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/sessions/{session_id}/live-transcript", response_model=LiveSessionTranscriptResponse)
+def get_live_transcript(
+    session_id: str,
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> LiveSessionTranscriptResponse:
+    manager = _get_authorized_manager(db, actor, manager_id, "manager can only access their own live sessions")
+    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    rep = _get_user_or_404(db, session.rep_id, "rep")
+    _ensure_same_org(actor, rep.org_id)
+    if manager.team_id and actor.role == "manager" and rep.team_id != manager.team_id:
+        raise HTTPException(status_code=403, detail="session does not belong to this manager's team")
+
+    scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
+    turns = db.scalars(
+        select(SessionTurn).where(SessionTurn.session_id == session_id).order_by(SessionTurn.turn_index.asc())
+    ).all()
+    checked_at = datetime.now(timezone.utc)
+    started_at = _as_utc(session.started_at)
+    ended_at = _as_utc(session.ended_at) or checked_at
+
+    return LiveSessionTranscriptResponse(
+        session_id=session.id,
+        status=session.status.value,
+        started_at=started_at.isoformat() if started_at else None,
+        ended_at=ended_at.isoformat() if session.ended_at else None,
+        elapsed_seconds=max(0, int((ended_at - started_at).total_seconds())) if started_at else 0,
+        stage=turns[-1].stage if turns else None,
+        turn_count=len(turns),
+        rep={"id": rep.id, "name": rep.name},
+        scenario=(
+            {
+                "id": scenario.id,
+                "name": scenario.name,
+                "difficulty": scenario.difficulty,
+            }
+            if scenario
+            else None
+        ),
+        turns=_serialize_transcript_turns(turns),
+        stage_timeline=_build_stage_timeline(turns),
+    )
+
+
+@router.get("/sessions/{session_id}")
+def get_manager_session_detail(
+    session_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    rep = _get_user_or_404(db, session.rep_id, "rep")
+    _ensure_same_org(actor, rep.org_id)
+    assignment = db.scalar(select(Assignment).where(Assignment.id == session.assignment_id))
+    scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
+
+    return {
+        "session": {
+            "id": session.id,
+            "assignment_id": session.assignment_id,
+            "rep_id": session.rep_id,
+            "scenario_id": session.scenario_id,
+            "status": session.status.value,
+            "started_at": session.started_at.isoformat() if session.started_at else None,
+            "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+            "duration_seconds": session.duration_seconds,
+        },
+        "assignment": (
+            {
+                "id": assignment.id,
+                "status": assignment.status.value,
+                "due_at": assignment.due_at.isoformat() if assignment.due_at else None,
+                "min_score_target": assignment.min_score_target,
+                "retry_policy": assignment.retry_policy,
+            }
+            if assignment
+            else None
+        ),
+        "scorecard": (
+            {
+                "id": scorecard.id,
+                "overall_score": scorecard.overall_score,
+                "category_scores": scorecard.category_scores,
+                "highlights": scorecard.highlights,
+                "ai_summary": scorecard.ai_summary,
+                "evidence_turn_ids": scorecard.evidence_turn_ids,
+                "weakness_tags": scorecard.weakness_tags,
+            }
+            if scorecard
+            else None
+        ),
+    }
+
+
+@router.get("/sessions/{session_id}/audio")
+def get_manager_session_audio(
+    session_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    rep = _get_user_or_404(db, session.rep_id, "rep")
+    _ensure_same_org(actor, rep.org_id)
+
+    artifact = db.scalar(
+        select(SessionArtifact)
+        .where(SessionArtifact.session_id == session_id, SessionArtifact.artifact_type == "audio")
+        .order_by(SessionArtifact.created_at.desc())
+    )
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="audio artifact not found")
+
+    return {
+        "session_id": session_id,
+        "artifact_id": artifact.id,
+        "storage_key": artifact.storage_key,
+        "url": storage_service.get_presigned_url(artifact.storage_key),
+        "metadata": artifact.metadata_json,
+    }
+
+
 @router.get("/sessions/{session_id}/replay", response_model=SessionReplayResponse)
 def get_session_replay(
     session_id: str,
@@ -1368,37 +1594,13 @@ def get_session_replay(
         .order_by(SessionEvent.event_ts.asc())
     ).all()
 
-    transcript_turns = [
-        {
-            "turn_id": t.id,
-            "turn_index": t.turn_index,
-            "speaker": t.speaker.value,
-            "stage": t.stage,
-            "text": t.text,
-            "started_at": t.started_at.isoformat(),
-            "ended_at": t.ended_at.isoformat(),
-        }
-        for t in turns
-    ]
+    transcript_turns = _serialize_transcript_turns(turns)
     objection_timeline = [
         {"turn_id": t.id, "turn_index": t.turn_index, "objection_tags": t.objection_tags}
         for t in turns
         if t.objection_tags
     ]
-
-    stage_timeline: list[dict] = []
-    last_stage = None
-    for turn in turns:
-        if turn.stage != last_stage:
-            stage_timeline.append(
-                {
-                    "stage": turn.stage,
-                    "entered_at": turn.started_at.isoformat(),
-                    "turn_index": turn.turn_index,
-                    "speaker": turn.speaker.value,
-                }
-            )
-            last_stage = turn.stage
+    stage_timeline = _build_stage_timeline(turns)
 
     total_audio_duration_ms = 0
     total_audio_frames = 0

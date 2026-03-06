@@ -1,18 +1,22 @@
+import { useEffect, useState } from "react";
 import { ActivitySquare, BarChart2, Compass, History, LayoutDashboard, LogOut, Scale, Shield, TreePine } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { clearStoredAuth, getValidStoredAuth } from "../lib/auth";
+import { fetchLiveSessions } from "../lib/api";
 
 export function Sidebar() {
     const location = useLocation();
     const navigate = useNavigate();
     const auth = getValidStoredAuth();
     const user = auth?.user;
+    const managerId = user?.id ?? "";
     const initials = user?.name
         ?.split(" ")
         .map((chunk) => chunk[0]?.toUpperCase())
         .slice(0, 2)
         .join("") || "MG";
+    const [liveCount, setLiveCount] = useState(0);
 
     const isFeed = location.pathname.startsWith("/manager/feed") || location.pathname.includes("/manager/sessions/");
     const isAnalytics = location.pathname.startsWith("/manager/analytics");
@@ -21,6 +25,37 @@ export function Sidebar() {
     const isCoaching = location.pathname.startsWith("/manager/coaching");
     const isExplorer = location.pathname.startsWith("/manager/explorer");
     const isActions = location.pathname.startsWith("/manager/actions");
+
+    useEffect(() => {
+        if (!managerId) {
+            setLiveCount(0);
+            return;
+        }
+
+        let cancelled = false;
+        const loadLiveCount = async () => {
+            try {
+                const response = await fetchLiveSessions(managerId);
+                if (!cancelled) {
+                    setLiveCount(response.live_sessions.length);
+                }
+            } catch {
+                if (!cancelled) {
+                    setLiveCount(0);
+                }
+            }
+        };
+
+        void loadLiveCount();
+        const intervalId = window.setInterval(() => {
+            void loadLiveCount();
+        }, 30_000);
+
+        return () => {
+            cancelled = true;
+            window.clearInterval(intervalId);
+        };
+    }, [managerId]);
 
     return (
         <aside className="w-[220px] shrink-0 bg-white/30 backdrop-blur-2xl border-r border-white/20 h-screen sticky top-0 flex flex-col">
@@ -40,7 +75,19 @@ export function Sidebar() {
                         }`}
                 >
                     <LayoutDashboard className="w-4.5 h-4.5 min-w-4.5" />
-                    Feed
+                    <span className="flex items-center gap-2">
+                        Feed
+                        {liveCount > 1 ? (
+                            <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1.5 text-[10px] font-bold text-white">
+                                {liveCount}
+                            </span>
+                        ) : null}
+                        {liveCount === 1 ? (
+                            <span className="text-[10px] text-red-600 animate-pulse" aria-hidden="true">
+                                ●
+                            </span>
+                        ) : null}
+                    </span>
                 </Link>
 
                 <Link
