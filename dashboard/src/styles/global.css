@@ -83,16 +83,30 @@ body::after {
   50% { transform: translate(40px, -50px) scale(1.08); }
 }
 
-/* Reset form elements so Tailwind classes take full control */
-input,
-textarea,
-button {
-  border: none;
-  border-radius: 0;
-  padding: 0;
+/* Keep native form controls predictable without overriding utility classes. */
+:where(input, textarea, button) {
   font: inherit;
-  background: none;
   color: inherit;
+}
+
+input {
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+input::-ms-clear,
+input::-ms-reveal {
+  display: none;
+}
+
+input[type="email"]::-webkit-contacts-auto-fill-button,
+input[type="email"]::-webkit-credentials-auto-fill-button,
+input[type="password"]::-webkit-credentials-auto-fill-button {
+  visibility: hidden;
+  display: none !important;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
 }
 
 button {

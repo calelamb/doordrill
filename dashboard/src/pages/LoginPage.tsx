@@ -100,7 +100,7 @@ export function LoginPage() {
                   required
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  className="w-full rounded-2xl border border-white/35 bg-white/60 py-3 pl-11 pr-4 text-sm text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
+                  className="w-full appearance-none rounded-2xl border border-white/35 bg-white/60 py-3 pl-12 pr-12 text-sm text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
                   placeholder="manager@company.com"
                 />
               </div>
@@ -117,7 +117,7 @@ export function LoginPage() {
                   minLength={8}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  className="w-full rounded-2xl border border-white/35 bg-white/60 py-3 pl-11 pr-4 text-sm text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
+                  className="w-full appearance-none rounded-2xl border border-white/35 bg-white/60 py-3 pl-12 pr-12 text-sm text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
                   placeholder="Minimum 8 characters"
                 />
               </div>
