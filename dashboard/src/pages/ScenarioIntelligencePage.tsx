@@ -38,6 +38,15 @@ export function ScenarioIntelligencePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  function openReplay(sessionId?: string | null, turnId?: string | null) {
+    if (!sessionId) {
+      return;
+    }
+    const params = new URLSearchParams();
+    if (turnId) params.set("turnId", turnId);
+    navigate(`/manager/sessions/${sessionId}/replay${params.toString() ? `?${params.toString()}` : ""}`);
+  }
+
   const loadData = useCallback(async () => {
     if (!managerId) return;
     setLoading(true);
@@ -120,11 +129,27 @@ export function ScenarioIntelligencePage() {
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Strongest Scenario</div>
           <div className="mt-3 text-xl font-bold text-ink">{strongestScenario?.scenario_name ?? "--"}</div>
           <div className="mt-2 text-sm text-muted">Avg {strongestScenario?.average_score?.toFixed(1) ?? "--"} · Pass {(strongestScenario?.pass_rate ?? 0) * 100}%</div>
+          {strongestScenario?.sample_session_id ? (
+            <button
+              onClick={() => openReplay(strongestScenario.sample_session_id, strongestScenario.focus_turn_id)}
+              className="mt-3 rounded-full border border-white/35 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-ink transition hover:bg-white/85"
+            >
+              Open evidence
+            </button>
+          ) : null}
         </div>
         <div className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Most Punishing</div>
           <div className="mt-3 text-xl font-bold text-ink">{toughestScenario?.scenario_name ?? "--"}</div>
           <div className="mt-2 text-sm text-muted">Difficulty {toughestScenario?.difficulty ?? "--"} · Pass {Math.round((toughestScenario?.pass_rate ?? 0) * 100)}%</div>
+          {toughestScenario?.sample_session_id ? (
+            <button
+              onClick={() => openReplay(toughestScenario.sample_session_id, toughestScenario.focus_turn_id)}
+              className="mt-3 rounded-full border border-white/35 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-ink transition hover:bg-white/85"
+            >
+              Open evidence
+            </button>
+          ) : null}
         </div>
         <div className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
           <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Scenario Volume</div>
@@ -227,6 +252,14 @@ export function ScenarioIntelligencePage() {
                   </div>
                 </div>
               </div>
+              {scenario.sample_session_id ? (
+                <button
+                  onClick={() => openReplay(scenario.sample_session_id, scenario.focus_turn_id)}
+                  className="mt-3 rounded-full border border-white/35 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-ink transition hover:bg-white/85"
+                >
+                  Replay evidence
+                </button>
+              ) : null}
             </div>
           ))}
         </div>

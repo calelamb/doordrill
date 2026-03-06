@@ -260,6 +260,7 @@ export type AlertItem = {
   rep_name?: string | null;
   session_id?: string | null;
   scenario_id?: string | null;
+  focus_turn_id?: string | null;
 };
 
 export type CommandCenterResponse = {
@@ -298,6 +299,8 @@ export type CommandCenterResponse = {
     pass_count: number;
     average_score: number | null;
     pass_rate: number;
+    sample_session_id?: string | null;
+    focus_turn_id?: string | null;
   }>;
   rep_risk_matrix: Array<{
     rep_id: string;
@@ -310,12 +313,25 @@ export type CommandCenterResponse = {
     unreviewed_scored_sessions: number;
     risk_level: "high" | "medium" | "low";
     risk_score: number;
+    session_id?: string | null;
+    focus_turn_id?: string | null;
   }>;
   weakest_categories: Array<{
     category: string;
     average_score: number;
+    session_id?: string | null;
+    focus_turn_id?: string | null;
   }>;
   alerts_preview: AlertItem[];
+  _meta?: {
+    query_name: string;
+    cache_status: string;
+    generated_at: string;
+    cached_at: string | null;
+    analytics_last_refresh_at: string | null;
+    freshness_seconds: number | null;
+    query_duration_ms: number;
+  };
 };
 
 export type ScenarioIntelligenceResponse = {
@@ -336,6 +352,8 @@ export type ScenarioIntelligenceResponse = {
     improvement_delta: number | null;
     top_weakness_tags: string[];
     top_objection_tags: string[];
+    sample_session_id?: string | null;
+    focus_turn_id?: string | null;
   }>;
   difficulty_bands: Array<{
     difficulty: number;
@@ -361,15 +379,23 @@ export type CoachingAnalyticsResponse = {
     review_count: number;
     override_rate: number;
     average_override_delta: number | null;
+    calibration_drift_score?: number | null;
+    intervention_improved_rate?: number | null;
+    retry_uplift_avg?: number | null;
+    coached_retry_uplift_avg?: number | null;
   };
   coaching_uplift: Array<{
     rep_id: string;
     rep_name: string;
     session_id: string;
+    focus_turn_id?: string | null;
+    next_session_id?: string | null;
     scenario_name: string;
     before_score: number;
     after_score: number | null;
     delta: number | null;
+    outcome?: string;
+    visible_to_rep?: boolean;
     note: string;
     weakness_tags: string[];
     created_at: string;
@@ -378,6 +404,9 @@ export type CoachingAnalyticsResponse = {
     tag: string;
     delta: number;
     sample_size: number;
+    improved_count?: number;
+    flat_count?: number;
+    regressed_count?: number;
   }>;
   manager_calibration: Array<{
     reviewer_id: string;
@@ -385,6 +414,8 @@ export type CoachingAnalyticsResponse = {
     review_count: number;
     override_count: number;
     average_override_delta: number | null;
+    absolute_average_delta?: number | null;
+    bias_direction?: string;
     harsh_adjustments: number;
     lenient_adjustments: number;
   }>;
@@ -393,14 +424,49 @@ export type CoachingAnalyticsResponse = {
     review_count: number;
     coaching_note_count: number;
   }>;
+  calibration_drift_timeline?: Array<{
+    date: string;
+    review_count: number;
+    average_delta: number | null;
+    average_absolute_delta: number | null;
+  }>;
+  retry_impact?: Array<{
+    rep_id: string;
+    rep_name: string;
+    scenario_id: string;
+    scenario_name: string;
+    from_session_id: string;
+    to_session_id: string;
+    before_score: number;
+    after_score: number;
+    delta: number;
+    coached_between_attempts: boolean;
+    days_between: number | null;
+  }>;
+  intervention_segments?: Array<{
+    visibility: string;
+    outcome: string;
+    count: number;
+  }>;
+  score_drift_by_scenario?: Array<{
+    scenario_id: string;
+    scenario_name: string;
+    review_count: number;
+    average_delta: number | null;
+    average_absolute_delta: number | null;
+  }>;
   recent_notes: Array<{
     id: string;
     rep_id: string;
     rep_name: string;
+    session_id?: string;
+    focus_turn_id?: string | null;
     scenario_name: string;
     note: string;
     visible_to_rep: boolean;
     weakness_tags: string[];
+    delta?: number | null;
+    outcome?: string;
     created_at: string;
   }>;
 };
@@ -429,6 +495,7 @@ export type ExplorerResponse = {
     transcript_preview: string;
     assignment_status: string;
     session_status: string;
+    focus_turn_id?: string | null;
   }>;
 };
 

@@ -260,6 +260,21 @@ export async function createFollowup(
   );
 }
 
+export async function createCoachingNote(
+  managerId: string,
+  scorecardId: string,
+  payload: { note: string; visible_to_rep?: boolean; weakness_tags?: string[] }
+): Promise<void> {
+  await requestJson(
+    `/manager/scorecards/${encodeURIComponent(scorecardId)}/coaching-notes`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    { userId: managerId, role: "manager" }
+  );
+}
+
 export async function fetchManagerAnalytics(managerId: string): Promise<ManagerAnalytics> {
   return requestJson<ManagerAnalytics>(
     `/manager/analytics?manager_id=${encodeURIComponent(managerId)}`,

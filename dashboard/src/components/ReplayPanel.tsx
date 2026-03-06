@@ -14,7 +14,7 @@ import {
   Zap,
 } from "lucide-react";
 
-import { createFollowup, submitOverride } from "../lib/api";
+import { createCoachingNote, createFollowup, submitOverride } from "../lib/api";
 import type { CategoryScoreValue, ReplayResponse, TranscriptTurn } from "../lib/types";
 import { EmptyState } from "./shared/EmptyState";
 import { ScoreChip } from "./shared/ScoreChip";
@@ -23,6 +23,8 @@ type Props = {
   managerId: string;
   replay: ReplayResponse | null;
   onActionDone: () => Promise<void>;
+  focusTurnId?: string | null;
+  focusCategory?: string | null;
 };
 
 const CATEGORY_META = [
@@ -88,8 +90,9 @@ function buildTurnTimeline(turns: TranscriptTurn[]): TimelineTurn[] {
   });
 }
 
-export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
+export function ReplayPanel({ managerId, replay, onActionDone, focusTurnId, focusCategory }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const turnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [overrideScore, setOverrideScore] = useState("");
   const [overrideReason, setOverrideReason] = useState<UiReasonCode>("grading_error");
   const [reviewNotes, setReviewNotes] = useState("");
@@ -129,6 +132,7 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
     }
     return { strong, improve };
   }, [replay?.scorecard?.highlights]);
+  const evidenceTurnIds = useMemo(() => new Set(replay?.scorecard?.evidence_turn_ids ?? []), [replay?.scorecard?.evidence_turn_ids]);
 
   const interruptedTurnIds = useMemo(() => {
     const flagged = new Set<string>();
@@ -160,6 +164,42 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
       };
     });
   }, [replay?.scorecard?.category_scores, timelineTurns]);
+  const criticalMoments = useMemo(() => {
+    const moments: Array<{
+      id: string;
+      label: string;
+      note: string;
+      turnId: string | null;
+      tone: "strong" | "improve" | "evidence";
+      categoryKey?: string;
+    }> = [];
+
+    for (const item of replay?.scorecard?.highlights ?? []) {
+      moments.push({
+        id: `highlight-${item.turn_id ?? item.note}`,
+        label: item.type === "strong" ? "Strong moment" : "Coach this",
+        note: item.note,
+        turnId: item.turn_id ?? null,
+        tone: item.type === "strong" ? "strong" : "improve",
+      });
+    }
+
+    for (const category of categories) {
+      if (!category.evidenceTurnIds.length) {
+        continue;
+      }
+      moments.push({
+        id: `evidence-${category.key}`,
+        label: `${category.label} evidence`,
+        note: category.evidenceQuote || category.rationale || "Evidence linked from grading rationale.",
+        turnId: category.evidenceTurnIds[0] ?? null,
+        tone: "evidence",
+        categoryKey: category.key,
+      });
+    }
+
+    return moments.slice(0, 10);
+  }, [categories, replay?.scorecard?.highlights]);
 
   useEffect(() => {
     setFollowupScenarioId(replay?.session?.scenario_id ?? "");
@@ -167,10 +207,27 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
     setReviewNotes("");
     setCoachingNote("");
     setActionError(null);
-    setExpandedCategory(null);
+    setExpandedCategory(focusCategory ?? null);
     setCurrentTime(0);
-    setActiveTurnId(timelineTurns[0]?.turn_id ?? null);
-  }, [replay?.session?.scenario_id, replay?.session_id, timelineTurns]);
+    setActiveTurnId(focusTurnId ?? timelineTurns[0]?.turn_id ?? null);
+  }, [focusCategory, focusTurnId, replay?.session?.scenario_id, replay?.session_id, timelineTurns]);
+
+  useEffect(() => {
+    if (!focusTurnId) {
+      return;
+    }
+    const turn = timelineTurns.find((item) => item.turn_id === focusTurnId);
+    if (!turn) {
+      return;
+    }
+    setActiveTurnId(turn.turn_id);
+    turnRefs.current[turn.turn_id]?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const audio = audioRef.current;
+    if (audio) {
+      audio.currentTime = turn.startOffset;
+      setCurrentTime(turn.startOffset);
+    }
+  }, [focusTurnId, timelineTurns]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -265,9 +322,10 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
     setSaving(true);
     setActionError(null);
     try {
-      await submitOverride(managerId, scorecard.id, {
-        reason_code: "manager_coaching",
-        notes: coachingNote.trim()
+      await createCoachingNote(managerId, scorecard.id, {
+        note: coachingNote.trim(),
+        visible_to_rep: true,
+        weakness_tags: replay?.scorecard?.weakness_tags ?? []
       });
       setCoachingNote("");
       await onActionDone();
@@ -323,8 +381,19 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
           <span className="bg-accent/10 text-accent text-xs font-medium rounded-full px-3 py-1">
             {replay.session?.duration_seconds ? formatClock(replay.session.duration_seconds) : "Duration pending"}
           </span>
+          {focusTurnId || focusCategory ? (
+            <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-900">
+              Focused evidence
+            </span>
+          ) : null}
         </div>
       </div>
+
+      {focusTurnId || focusCategory ? (
+        <div className="rounded-2xl border border-amber-300/35 bg-amber-50/70 px-4 py-3 text-sm text-amber-950">
+          {focusCategory ? `Opened from ${focusCategory.replace(/_/g, " ")} evidence.` : "Opened on a linked transcript moment from management analytics."}
+        </div>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-4">
         {[
@@ -424,6 +493,42 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
                 <span className="text-muted text-sm">No weaknesses tagged</span>
               ) : null}
             </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/25 bg-white/35 p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <Activity className="w-4 h-4 text-muted" />
+              <h3 className="text-sm font-semibold tracking-tight text-ink">Critical Moments</h3>
+            </div>
+            {criticalMoments.length ? (
+              <div className="space-y-3">
+                {criticalMoments.map((moment) => (
+                  <button
+                    key={moment.id}
+                    onClick={() => {
+                      if (moment.categoryKey) {
+                        setExpandedCategory(moment.categoryKey);
+                      }
+                      if (moment.turnId) {
+                        seekToTurn(moment.turnId);
+                      }
+                    }}
+                    className={`w-full rounded-2xl border px-4 py-3 text-left transition ${
+                      moment.tone === "strong"
+                        ? "border-emerald-200 bg-emerald-50/70"
+                        : moment.tone === "improve"
+                          ? "border-amber-200 bg-amber-50/70"
+                          : "border-accent/15 bg-accent-soft/25"
+                    }`}
+                  >
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">{moment.label}</div>
+                    <div className="mt-1 text-sm text-ink">{moment.note}</div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <EmptyState variant="empty" message="No critical moments were extracted for this replay." />
+            )}
           </div>
 
           <div className="rounded-2xl border border-white/25 bg-white/35 p-5">
@@ -713,6 +818,9 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
             return (
               <li key={turn.turn_id}>
                 <button
+                  ref={(node) => {
+                    turnRefs.current[turn.turn_id] = node;
+                  }}
                   onClick={() => seekToTurn(turn.turn_id)}
                   className={`w-full rounded-2xl border px-4 py-4 text-left transition ${active
                     ? "border-accent/40 bg-accent-soft/35 shadow-md shadow-accent/10"
@@ -745,6 +853,11 @@ export function ReplayPanel({ managerId, replay, onActionDone }: Props) {
                         <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700">
                           <Zap className="h-3 w-3" />
                           Barge-in
+                        </span>
+                      ) : null}
+                      {evidenceTurnIds.has(turn.turn_id) ? (
+                        <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-semibold text-accent">
+                          Evidence
                         </span>
                       ) : null}
                     </div>

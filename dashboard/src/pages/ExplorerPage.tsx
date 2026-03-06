@@ -20,6 +20,12 @@ export function ExplorerPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  function openReplay(sessionId: string, focusTurnId?: string | null) {
+    const params = new URLSearchParams();
+    if (focusTurnId) params.set("turnId", focusTurnId);
+    navigate(`/manager/sessions/${sessionId}/replay${params.toString() ? `?${params.toString()}` : ""}`);
+  }
+
   const loadData = useCallback(async () => {
     if (!managerId) return;
     setLoading(true);
@@ -128,7 +134,7 @@ export function ExplorerPage() {
           {filteredItems.map((item) => (
             <button
               key={item.session_id}
-              onClick={() => navigate(`/manager/sessions/${item.session_id}/replay`)}
+              onClick={() => openReplay(item.session_id, item.focus_turn_id)}
               className="w-full rounded-[28px] border border-white/30 bg-white/40 p-5 text-left shadow-xl shadow-black/5 backdrop-blur-2xl transition hover:bg-white/55"
             >
               <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">

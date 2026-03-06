@@ -139,6 +139,7 @@ def test_management_intelligence_endpoints(client, seed_org):
     assert coaching_body["intervention_segments"]
     assert "calibration_drift_timeline" in coaching_body
     assert "score_drift_by_scenario" in coaching_body
+    assert "focus_turn_id" in coaching_body["recent_notes"][0]
 
     explorer = client.get(
         "/manager/analytics/explorer",
@@ -150,6 +151,7 @@ def test_management_intelligence_endpoints(client, seed_org):
     assert explorer_body["items"]
     assert "filters" in explorer_body
     assert "transcript_preview" in explorer_body["items"][0]
+    assert "focus_turn_id" in explorer_body["items"][0]
 
     alerts = client.get(
         "/manager/alerts",

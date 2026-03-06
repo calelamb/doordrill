@@ -61,6 +61,16 @@ export function AnalyticsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  function openReplay(sessionId?: string | null, turnId?: string | null, category?: string | null) {
+    if (!sessionId) {
+      return;
+    }
+    const params = new URLSearchParams();
+    if (turnId) params.set("turnId", turnId);
+    if (category) params.set("category", category);
+    navigate(`/manager/sessions/${sessionId}/replay${params.toString() ? `?${params.toString()}` : ""}`);
+  }
+
   const loadData = useCallback(async () => {
     if (!managerId) return;
     setLoading(true);
@@ -139,6 +149,11 @@ export function AnalyticsPage() {
           <p className="mt-1 max-w-3xl text-sm text-muted">
             Team health, rep risk, scenario performance, and coaching signals linked back to session evidence.
           </p>
+          {data?._meta?.analytics_last_refresh_at ? (
+            <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-white/35 bg-white/55 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+              Data fresh {data._meta.freshness_seconds ?? 0}s ago
+            </div>
+          ) : null}
         </div>
 
         <div className="space-y-3">
@@ -258,7 +273,7 @@ export function AnalyticsPage() {
                 <button
                   key={alert.id}
                   onClick={() => {
-                    if (alert.session_id) navigate(`/manager/sessions/${alert.session_id}/replay`);
+                    if (alert.session_id) openReplay(alert.session_id, alert.focus_turn_id ?? null);
                     else if (alert.rep_id) navigate(`/manager/reps/${alert.rep_id}/progress`);
                   }}
                   className={`w-full rounded-2xl border px-4 py-4 text-left transition hover:translate-x-0.5 ${severityTone(alert)}`}
@@ -308,7 +323,10 @@ export function AnalyticsPage() {
                 {data.rep_risk_matrix.slice(0, 5).map((rep) => (
                   <button
                     key={rep.rep_id}
-                    onClick={() => navigate(`/manager/reps/${rep.rep_id}/progress`)}
+                    onClick={() => {
+                      if (rep.session_id) openReplay(rep.session_id, rep.focus_turn_id ?? null);
+                      else navigate(`/manager/reps/${rep.rep_id}/progress`);
+                    }}
                     className="flex w-full items-center justify-between rounded-2xl border border-white/25 bg-white/45 px-4 py-3 text-left transition hover:bg-white/65"
                   >
                     <div>
@@ -402,6 +420,14 @@ export function AnalyticsPage() {
                 <div className="mt-3 h-2 rounded-full bg-accent-soft">
                   <div className="h-full rounded-full bg-accent" style={{ width: `${Math.max(6, scenario.pass_rate * 100)}%` }} />
                 </div>
+                {scenario.sample_session_id ? (
+                  <button
+                    onClick={() => openReplay(scenario.sample_session_id ?? null, scenario.focus_turn_id ?? null)}
+                    className="mt-3 rounded-full border border-white/35 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-ink transition hover:bg-white/85"
+                  >
+                    Open Evidence
+                  </button>
+                ) : null}
               </div>
             ))}
           </div>
@@ -413,7 +439,12 @@ export function AnalyticsPage() {
             <div className="mt-4 space-y-3">
               {data.weakest_categories.length ? (
                 data.weakest_categories.map((item) => (
-                  <div key={item.category}>
+                  <button
+                    key={item.category}
+                    onClick={() => openReplay(item.session_id ?? null, item.focus_turn_id ?? null, item.category)}
+                    disabled={!item.session_id}
+                    className="w-full text-left disabled:cursor-default"
+                  >
                     <div className="mb-1 flex items-center justify-between text-sm">
                       <span className="font-semibold capitalize text-ink">{item.category.replace(/_/g, " ")}</span>
                       <span className="text-muted">{item.average_score.toFixed(1)}</span>
@@ -421,7 +452,7 @@ export function AnalyticsPage() {
                     <div className="h-2 rounded-full bg-accent-soft">
                       <div className="h-full rounded-full bg-[linear-gradient(90deg,#b5331e_0%,#c6951f_52%,#2d5a3d_100%)]" style={{ width: `${Math.max(4, item.average_score * 10)}%` }} />
                     </div>
-                  </div>
+                  </button>
                 ))
               ) : (
                 <EmptyState variant="empty" message="No category averages yet." />

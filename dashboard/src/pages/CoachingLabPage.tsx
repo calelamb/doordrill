@@ -39,6 +39,15 @@ export function CoachingLabPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  function openReplay(sessionId?: string, focusTurnId?: string | null) {
+    if (!sessionId) {
+      return;
+    }
+    const params = new URLSearchParams();
+    if (focusTurnId) params.set("turnId", focusTurnId);
+    navigate(`/manager/sessions/${sessionId}/replay${params.toString() ? `?${params.toString()}` : ""}`);
+  }
+
   const loadData = useCallback(async () => {
     if (!managerId) return;
     setLoading(true);
@@ -80,6 +89,14 @@ export function CoachingLabPage() {
     () => (data?.manager_calibration ?? []).map((item) => ({ ...item, avg_delta: item.average_override_delta ?? 0 })),
     [data?.manager_calibration]
   );
+  const retryChart = useMemo(
+    () => (data?.retry_impact ?? []).slice(0, 8).map((item) => ({ label: `${item.rep_name}`, delta: item.delta })),
+    [data?.retry_impact]
+  );
+  const driftTimeline = useMemo(
+    () => (data?.calibration_drift_timeline ?? []).map((item) => ({ ...item, avg_abs: item.average_absolute_delta ?? 0 })),
+    [data?.calibration_drift_timeline]
+  );
 
   if (loading) return <EmptyState variant="loading" message="Loading coaching lab..." />;
   if (error) return <EmptyState variant="error" message={error} onRetry={() => void loadData()} />;
@@ -119,6 +136,16 @@ export function CoachingLabPage() {
             label: "Avg Override Δ",
             value: typeof data.summary.average_override_delta === "number" ? `${data.summary.average_override_delta >= 0 ? "+" : ""}${data.summary.average_override_delta.toFixed(1)}` : "--",
             icon: TrendingUp,
+          },
+          {
+            label: "Retry Uplift",
+            value: typeof data.summary.retry_uplift_avg === "number" ? `${data.summary.retry_uplift_avg >= 0 ? "+" : ""}${data.summary.retry_uplift_avg.toFixed(1)}` : "--",
+            icon: TrendingUp,
+          },
+          {
+            label: "Improved Interventions",
+            value: typeof data.summary.intervention_improved_rate === "number" ? formatPercent(data.summary.intervention_improved_rate) : "--",
+            icon: BookOpenText,
           },
         ].map((card) => (
           <div key={card.label} className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
@@ -175,6 +202,68 @@ export function CoachingLabPage() {
         </div>
       </section>
 
+      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <h2 className="text-lg font-bold tracking-tight text-ink">Retry Impact</h2>
+          <div className="mt-4 h-[280px] w-full">
+            {retryChart.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={retryChart} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(45,90,61,0.08)" strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <RechartsTooltip />
+                  <Bar dataKey="delta" radius={[12, 12, 0, 0]} fill="#2d5a3d" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <EmptyState variant="empty" message="No repeat-attempt score deltas yet." />
+            )}
+          </div>
+          <div className="mt-4 space-y-3">
+            {(data.retry_impact ?? []).slice(0, 5).map((item) => (
+              <button
+                key={`${item.from_session_id}-${item.to_session_id}`}
+                onClick={() => openReplay(item.to_session_id)}
+                className="flex w-full items-center justify-between rounded-2xl border border-white/25 bg-white/45 px-4 py-3 text-left transition hover:bg-white/65"
+              >
+                <div>
+                  <div className="text-sm font-semibold text-ink">{item.rep_name}</div>
+                  <div className="mt-1 text-xs text-muted">{item.scenario_name} · {item.coached_between_attempts ? "coached retry" : "retry"}</div>
+                </div>
+                <div className="text-sm font-bold text-ink">{item.delta >= 0 ? "+" : ""}{item.delta.toFixed(1)}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <h2 className="text-lg font-bold tracking-tight text-ink">Calibration Drift Timeline</h2>
+          <div className="mt-4 h-[280px] w-full">
+            {driftTimeline.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={driftTimeline} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(45,90,61,0.08)" strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <RechartsTooltip />
+                  <Bar dataKey="avg_abs" radius={[12, 12, 0, 0]} fill="#b77a13" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <EmptyState variant="empty" message="No calibration drift timeline yet." />
+            )}
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {(data.intervention_segments ?? []).map((segment) => (
+              <span key={`${segment.visibility}-${segment.outcome}`} className="rounded-full bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-ink">
+                {segment.visibility} · {segment.outcome} · {segment.count}
+              </span>
+            ))}
+          </div>
+        </div>
+      </section>
+
       <section className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
         <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
           <h2 className="text-lg font-bold tracking-tight text-ink">Calibration Drift</h2>
@@ -200,7 +289,11 @@ export function CoachingLabPage() {
           <div className="mt-4 space-y-3">
             {data.recent_notes.length ? (
               data.recent_notes.map((note) => (
-                <div key={note.id} className="rounded-2xl border border-white/25 bg-white/45 p-4">
+                <button
+                  key={note.id}
+                  onClick={() => openReplay(note.session_id, note.focus_turn_id)}
+                  className="w-full rounded-2xl border border-white/25 bg-white/45 p-4 text-left transition hover:bg-white/60"
+                >
                   <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                     <div>
                       <div className="text-sm font-semibold text-ink">{note.rep_name}</div>
@@ -218,7 +311,7 @@ export function CoachingLabPage() {
                       {note.visible_to_rep ? "rep-visible" : "private"}
                     </span>
                   </div>
-                </div>
+                </button>
               ))
             ) : (
               <EmptyState variant="empty" message="No coaching notes have been added yet." />

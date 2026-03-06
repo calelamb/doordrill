@@ -299,6 +299,13 @@ class ManagementAnalyticsService:
             scores = [item.overall_score for item in rep_sessions if item.overall_score is not None]
             if not scores:
                 continue
+            focus_session = min(
+                rep_sessions,
+                key=lambda item: (
+                    item.overall_score if item.overall_score is not None else 11,
+                    -((item.started_at or datetime.min.replace(tzinfo=timezone.utc)).timestamp()),
+                ),
+            )
             avg_score = round(sum(scores) / len(scores), 2)
             delta = round(scores[-1] - scores[0], 2) if len(scores) >= 2 else 0.0
             volatility = round(pstdev(scores), 2) if len(scores) >= 2 else 0.0
@@ -344,6 +351,8 @@ class ManagementAnalyticsService:
                     "unreviewed_scored_sessions": review_gap,
                     "risk_level": level,
                     "risk_score": round(risk_score, 2),
+                    "session_id": focus_session.session_id,
+                    "focus_turn_id": focus_session.focus_turn_id,
                 }
             )
 
@@ -375,6 +384,7 @@ class ManagementAnalyticsService:
                         "rep_name": session.rep_name,
                         "session_id": session.session_id,
                         "scenario_id": session.scenario_id,
+                        "focus_turn_id": session.focus_turn_id,
                     }
                 )
 
@@ -391,8 +401,9 @@ class ManagementAnalyticsService:
                     "occurred_at": now.isoformat(),
                     "rep_id": rep["rep_id"],
                     "rep_name": rep["rep_name"],
-                    "session_id": None,
+                    "session_id": rep.get("session_id"),
                     "scenario_id": None,
+                    "focus_turn_id": rep.get("focus_turn_id"),
                 }
             )
 
@@ -408,8 +419,9 @@ class ManagementAnalyticsService:
                         "occurred_at": now.isoformat(),
                         "rep_id": None,
                         "rep_name": None,
-                        "session_id": None,
+                        "session_id": scenario.get("sample_session_id"),
                         "scenario_id": scenario["scenario_id"],
+                        "focus_turn_id": scenario.get("focus_turn_id"),
                     }
                 )
 
@@ -454,6 +466,7 @@ class ManagementAnalyticsService:
         previous_avg = round(sum(previous_scores) / len(previous_scores), 2) if previous_scores else None
 
         category_values: dict[str, list[float]] = defaultdict(list)
+        category_focus: dict[str, dict[str, Any]] = {}
         trend_buckets: dict[str, dict[str, Any]] = {}
         scenario_groups: dict[str, dict[str, Any]] = {}
         for session in sessions:
@@ -476,6 +489,9 @@ class ManagementAnalyticsService:
                         "scored_count": 0,
                         "pass_count": 0,
                         "score_sum": 0.0,
+                        "sample_session_id": session.session_id,
+                        "focus_turn_id": session.focus_turn_id,
+                        "lowest_score": session.overall_score if session.overall_score is not None else 11.0,
                     },
                 )
                 group["session_count"] += 1
@@ -483,16 +499,29 @@ class ManagementAnalyticsService:
                 group["score_sum"] += session.overall_score
                 if session.overall_score >= 7.0:
                     group["pass_count"] += 1
+                if session.overall_score is not None and session.overall_score <= group["lowest_score"]:
+                    group["lowest_score"] = session.overall_score
+                    group["sample_session_id"] = session.session_id
+                    group["focus_turn_id"] = session.focus_turn_id
 
             for raw_key, normalized_key in RUBRIC_CATEGORY_KEYS.items():
                 value = _score_value(session.category_scores.get(raw_key))
                 if value is not None:
                     category_values[normalized_key].append(value)
+                    current = category_focus.get(normalized_key)
+                    if current is None or value <= current["score"]:
+                        category_focus[normalized_key] = {
+                            "score": value,
+                            "session_id": session.session_id,
+                            "focus_turn_id": session.focus_turn_id,
+                        }
 
         weakest_categories = [
             {
                 "category": key,
                 "average_score": round(sum(values) / len(values), 2),
+                "session_id": category_focus.get(key, {}).get("session_id"),
+                "focus_turn_id": category_focus.get(key, {}).get("focus_turn_id"),
             }
             for key, values in category_values.items()
             if values
@@ -504,6 +533,8 @@ class ManagementAnalyticsService:
                 **group,
                 "average_score": round(group["score_sum"] / group["scored_count"], 2) if group["scored_count"] else None,
                 "pass_rate": round(group["pass_count"] / group["scored_count"], 3) if group["scored_count"] else 0.0,
+                "sample_session_id": group["sample_session_id"],
+                "focus_turn_id": group["focus_turn_id"],
             }
             for group in scenario_groups.values()
         ]
@@ -613,6 +644,11 @@ class ManagementAnalyticsService:
                 group["rep_scores"][session.rep_id].append(session.overall_score)
                 if session.overall_score >= 7.0:
                     group["pass_count"] += 1
+                lowest_score = group.get("lowest_score")
+                if lowest_score is None or session.overall_score <= lowest_score:
+                    group["lowest_score"] = session.overall_score
+                    group["sample_session_id"] = session.session_id
+                    group["focus_turn_id"] = session.focus_turn_id
             for tag in session.weakness_tags:
                 group["weakness_tags"][tag] += 1
             for tag in objection_tags.get(session.session_id, []):
@@ -642,6 +678,8 @@ class ManagementAnalyticsService:
                 "improvement_delta": round(sum(improvement_samples) / len(improvement_samples), 2) if improvement_samples else None,
                 "top_weakness_tags": [tag for tag, _ in group["weakness_tags"].most_common(4)],
                 "top_objection_tags": [tag for tag, _ in group["objections"].most_common(4)],
+                "sample_session_id": group.get("sample_session_id"),
+                "focus_turn_id": group.get("focus_turn_id"),
             }
             items.append(item)
 
@@ -782,6 +820,7 @@ class ManagementAnalyticsService:
                     "rep_id": source_session.rep_id,
                     "rep_name": source_session.rep_name,
                     "session_id": source_session.session_id,
+                    "focus_turn_id": source_session.focus_turn_id,
                     "next_session_id": fact.next_session_id,
                     "scenario_name": source_session.scenario_name,
                     "before_score": fact.before_score,
@@ -800,6 +839,8 @@ class ManagementAnalyticsService:
                     "rep_id": source_session.rep_id,
                     "rep_name": source_session.rep_name,
                     "scenario_name": source_session.scenario_name,
+                    "session_id": source_session.session_id,
+                    "focus_turn_id": source_session.focus_turn_id,
                     "note": note.note if note else "",
                     "visible_to_rep": bool(fact.visible_to_rep),
                     "weakness_tags": list(fact.weakness_tags_json or []),
@@ -1087,6 +1128,7 @@ class ManagementAnalyticsService:
                     "transcript_preview": preview,
                     "assignment_status": session.assignment_status,
                     "session_status": session.session_status,
+                    "focus_turn_id": session.focus_turn_id,
                 }
             )
         items = items[:limit]

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { AlertCircle, ArrowLeft, RefreshCcw } from "lucide-react";
 
@@ -12,8 +12,11 @@ import type { ReplayResponse } from "../lib/types";
 export function ManagerReplayPage() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const auth = getValidStoredAuth();
   const managerId = auth?.user.id ?? "";
+  const focusTurnId = searchParams.get("turnId");
+  const focusCategory = searchParams.get("category");
 
   const [replay, setReplay] = useState<ReplayResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -85,7 +88,13 @@ export function ManagerReplayPage() {
       ) : null}
 
       {!loading && !error && replay ? (
-        <ReplayPanel managerId={managerId} replay={replay} onActionDone={loadReplay} />
+        <ReplayPanel
+          managerId={managerId}
+          replay={replay}
+          onActionDone={loadReplay}
+          focusTurnId={focusTurnId}
+          focusCategory={focusCategory}
+        />
       ) : null}
 
       {!loading && error ? (
