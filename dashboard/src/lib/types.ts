@@ -226,6 +226,30 @@ export type TeamCoachingSummaryResponse = {
   data_summary: Record<string, unknown>;
 };
 
+export type ChatDataPoint = {
+  label: string;
+  value: string;
+};
+
+export type ManagerChatResponse = {
+  answer: string;
+  key_metric: string | null;
+  key_metric_label: string | null;
+  follow_up_suggestions: string[];
+  action_suggestion: string | null;
+  data_points: ChatDataPoint[];
+  intent_detected: string;
+  sources_used: string[];
+};
+
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  response?: ManagerChatResponse;
+  timestamp: string;
+};
+
 export type ManagerAnalytics = {
   manager_id: string;
   period?: string;

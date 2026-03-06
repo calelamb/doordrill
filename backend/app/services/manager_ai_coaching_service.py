@@ -17,6 +17,8 @@ from app.models.session import Session as DrillSession
 from app.models.session import SessionTurn
 from app.models.user import User
 from app.schemas.manager_ai import (
+    ManagerChatAnswerContent,
+    ManagerChatClassification,
     RepInsightContent,
     RepInsightResponse,
     SessionAnnotation,
@@ -131,6 +133,80 @@ class ManagerAiCoachingService:
             redis_url=self.settings.redis_url,
             ttl_seconds=4 * 3600,
             max_entries=cache_size,
+        )
+
+    def classify_manager_chat_intent(self, *, message: str) -> ManagerChatClassification:
+        prompt = f"""
+You are classifying a manager's question about DoorDrill sales training data.
+Question: "{message}"
+
+Respond with JSON only:
+{{
+  "intent": one of ["team_performance", "rep_specific", "scenario_analysis", "coaching_effectiveness", "risk_alerts", "comparison", "general"],
+  "rep_name_mentioned": string | null,
+  "scenario_mentioned": string | null,
+  "category_mentioned": string | null
+}}
+""".strip()
+
+        return ManagerChatClassification.model_validate(
+            self._call_claude_json(
+                system_prompt="You classify manager analytics questions. Return only valid JSON.",
+                user_prompt=prompt,
+                max_tokens=180,
+                model=self.settings.anthropic_chat_classification_model,
+            )
+        )
+
+    def answer_manager_chat(
+        self,
+        *,
+        period_days: int,
+        message: str,
+        conversation_history: list[dict[str, str]],
+        relevant_data: dict[str, Any],
+    ) -> ManagerChatAnswerContent:
+        serialized_data = json.dumps(relevant_data, default=str, ensure_ascii=True)
+        serialized_history = json.dumps(conversation_history[-12:], ensure_ascii=True)
+        prompt = f"""
+You are an expert sales performance analyst for DoorDrill, a D2D sales training platform.
+You are answering a manager's question about their team's training performance.
+
+Team data (last {period_days} days):
+{serialized_data}
+
+Conversation history:
+{serialized_history}
+
+Manager's question: "{message}"
+
+Respond with JSON:
+{{
+  "answer": "your natural language answer (2-4 sentences, direct and specific)",
+  "key_metric": "the single most relevant number or stat that answers the question",
+  "key_metric_label": "label for the metric",
+  "follow_up_suggestions": ["2-3 follow-up questions the manager might want to ask next"],
+  "action_suggestion": "a concrete action the manager should take (1 sentence, optional, can be null)",
+  "data_points": [{{"label": "stat name", "value": "stat value"}}]
+}}
+""".strip()
+
+        content = ManagerChatAnswerContent.model_validate(
+            self._call_claude_json(
+                system_prompt="You are a precise manager analytics copilot. Return only valid JSON.",
+                user_prompt=prompt,
+                max_tokens=700,
+                model=self.settings.anthropic_chat_answer_model,
+            )
+        )
+
+        return ManagerChatAnswerContent(
+            answer=content.answer,
+            key_metric=content.key_metric,
+            key_metric_label=content.key_metric_label,
+            follow_up_suggestions=content.follow_up_suggestions[:3],
+            action_suggestion=content.action_suggestion,
+            data_points=content.data_points[:4],
         )
 
     def generate_rep_insight(self, db: Session, *, rep: User, period_days: int) -> RepInsightResponse:
@@ -489,6 +565,7 @@ Return JSON:
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
+        model: str | None = None,
     ) -> Any:
         if not self.settings.anthropic_api_key:
             raise AiCoachingUnavailableError("Claude analysis is unavailable because Anthropic is not configured")
@@ -503,7 +580,7 @@ Return JSON:
                         "content-type": "application/json",
                     },
                     json={
-                        "model": self.settings.anthropic_model,
+                        "model": model or self.settings.anthropic_model,
                         "max_tokens": max_tokens,
                         "temperature": 0.2,
                         "system": system_prompt,

@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-3-5-sonnet-latest", alias="ANTHROPIC_MODEL")
+    anthropic_chat_classification_model: str = Field(
+        default="claude-3-5-haiku-latest",
+        alias="ANTHROPIC_CHAT_CLASSIFICATION_MODEL",
+    )
+    anthropic_chat_answer_model: str = Field(
+        default="claude-3-5-sonnet-latest",
+        alias="ANTHROPIC_CHAT_ANSWER_MODEL",
+    )
     anthropic_base_url: str = Field(default="https://api.anthropic.com", alias="ANTHROPIC_BASE_URL")
     elevenlabs_api_key: str | None = Field(default=None, alias="ELEVENLABS_API_KEY")
     elevenlabs_voice_id: str | None = Field(default=None, alias="ELEVENLABS_VOICE_ID")

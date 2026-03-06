@@ -4,6 +4,7 @@ import type {
   AlertItem,
   AnalyticsMetricDefinition,
   BenchmarksResponse,
+  ManagerChatResponse,
   CoachingAnalyticsResponse,
   CommandCenterResponse,
   ExplorerResponse,
@@ -331,6 +332,27 @@ export async function fetchTeamCoachingSummary(
     {
       method: "POST",
       body: JSON.stringify({ manager_id: managerId, period_days: periodDays }),
+    },
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function sendManagerChatMessage(
+  managerId: string,
+  message: string,
+  history: Array<{ role: "user" | "assistant"; content: string }>,
+  periodDays = 30
+): Promise<ManagerChatResponse> {
+  return requestJson<ManagerChatResponse>(
+    "/manager/ai/chat",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        manager_id: managerId,
+        message,
+        conversation_history: history,
+        period_days: periodDays,
+      }),
     },
     { userId: managerId, role: "manager" }
   );

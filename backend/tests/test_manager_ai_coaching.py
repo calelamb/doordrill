@@ -11,6 +11,7 @@ from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionTurn
 from app.models.types import AssignmentStatus, SessionStatus, TurnSpeaker
+from app.schemas.manager_ai import ManagerChatAnswerContent, ManagerChatClassification
 from app.services.manager_ai_coaching_service import AiCoachingUnavailableError
 
 
@@ -312,3 +313,115 @@ def test_ai_endpoints_return_503_when_claude_is_unavailable(client, seed_org, mo
     )
     assert summary_response.status_code == 503
     assert "temporarily unavailable" in summary_response.json()["detail"]
+
+    chat_response = client.post(
+        "/manager/ai/chat",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "message": "Who needs coaching help?", "period_days": 30},
+    )
+    assert chat_response.status_code == 503
+    assert "temporarily unavailable" in chat_response.json()["detail"]
+
+
+def test_manager_ai_chat_uses_command_center_for_team_questions(client, seed_org, monkeypatch):
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "classify_manager_chat_intent",
+        lambda **kwargs: ManagerChatClassification(
+            intent="team_performance",
+            rep_name_mentioned=None,
+            scenario_mentioned=None,
+            category_mentioned=None,
+        ),
+    )
+    monkeypatch.setattr(
+        manager_api.management_analytics_service,
+        "get_command_center",
+        lambda *args, **kwargs: {
+            "summary": {"team_average_score": 6.8, "reps_at_risk": 2},
+            "weakest_categories": [{"category": "objection_handling", "average_score": 5.4}],
+        },
+    )
+
+    def fake_answer_manager_chat(*, period_days, message, conversation_history, relevant_data):
+        assert period_days == 30
+        assert message == "How is my team doing?"
+        assert conversation_history == [{"role": "user", "content": "Give me the latest summary."}]
+        assert relevant_data["command_center"]["summary"]["team_average_score"] == 6.8
+        return ManagerChatAnswerContent(
+            answer="Your team is averaging 6.8 with objection handling as the main drag.",
+            key_metric="6.8",
+            key_metric_label="Team Average Score",
+            follow_up_suggestions=["Who is dragging the average down?", "What scenario is hurting pass rate?"],
+            action_suggestion="Open Command Center and review the lowest objection-handling cluster.",
+            data_points=[{"label": "At Risk", "value": "2 reps"}],
+        )
+
+    monkeypatch.setattr(manager_api.manager_ai_service, "answer_manager_chat", fake_answer_manager_chat)
+
+    response = client.post(
+        "/manager/ai/chat",
+        headers=_manager_headers(seed_org),
+        json={
+            "manager_id": seed_org["manager_id"],
+            "message": "How is my team doing?",
+            "conversation_history": [{"role": "user", "content": "Give me the latest summary."}],
+            "period_days": 30,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["intent_detected"] == "team_performance"
+    assert body["sources_used"] == ["command_center"]
+    assert body["key_metric"] == "6.8"
+    assert body["data_points"][0]["value"] == "2 reps"
+
+
+def test_manager_ai_chat_uses_rep_progress_for_rep_specific_questions(client, seed_org, monkeypatch):
+    _create_scored_session(
+        seed_org,
+        day_offset=2,
+        overall_score=6.4,
+        weakness_tags=["closing"],
+        ai_summary="Steady opener, but the close stalled out.",
+    )
+
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "classify_manager_chat_intent",
+        lambda **kwargs: ManagerChatClassification(
+            intent="rep_specific",
+            rep_name_mentioned="Ray",
+            scenario_mentioned=None,
+            category_mentioned="closing",
+        ),
+    )
+
+    def fake_answer_manager_chat(*, relevant_data, **kwargs):
+        rep_key = f"rep_progress:{seed_org['rep_id']}"
+        assert relevant_data["resolved_rep"]["rep_id"] == seed_org["rep_id"]
+        assert rep_key in relevant_data
+        assert relevant_data[rep_key]["rep_name"] == "Ray Rep"
+        return ManagerChatAnswerContent(
+            answer="Ray is stable overall, but closing is still his lowest category this month.",
+            key_metric="6.4",
+            key_metric_label="Ray Average Score",
+            follow_up_suggestions=["Should I assign a follow-up drill?", "How does Ray compare to the team?"],
+            action_suggestion="Open Ray's rep page and assign a closing-focused retry.",
+            data_points=[{"label": "Weak Area", "value": "closing"}],
+        )
+
+    monkeypatch.setattr(manager_api.manager_ai_service, "answer_manager_chat", fake_answer_manager_chat)
+
+    response = client.post(
+        "/manager/ai/chat",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "message": "How is Ray doing on closing?", "period_days": 30},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["intent_detected"] == "rep_specific"
+    assert body["sources_used"] == [f"rep_progress:{seed_org['rep_id']}"]
+    assert body["key_metric_label"] == "Ray Average Score"

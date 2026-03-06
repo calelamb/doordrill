@@ -1,4 +1,7 @@
+import { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+
+import { ManagerChatPanel } from "./components/ManagerChatPanel";
 import { Sidebar } from "./components/Sidebar";
 import { clearStoredAuth, getValidStoredAuth } from "./lib/auth";
 import { ManagerFeedPage } from "./pages/ManagerFeedPage";
@@ -23,6 +26,19 @@ function RootRedirect() {
 function ProtectedLayout() {
   const location = useLocation();
   const auth = getValidStoredAuth();
+  const [isChatOpen, setIsChatOpen] = useState(false);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setIsChatOpen((current) => !current);
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   if (!auth) {
     clearStoredAuth();
@@ -40,6 +56,12 @@ function ProtectedLayout() {
       <div className="flex-1 overflow-y-auto w-full">
         <Outlet />
       </div>
+      <ManagerChatPanel
+        isOpen={isChatOpen}
+        managerId={auth.user.id}
+        onClose={() => setIsChatOpen(false)}
+        onToggle={() => setIsChatOpen((current) => !current)}
+      />
     </div>
   );
 }
