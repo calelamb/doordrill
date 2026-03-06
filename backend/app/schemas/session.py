@@ -30,8 +30,10 @@ class SessionReplayResponse(BaseModel):
     audio_artifacts: list[dict[str, Any]]
     transcript_turns: list[dict[str, Any]]
     objection_timeline: list[dict[str, Any]]
+    micro_behavior_timeline: list[dict[str, Any]] = Field(default_factory=list)
     interruption_timeline: list[dict[str, Any]] = Field(default_factory=list)
     stage_timeline: list[dict[str, Any]] = Field(default_factory=list)
+    conversational_realism: dict[str, Any] = Field(default_factory=dict)
     transport_metrics: dict[str, Any] = Field(default_factory=dict)
     scorecard: dict[str, Any] | None
     manager_reviews: list[ManagerReviewResponse] = Field(default_factory=list)

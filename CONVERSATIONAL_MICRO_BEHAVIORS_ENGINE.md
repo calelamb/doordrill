@@ -1,10 +1,10 @@
 # DoorDrill Conversational Micro-Behaviors Engine
 
-Repository snapshot analyzed and implemented on March 6, 2026.
+Implementation snapshot: March 6, 2026
 
-## Purpose
+## Objective
 
-The conversational micro-behaviors engine adds human-like messiness between the conversation model and the voice renderer. Instead of sending raw LLM output straight into TTS, DoorDrill now rewrites each AI turn into behavior-aware segments that can hesitate, use filler words, shift tone, vary sentence length, and simulate interruption-like delivery.
+Increase roleplay realism by adding a behavior layer between the conversation model and the voice renderer. The layer takes the raw homeowner reply from the LLM, applies human conversational messiness, and then emits segment-aware text and audio events for TTS.
 
 Implemented files:
 
@@ -17,159 +17,135 @@ Implemented files:
 
 ```mermaid
 flowchart LR
-    LLM["LLM Response\nraw text"] --> MB["ConversationalMicroBehaviorEngine"]
-    MB --> PLAN["MicroBehaviorPlan\ntext + tone + pauses + realism score"]
-    PLAN --> SEG["Behavior Segments\nsegment text + pause metadata"]
-    SEG --> WS["WebSocket Gateway\nserver.ai.text.delta / server.ai.audio.chunk"]
-    WS --> TTS["TTS Adapter"]
-    WS --> LEDGER["Session Event Ledger"]
-    LEDGER --> REPLAY["Replay API\nmicro_behavior_timeline + conversational_realism"]
+    REP["Rep transcript (STT)"] --> ORCH["ConversationOrchestrator"]
+    ORCH --> LLM["LLM raw homeowner reply"]
+    LLM --> MB["ConversationalMicroBehaviorEngine"]
+    MB --> PLAN["MicroBehaviorPlan"]
+    PLAN --> SEG["Behavior segments"]
+    SEG --> WS["WebSocket gateway"]
+    WS --> TTS["TTS provider"]
+    WS --> LEDGER["Session event ledger"]
+    LEDGER --> REPLAY["Manager replay + realism analytics"]
 ```
 
-Current runtime flow:
+Runtime flow:
 
-1. The websocket gateway collects the full raw LLM reply.
-2. The micro-behavior engine transforms it into a `MicroBehaviorPlan`.
-3. The plan is split into one or more segments.
-4. Each segment is emitted as `server.ai.text.delta`.
-5. Each segment is then fed to TTS with pause and tone metadata attached to `server.ai.audio.chunk`.
-6. The turn summary is persisted in `server.turn.committed` with:
-   - tone
-   - sentence length profile
-   - interruption type
-   - pause profile
-   - realism score
+1. `ConversationOrchestrator` updates stage, emotion, objection pressure, and behavioral signals from the rep turn.
+2. The websocket gateway buffers the full raw LLM reply instead of streaming it straight to TTS.
+3. `ConversationalMicroBehaviorEngine.apply_to_response(...)` transforms that raw text into a `MicroBehaviorPlan`.
+4. The plan is emitted segment by segment as `server.ai.text.delta` and then passed to TTS as `server.ai.audio.chunk`.
+5. `server.turn.committed` persists turn-level behavior metadata for replay and analytics.
 
-## Implemented Micro-Behaviors
+## Hesitation Generation Logic
 
-### 1. Hesitation generation
+Hesitation is used when the homeowner sounds uncertain, thoughtful, or guarded.
 
-The engine injects hesitation primarily for:
+Current rules:
 
-- `neutral`
-- `skeptical`
-- `curious`
-- some `interested` responses
+- Enabled mainly for `neutral`, `skeptical`, and `curious`
+- Suppressed for `annoyed` and `hostile`
+- More likely when the raw reply is longer than a short rejection
+- Triggered immediately when the rep turn is assessed as `neutral_delivery`
 
-Examples:
+Current hesitation variants:
 
 - `Uh...`
 - `Well...`
 - `Hmm...`
+- `I mean...`
 - `Okay...`
 - `So...`
 
-Current logic:
+The engine keeps short per-session memory and avoids reusing the same hesitation variant on adjacent turns.
 
-- hesitation is suppressed for `annoyed` and `hostile`
-- hesitation is likely when:
-  - the rep got a neutral response quality signal
-  - the homeowner is thinking through uncertainty
-  - the reply is longer than a short rejection
+## Filler Word Modeling
 
-Implementation detail:
+Filler words are inserted only when they sound plausible for the current emotion and response length.
 
-- hesitation is added before sentence segmentation
-- hesitation affects the opening pause duration
+Current rules:
 
-### 2. Filler word modeling
+- Enabled for `neutral`, `curious`, and `interested`
+- Sometimes used for `skeptical`
+- Disabled for `annoyed` and `hostile`
+- Disabled for very short replies
+- Favored when the rep actually explains value, which tends to produce longer homeowner responses
 
-The engine injects filler phrases mostly for:
-
-- `neutral`
-- `curious`
-- `interested`
-- some `skeptical` turns
-
-Examples:
+Current filler variants:
 
 - `you know`
 - `like`
 - `I mean`
 
-Current logic:
+Insertion strategy:
 
-- filler words are not used for `annoyed` or `hostile`
-- filler insertion requires the response to be long enough to sound natural
-- the engine tracks recent filler usage per session and avoids immediate reuse
+- The engine inserts the filler into the first sentence rather than blindly appending it
+- Recent filler variants are tracked per session to prevent immediate repetition
 
-Implementation detail:
+## Interruption Modeling
 
-- fillers are inserted into the first sentence rather than appended blindly
-- session-local history prevents the same filler from repeating turn after turn
+The current system models interruption in two ways.
 
-### 3. Interruptions
+### 1. Interruptive homeowner phrasing
 
-Two interruption concepts are modeled:
+If the rep ignores objections, pushes the close, or dismisses a concern while the homeowner is `annoyed` or `hostile`, the response can be reframed as an interruptive cut-off.
 
-#### Homeowner cuts off rep mid-pitch
-
-This is implemented today as an interruptive response style, not full duplex barge-in cancellation.
-
-It triggers when:
-
-- the homeowner is `annoyed` or `hostile`
-- the rep behavior suggests pressure or objection neglect:
-  - `ignores_objection`
-  - `pushes_close`
-  - `dismisses_concern`
-
-Examples of injected openers:
+Current openers:
 
 - `Hold on,`
 - `Wait,`
+- `Look,`
 - `No, hold on,`
 - `Sorry, let me stop you there,`
 
-The turn is tagged as:
+This is persisted as:
 
 - `interruption_type = homeowner_cuts_off_rep`
 
-#### Rep interrupts homeowner response
+### 2. Barge-in ready delivery
 
-The current backend does not yet support true concurrent barge-in cancellation of AI audio. The implemented layer prepares for that by marking segments as `allow_barge_in` when the response is multi-segment or intentionally long.
+Each segment also carries `allow_barge_in`. Longer or multi-segment replies are marked as interruptible so the websocket can stop emitting remaining audio when the rep starts talking.
 
-That creates a future-ready seam for:
+## Pause Timing Strategy
 
-- stopping TTS playback mid-turn
-- truncating remaining AI segments
-- committing a partial homeowner turn
+Pauses are modeled in two forms:
 
-## Silence and Pause Modeling
+- metadata persisted to replay
+- capped runtime delays before and after emitted segments
 
-The engine models pauses as metadata plus small runtime delays.
+Current pause rules:
 
-### Pause types
+- `exploratory`, `guarded`, and `measured` tones start with longer opening pauses
+- `sharp`, `cutting`, and `confrontational` tones start quickly
+- hesitation openers create longer first-segment pauses
+- long responses get larger between-segment pauses than short responses
 
-- short reaction pause
-  - used for sharp, annoyed, and interruptive responses
-- hesitation pause
-  - used when the homeowner is skeptical, neutral, or thinking
-- thinking pause
-  - used for longer curious or exploratory replies
-
-### Current pause strategy
-
-- `exploratory`, `guarded`, and `measured` tones open with longer pauses
-- `sharp`, `cutting`, and `confrontational` tones open quickly
-- additional segments get inter-sentence pauses
-- the websocket simulates only a capped delay to keep tests and local flows fast
-- full pause values are still preserved in metadata
-
-Persisted pause metadata:
+Persisted pause fields:
 
 - `pause_before_ms`
 - `pause_after_ms`
-- `pause_profile`
-  - `opening_pause_ms`
-  - `total_pause_ms`
-  - `longest_pause_ms`
+- `pause_profile.opening_pause_ms`
+- `pause_profile.total_pause_ms`
+- `pause_profile.longest_pause_ms`
+
+Runtime note:
+
+- The websocket caps actual pause sleeps to keep tests and local iteration fast
+- Full intended pause values are still preserved in event metadata
 
 ## Tone Modulation Design
 
-Tone is computed from emotional transition plus rep behavior signals.
+Tone is derived from emotional transition plus rep behavior quality.
 
-Current tone profiles:
+Current tone mapping:
+
+- `neutral -> skeptical` -> `guarded`
+- `skeptical -> annoyed` -> `sharp`
+- `interested -> curious` -> `exploratory`
+- objection neglect while escalated -> `cutting`
+- acknowledged concern plus softening emotion -> `warming`
+- otherwise tone defaults to the destination emotion profile
+
+Available tone outputs:
 
 - `measured`
 - `guarded`
@@ -180,24 +156,18 @@ Current tone profiles:
 - `warming`
 - `cutting`
 
-Examples:
-
-- `neutral -> skeptical` => `guarded`
-- `skeptical -> annoyed` => `sharp`
-- `interested -> curious` => `exploratory`
-- ignored objections while annoyed/hostile => `cutting`
-- acknowledged concern while becoming curious/interested => `warming`
-
-This tone value is attached to:
+Tone is attached to:
 
 - `server.ai.text.delta`
 - `server.ai.audio.chunk`
 - `server.turn.committed`
-- replay-derived micro-behavior timeline
+- replay `micro_behavior_timeline`
 
 ## Natural Sentence Length Variation
 
-The engine chooses a response length profile before segmentation:
+The engine chooses a length profile before segmenting the reply.
+
+Profiles:
 
 - `short`
   - common for `hostile` and `annoyed`
@@ -209,97 +179,76 @@ The engine chooses a response length profile before segmentation:
   - common for `curious` and `interested`
   - example: `Look, I get what you're saying, but we already signed a contract last month.`
 
-Implementation detail:
+Length policy:
 
-- short responses keep only the first sentence or clause
-- medium responses keep up to two sentences
-- long responses preserve the full reply
+- `short` trims to the first sentence or clause
+- `medium` keeps up to two sentences
+- `long` preserves the full reply
 
-## Replay and Observability Integration
+## Integration With The Voice Pipeline
 
-Replay responses now expose:
+The websocket now performs the integration seam required by this phase:
+
+1. Receive full raw LLM output
+2. Transform it through `ConversationalMicroBehaviorEngine`
+3. Emit transformed segments as `server.ai.text.delta`
+4. Feed the same transformed segments to TTS
+5. Attach behavior metadata to:
+   - text deltas
+   - audio chunks
+   - committed turn payloads
+
+Committed turn payloads persist:
+
+- `emotion_before`
+- `emotion_after`
+- `behavioral_signals`
+- `micro_behavior.tone`
+- `micro_behavior.sentence_length`
+- `micro_behavior.behaviors`
+- `micro_behavior.interruption_type`
+- `micro_behavior.pause_profile`
+- `micro_behavior.realism_score`
+
+Replay now exposes:
 
 - `micro_behavior_timeline`
 - `conversational_realism`
 
-Each micro-behavior timeline entry includes:
-
-- `recorded_at`
-- `stage`
-- `emotion`
-- `tone`
-- `sentence_length`
-- `behaviors`
-- `interruption_type`
-- `pause_profile`
-- `realism_score`
-
-This data is derived from persisted `server.turn.committed` events, so managers and future analytics pages can inspect realism behavior without replaying websocket traffic.
-
 ## Conversational Realism Metric (1-10)
 
-The current scoring metric is a turn-level heuristic called `realism_score`.
+The current metric is a heuristic turn-level score named `realism_score`.
 
-### Score components
+Base score:
 
-- base score: `5.0`
-- hesitation present: `+0.8`
-- filler behavior present: `+0.7`
+- `5.0`
+
+Additive signals:
+
+- hesitation behavior: `+0.8`
+- filler behavior: `+0.7`
 - strong sentence-length choice (`short` or `long`): `+0.6`
-- tone aligned to emotional transition: `+0.8`
-- meaningful pause profile: `+0.7`
+- tone aligned with transition: `+0.8`
+- meaningful opening pause: `+0.7`
 - interruption used appropriately: `+0.9`
-- emotion/tone alignment under escalation: `+0.7`
+- escalated tone alignment under annoyance/hostility: `+0.7`
 
-The score is clamped to `1.0 - 10.0`.
+Clamp:
 
-### Interpretation
+- minimum `1.0`
+- maximum `10.0`
 
-- `1-3`
-  - robotic, flat, or tonally wrong
-- `4-6`
-  - passable but generic
-- `7-8`
-  - believable conversational variation
-- `9-10`
-  - highly natural, emotionally aligned, and varied
+Interpretation:
 
-### Recommended future use
+- `1-3`: robotic or tonally wrong
+- `4-6`: acceptable but plain
+- `7-8`: realistic and varied
+- `9-10`: highly lifelike, emotionally aligned, and non-repetitive
 
-- average session realism
-- scenario realism baselines
-- provider comparison after real GPT-4o and ElevenLabs integration
-- alerting when realism drops below a team threshold
+Replay aggregation:
 
-## Integration with the Voice Pipeline
-
-File: `backend/app/voice/ws.py`
-
-Current integration points:
-
-1. collect raw LLM output
-2. call `micro_behaviors.apply_to_response(...)`
-3. emit transformed text segments with:
-   - tone
-   - sentence length
-   - pause metadata
-   - interruption metadata
-   - `allow_barge_in`
-4. feed each segment into TTS
-5. store a turn-level micro-behavior summary in the event ledger
-
-This satisfies the required design constraint: the micro-behavior layer sits between LLM output and TTS.
-
-## Current Constraints
-
-- true rep barge-in during AI speech is not yet implemented
-- the layer currently rewrites the full AI turn after the raw LLM reply is collected, rather than streaming-transforming partial tokens
-- micro-behavior state is process-local
-- realism scoring is heuristic, not judge-model based
-
-## Recommended Next Steps
-
-1. Add real duplex barge-in handling so `allow_barge_in` can actively stop TTS output.
-2. Persist tone and realism score directly onto transcript turns for easier grading use.
-3. Feed conversational realism into the grading pipeline as a separate rubric dimension.
-4. Visualize `micro_behavior_timeline` in the manager replay UI.
+- `conversational_realism.turn_count`
+- `conversational_realism.average_score`
+- `conversational_realism.latest_score`
+- `conversational_realism.min_score`
+- `conversational_realism.max_score`

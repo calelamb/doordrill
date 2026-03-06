@@ -4,10 +4,11 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.assignment import Assignment
 from app.models.scenario import Scenario
+from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 
 SKILL_ORDER = ["opening", "rapport", "pitch_clarity", "objection_handling", "closing"]
@@ -53,7 +54,10 @@ class AdaptiveTrainingService:
 
     def build_plan(self, db: Session, rep_id: str) -> dict[str, Any]:
         sessions = db.scalars(
-            select(DrillSession).where(DrillSession.rep_id == rep_id).order_by(DrillSession.ended_at.asc(), DrillSession.created_at.asc())
+            select(DrillSession)
+            .where(DrillSession.rep_id == rep_id)
+            .order_by(DrillSession.ended_at.asc(), DrillSession.created_at.asc())
+            .options(selectinload(DrillSession.scorecard), selectinload(DrillSession.turns))
         ).all()
         scenario_ids = {session.scenario_id for session in sessions}
         scenarios = db.scalars(select(Scenario)).all()

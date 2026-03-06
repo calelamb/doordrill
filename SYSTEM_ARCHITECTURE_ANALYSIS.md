@@ -2,492 +2,464 @@
 
 Repository snapshot analyzed on March 6, 2026.
 
-## Scope and Current Reality
+## Executive Summary
 
-This document describes the architecture that is actually implemented in this repository today, not the full target-state platform described in the bootstrap prompt.
+DoorDrill currently ships as a three-surface system:
 
-What exists now:
+- an Expo mobile app for reps to start and run drills
+- a FastAPI backend that owns session state, persistence, post-processing, and manager APIs
+- a React/Vite dashboard for manager feed, replay, analytics, and follow-up actions
 
-- A FastAPI backend with REST endpoints, a websocket voice gateway, persistence models, and a minimal grading pipeline
-- A small React manager dashboard scaffold for feed and replay workflows
-- Tests covering the backend assignment -> session -> grading -> manager review flow
+The core training loop is implemented and test-covered: assignment or practice session creation, live websocket drill, transcript/event persistence, post-session cleanup, grading, and manager replay/feed consumption. The largest architectural gap is that several "versioned" or "intelligent" pieces are present only partially: prompt versions are stored but not executed dynamically, rubric JSON is persisted but not applied during grading, micro-behavior logic exists but is not wired into the websocket path, and audio artifact storage is modeled as presigned URLs rather than completed uploads.
 
-What does not exist in this repo today:
-
-- The Expo mobile client referenced in the bootstrap prompt
-- Real Deepgram, OpenAI, or ElevenLabs streaming integrations
-- Async grading via Celery or a separate worker process
-- Real S3/R2 artifact upload and presigned URLs
-- Analytics, alerts, benchmarks, command-center, or coaching-note endpoints described in roadmap docs
-
-## High-Level Architecture
+## Architecture Diagram
 
 ```mermaid
 flowchart TD
-    D["Manager Dashboard\nReact + Vite\nfeed + replay + override UI"] -->|REST| API["FastAPI App\napp/main.py"]
-    REP["Rep Client\nconceptually expected\nnot present in repo"] -->|REST create session| API
-    REP -->|WS session events| WS["WebSocket Gateway\napp/voice/ws.py"]
+    subgraph Clients
+        M["Mobile App\nExpo React Native\nPreSession -> Session -> Score"]
+        D["Manager Dashboard\nReact 18 + Vite\nFeed, Replay, Analytics, Actions"]
+    end
 
-    API --> MGR["Manager API\napp/api/manager.py"]
-    API --> REPAPI["Rep API\napp/api/rep.py"]
-    API --> WS
+    subgraph Backend["FastAPI Backend"]
+        APP["app/main.py\nrouter composition + startup init"]
+        REPAPI["app/api/rep.py"]
+        MGRAPI["app/api/manager.py"]
+        SCENAPI["app/api/scenarios.py"]
+        WS["app/voice/ws.py\nlive session gateway"]
+        ORCH["ConversationOrchestrator\nstage/emotion/prompt state"]
+        PROVIDERS["ProviderSuite\nSTT + LLM + TTS adapters"]
+        LEDGER["SessionLedgerService\nsession_events + session_turns + artifacts"]
+        POST["SessionPostprocessService\ncleanup -> grade -> notify"]
+        CLEAN["TranscriptCleanupService"]
+        GRADE["GradingService"]
+        ADAPT["AdaptiveTrainingService"]
+    end
 
-    WS --> ORCH["ConversationOrchestrator\napp/services/conversation_orchestrator.py"]
-    WS --> PROVIDERS["ProviderSuite\nSTT + LLM + TTS adapters\napp/services/provider_clients.py"]
-    WS --> LEDGER["SessionLedgerService\napp/services/ledger_service.py"]
-    WS --> GRADING["GradingService\napp/services/grading_service.py"]
+    subgraph Data["Persistence and Infra"]
+        DB[("PostgreSQL/SQLite via SQLAlchemy")]
+        REDIS["Redis or InMemoryEventBuffer"]
+        CELERY["Celery workers\noptional"]
+        STORE["S3/R2 style storage\nor fallback URLs"]
+        EXT["OpenAI / Anthropic\nDeepgram / ElevenLabs"]
+    end
 
-    LEDGER --> BUFFER["RedisEventBuffer or InMemoryEventBuffer\napp/services/ledger_buffer.py"]
-    LEDGER --> DB[("SQLAlchemy DB\nSQLite by default")]
-    MGR --> DB
+    M -->|REST| REPAPI
+    M -->|WebSocket| WS
+    D -->|REST| MGRAPI
+    D -->|REST| SCENAPI
+
+    APP --> REPAPI
+    APP --> MGRAPI
+    APP --> SCENAPI
+    APP --> WS
+
+    WS --> ORCH
+    WS --> PROVIDERS
+    WS --> LEDGER
+    WS --> POST
+
     REPAPI --> DB
-    GRADING --> DB
-
-    MGR --> STORAGE["StorageService\nplaceholder presigning"]
-    STORAGE --> URL["Placeholder artifact URLs"]
+    MGRAPI --> DB
+    SCENAPI --> DB
+    LEDGER --> DB
+    LEDGER --> REDIS
+    POST --> CLEAN
+    POST --> GRADE
+    POST --> CELERY
+    CLEAN --> DB
+    CLEAN --> STORE
+    GRADE --> DB
+    GRADE --> EXT
+    PROVIDERS --> EXT
+    MGRAPI --> ADAPT
+    ADAPT --> DB
 ```
 
-## Repository Architecture Map
+## Component Responsibilities
 
-### Backend entry and composition
+| Component | Files | Responsibility |
+| --- | --- | --- |
+| Mobile rep experience | `mobile/src/screens/PreSessionScreen.tsx`, `mobile/src/screens/SessionScreen.tsx`, `mobile/src/screens/ScoreScreen.tsx` | Starts sessions, streams audio/VAD over websocket, plays AI audio, polls for scorecards after session end |
+| Manager dashboard | `dashboard/src/App.tsx`, `dashboard/src/lib/api.ts`, `dashboard/src/pages/ManagerFeedPage.tsx`, `dashboard/src/pages/ManagerReplayPage.tsx` | Consumes manager feed, replay, analytics, and follow-up endpoints |
+| API composition | `backend/app/main.py` | Initializes DB on startup and registers REST + websocket routers |
+| Rep API | `backend/app/api/rep.py` | Creates sessions, exposes session details/history/progress, returns rep-visible coaching note |
+| Manager API | `backend/app/api/manager.py` | Manages assignments, feed, replay, reviews, coaching notes, analytics, and adaptive training endpoints |
+| Scenario API | `backend/app/api/scenarios.py` | CRUD for scenarios with org scoping |
+| Websocket session runtime | `backend/app/voice/ws.py` | Authenticates websocket clients, runs the turn loop, persists events/turns, finalizes sessions |
+| Conversation state engine | `backend/app/services/conversation_orchestrator.py` | Holds per-session in-memory state, detects stage/emotion changes, builds conversation prompts |
+| Prompt version metadata | `backend/app/models/prompt_version.py`, `backend/app/db/init_db.py` | Stores prompt version labels and template blueprints, but does not drive runtime prompt execution |
+| Provider abstraction | `backend/app/services/provider_clients.py` | Wraps Deepgram/OpenAI/Anthropic/ElevenLabs with mock fallbacks |
+| Event and transcript ledger | `backend/app/services/ledger_service.py`, `backend/app/services/ledger_buffer.py` | Buffers websocket events, flushes them to `session_events`, commits `session_turns`, creates transcript artifacts |
+| Post-session pipeline | `backend/app/services/session_postprocess_service.py`, `backend/app/tasks/post_session_tasks.py` | Runs cleanup, grading, and notifications inline or via Celery |
+| Transcript cleanup | `backend/app/services/transcript_cleanup_service.py` | Normalizes turns and optionally re-transcribes uploaded audio with Whisper |
+| Grading | `backend/app/services/grading_service.py` | Builds grading prompts, calls OpenAI JSON mode if configured, normalizes fallback results, stores scorecards |
+| Adaptive training | `backend/app/services/adaptive_training_service.py` | Converts historical session/scorecard data into skill profiles and scenario recommendations |
+| Persistence model | `backend/app/models/*.py` | Stores users, assignments, scenarios, sessions, events, turns, artifacts, scorecards, reviews, and analytics facts |
 
-- `backend/app/main.py`
-  - Creates the FastAPI app
-  - Initializes the database on startup
-  - Registers manager REST routes, rep REST routes, and websocket routes
-- `backend/app/core/config.py`
-  - Central settings source
-  - Defaults to SQLite and optional Redis
-  - Chooses provider adapters with env-driven flags
-- `backend/app/db/session.py`
-  - Creates the SQLAlchemy engine and session factory
+## 1. Conversation Engine Structure
 
-### API layer
+The live conversation engine is split between the websocket gateway and the orchestrator:
 
-- `backend/app/api/rep.py`
-  - Lists assignments for a rep
-  - Creates a new drill session
-  - Returns session + scorecard data after grading
-- `backend/app/api/manager.py`
-  - Creates assignments
-  - Creates follow-up assignments from scorecards
-  - Returns manager feed
-  - Returns replay data
-  - Accepts score overrides and notes
+- `backend/app/voice/ws.py` owns the runtime loop.
+- `backend/app/services/conversation_orchestrator.py` owns the in-memory state machine.
+- `backend/app/services/provider_clients.py` owns external provider I/O.
+- `backend/app/services/ledger_service.py` owns durable event and turn persistence.
 
-### Real-time session layer
+### Runtime shape
 
-- `backend/app/voice/ws.py`
-  - Accepts websocket connections for session runtime
-  - Validates supported client event types
-  - Buffers every inbound and outbound event
-  - Converts rep audio payloads into transcript text through the STT adapter
-  - Advances conversation state
-  - Streams text and audio responses back to the client
-  - Commits transcript turns
-  - Finalizes the session and triggers grading
+1. `POST /rep/sessions` creates a `sessions` row and stamps `prompt_version`.
+2. The mobile client opens `WS /ws/sessions/{session_id}`.
+3. `session_ws()` loads the `Session`, `Scenario`, and actor, then binds scenario context into the orchestrator.
+4. Client events are accepted through an `asyncio.Queue`:
+   - `client.audio.chunk`
+   - `client.vad.state`
+   - `client.session.end`
+5. Each rep utterance goes through:
+   - STT finalization
+   - stage/emotion/objection evaluation
+   - rep turn persistence
+   - streamed LLM response
+   - streamed TTS response
+   - AI turn persistence
+6. On disconnect or session end, the gateway:
+   - flushes buffered events
+   - compacts transcript turns into an artifact
+   - creates an audio artifact record
+   - marks the session `processing`
+   - marks the assignment `completed`
+   - triggers post-session cleanup, grading, and notification work
 
-### Domain services
+### What the websocket layer handles directly
 
-- `backend/app/services/conversation_orchestrator.py`
-  - Holds in-memory conversation state keyed by `session_id`
-  - Detects stage transitions with keyword heuristics
-  - Extracts objection tags with keyword heuristics
-  - Builds the current system prompt
-- `backend/app/services/provider_clients.py`
-  - Provides STT, LLM, and TTS abstraction points
-  - Currently all real providers fall back to deterministic mock behavior
-- `backend/app/services/ledger_buffer.py`
-  - Buffers websocket events in memory or Redis
-- `backend/app/services/ledger_service.py`
-  - Flushes buffered events to `session_events`
-  - Commits normalized transcript turns to `session_turns`
-  - Compacts turns into a canonical transcript artifact
-- `backend/app/services/grading_service.py`
-  - Produces a scorecard from completed session turns
-  - Uses local heuristics, not an external judge model
-- `backend/app/services/manager_feed_service.py`
-  - Builds feed rows from assignments, sessions, scorecards, and manager reviews
-- `backend/app/services/storage_service.py`
-  - Returns placeholder URLs for stored artifacts
+- STT partial emission via `server.stt.partial`
+- final STT emission via `server.stt.final`
+- AI text token streaming via `server.ai.text.delta`
+- AI audio chunk streaming via `server.ai.audio.chunk`
+- stage transitions through `server.session.state`
+- interruption/barge-in detection via `client.vad.state` and `client.audio.chunk`
+- silence filler generation when the rep stops talking for `SILENCE_FILLER_SECONDS`
 
-### Persistence model
+### State model
 
-- `backend/app/models/scenario.py`
-  - Stores scenario metadata, persona JSON, rubric JSON, and stage list
-- `backend/app/models/assignment.py`
-  - Binds a scenario to a rep with due date, target score, and retry policy
-- `backend/app/models/session.py`
-  - Stores session lifecycle, raw event ledger, transcript turns, and artifacts
-- `backend/app/models/scorecard.py`
-  - Stores grading outputs and manager review audit rows
-- `backend/app/models/user.py`
-  - Stores organizations, teams, and users
+`ConversationState` tracks:
 
-### Frontend scaffold
-
-- `dashboard/src/App.tsx`
-  - Loads manager feed and selected replay
-- `dashboard/src/lib/api.ts`
-  - Fetch wrappers for feed, replay, override, and follow-up endpoints
-- `dashboard/src/components/FeedList.tsx`
-  - Shows sessions in the manager feed
-- `dashboard/src/components/ReplayPanel.tsx`
-  - Shows transcript, stage timeline, weaknesses, and manager actions
-
-## Requested Deep-Dive Analysis
-
-### 1. Conversation engine structure
-
-The conversation engine is centered on `backend/app/voice/ws.py` and `backend/app/services/conversation_orchestrator.py`.
-
-Runtime structure:
-
-1. `POST /rep/sessions` creates a `sessions` row with `status=active`
-2. `WS /ws/sessions/{session_id}` accepts the live session
-3. The websocket gateway loads the `Session` row and starts a loop
-4. For every `client.audio.chunk` event:
-   - the raw event is buffered into the session ledger
-   - STT finalization is requested from the provider adapter
-   - the orchestrator computes stage transition, objection tags, and a system prompt
-   - the rep turn is committed to `session_turns`
-   - the LLM adapter streams response text deltas
-   - each text delta is sent to the client and buffered into the ledger
-   - each text delta is also passed into TTS streaming
-   - TTS audio chunks are sent to the client and buffered into the ledger
-   - once streaming ends, the final AI turn is committed to `session_turns`
-5. On `client.session.end`, the gateway flushes events, compacts transcript artifacts, marks the assignment complete, and calls grading
-
-Important implementation detail:
-
-- Conversation state is not persisted in the database or Redis
-- `ConversationOrchestrator` keeps a process-local dictionary of `ConversationState`
-- That means stage state is lost on process restart and is not shared across workers
-
-### 2. Prompt construction logic
-
-Prompt construction is minimal and is entirely implemented in `ConversationOrchestrator._build_system_prompt`.
-
-Current prompt shape:
-
-```text
-You are a homeowner in a door-to-door sales roleplay.
-Stay realistic, challenge weak claims, and keep responses concise.
-Current stage: <stage>.
-```
-
-Key observations:
-
-- The prompt only uses the inferred stage
-- It does not load the `Scenario` row from the database
-- It does not include `Scenario.persona`
-- It does not include `Scenario.rubric`
-- It does not include prior transcript turns
-- It does not include assignment context, rep metadata, or organizational context
-
-The LLM adapter contract in `provider_clients.py` receives only:
-
-- `rep_text`
 - `stage`
-- `system_prompt`
+- `emotion`
+- `resistance_level`
+- rep and AI turn counts
+- `rapport_score`
+- `active_objections`
+- `last_behavior_signals`
 
-This means the actual conversation behavior today is mostly driven by:
+This state is process-local. It is stored in Python dictionaries keyed by `session_id`, not in the database or Redis.
 
-- keyword-based stage classification in the orchestrator
-- keyword-based branching in the mock LLM client
+### Notable non-participating code
 
-### 3. Persona modeling implementation
+`backend/app/services/micro_behavior_engine.py` is a richer persona-response post-processor, but it is not called from `backend/app/voice/ws.py`. Its behavior is validated only in tests today.
 
-Persona modeling exists only as stored data, not as runtime behavior.
+## 2. Prompt Construction Logic
 
-Implemented persona representation:
+Prompting is split into two separate builders.
 
-- `Scenario.persona: JSON`
-- Seeded in tests with values such as:
-  - `attitude`
-  - `concerns`
+### Conversation prompt construction
 
-Current limitations:
+`PromptBuilder.build()` in `backend/app/services/conversation_orchestrator.py` builds the live system prompt from:
 
-- The websocket runtime never queries the `Scenario` table
-- The orchestrator never reads `persona`
-- The provider adapters never receive persona fields
-- No voice, temperament, objection schedule, or buying propensity is modeled beyond hardcoded string heuristics
+- `ScenarioSnapshot`
+- `HomeownerPersona`
+- current stage
+- current emotion
+- resistance level
+- active objections
+- recent behavioral signals
+- the `session.prompt_version` string
 
-Net result:
+The prompt is structured as layered instructions:
 
-- Persona is present in the schema as future architecture
-- Persona is absent from live session execution
+1. immersion contract
+2. persona profile
+3. stage instructions
+4. emotional context
+5. anti-pattern guards
 
-### 4. Scenario structure
+The system prompt is passed to the LLM adapter as the system message. The rep utterance is passed as the user message.
 
-Scenario structure is implemented in `backend/app/models/scenario.py` as:
+### Important prompt-version limitation
 
-- `id`
+The database stores prompt versions in `prompt_versions`, and `sessions.prompt_version` is stamped from the active row at session creation. But runtime prompt generation does not load `PromptVersion.content`; it only injects the version string into the generated prompt. In practice:
+
+- prompt templates are hardcoded in Python
+- `PromptVersion` is metadata, not the source of truth
+
+### Conversation memory limitation
+
+The OpenAI and Anthropic adapters attempt to maintain conversation history with `_TaskConversationHistoryMixin`. That history is keyed by the current asyncio task. Because `backend/app/voice/ws.py` creates a fresh `llm_worker` task for each response, prior turns are not carried into the next turn's LLM call. The effective live prompt context is therefore:
+
+- current system prompt
+- current rep utterance
+- no durable multi-turn transcript history
+
+### Grading prompt construction
+
+`GradingPromptBuilder.build()` in `backend/app/services/grading_service.py` builds a separate prompt that contains:
+
+- grading instructions
+- weighted category rules
+- the JSON schema from `StructuredScorecardPayload`
+- the full transcript as numbered turn rows
+
+This grading prompt is far closer to transcript-wide evaluation than the live conversation prompt.
+
+## 3. Persona Modeling Implementation
+
+Persona modeling is implemented in schema, orchestration, and voice selection, but only partially in response realism.
+
+### Persona source of truth
+
+Scenario personas live in `Scenario.persona` and commonly contain:
+
+- `name`
+- `attitude`
+- `concerns`
+- `objection_queue`
+- `buy_likelihood`
+- `softening_condition`
+- optional `voice_id`
+
+### Runtime persona usage
+
+`HomeownerPersona.from_payload()` and `ScenarioSnapshot.from_scenario()` convert scenario JSON into runtime context. That context influences:
+
+- starting emotion via `PERSONA_ATTITUDE_TO_EMOTION`
+- seeded objections from persona concerns and objection queue
+- prompt layer content
+- resistance changes after rep behavior
+- optional TTS voice selection when `persona.voice_id` is present
+
+### Persona gaps
+
+- persona rubric alignment is not enforced in the grader
+- persona does not alter stage progression rules beyond initial conditions
+- micro-behavior realism is not applied in the live path
+- no persona state is persisted independently of session memory
+
+## 4. Scenario Structure
+
+Scenarios are fully modeled as durable domain objects.
+
+### Schema
+
+`backend/app/models/scenario.py` stores:
+
 - `name`
 - `industry`
 - `difficulty`
 - `description`
 - `persona` JSON
 - `rubric` JSON
-- `stages` JSON list
+- `stages` JSON
 - `created_by_id`
 
-Scenarios are referenced by:
+### Lifecycle
 
-- `assignments.scenario_id`
-- `sessions.scenario_id`
+- `backend/app/api/scenarios.py` exposes list, read, create, and update endpoints
+- `backend/app/db/init_db.py` seeds `PHASE_ONE_SCENARIOS`
+- seeded scenarios all use `STANDARD_RUBRIC` and `PHASE_ONE_STAGES`
 
-What the runtime uses:
+### Runtime usage
 
-- Only the raw `scenario_id` is carried through assignment and session creation
-- The websocket layer does not hydrate the scenario object during conversation
-- Stage progression uses hardcoded stage names in `ConversationOrchestrator`
+At session start, the websocket gateway loads the scenario and binds it into the orchestrator. The live runtime uses:
 
-This creates a mismatch:
+- `difficulty`
+- `description`
+- `persona`
+- `stages`
 
-- The schema supports configurable scenarios
-- The runtime currently behaves as if every scenario is the same generic homeowner flow
+The live runtime does not use:
 
-### 5. Grading engine implementation
+- `rubric`
 
-The grading engine is implemented in `backend/app/services/grading_service.py`.
+### Downstream usage
 
-Current grading behavior:
+Scenarios are also consumed by:
 
-1. Load the `Session`
-2. Read `session.turns`
-3. Split turns into rep turns and AI turns
-4. Derive category scores from simple heuristics:
-   - more rep turns raise opening and pitch scores
-   - mentions of `price` raise objection-handling score
-   - mentions of `schedule` or `today` raise closing score
-   - presence of AI turns slightly raises professionalism
-5. Average the categories into `overall_score`
-6. Infer `weakness_tags` from categories under `7.0`
-7. Create fixed-format highlights and a fixed AI summary
-8. Upsert the `Scorecard`
-9. Mark the session `graded`
+- assignment creation
+- feed and replay enrichment
+- adaptive training recommendations
+- manager analytics breakdowns
 
-Important architectural reality:
+## 5. Grading Engine Implementation
 
-- Despite the async method signature, grading is invoked inline from websocket finalization
-- There is no Celery queue, no worker boundary, and no retry system
-- The grading rubric stored on `Scenario.rubric` is not used
-- Category names in code do not exactly match the bootstrap weights table
+The grading engine is implemented as a post-session pipeline, not as part of the websocket turn loop.
 
-### 6. Training loop flow from session start to scoring
+### Pipeline stages
+
+`SessionPostprocessService` runs three task types:
+
+1. `cleanup`
+2. `grade`
+3. `notify`
+
+It can run:
+
+- inline in the API process
+- or via Celery queues if `USE_CELERY=true`
+
+### Transcript cleanup
+
+`TranscriptCleanupService.cleanup_session_transcript()`:
+
+- reads ordered `session_turns`
+- normalizes whitespace
+- stores a `transcript_cleanup` artifact
+- optionally tries Whisper re-transcription against the latest `audio` artifact
+
+### Grading service
+
+`GradingService.grade_session()`:
+
+- loads the session and turns
+- builds a transcript-wide grading prompt
+- attempts an OpenAI chat completion in JSON mode
+- falls back to deterministic heuristics if no key or provider failure occurs
+- writes or updates the `scorecards` row
+- marks the session `graded`
+- refreshes analytics materialization through `AnalyticsRefreshService`
+
+### Category model
+
+The grader uses five fixed categories:
+
+- `opening` = 15%
+- `pitch_delivery` = 25%
+- `objection_handling` = 30%
+- `closing_technique` = 20%
+- `professionalism` = 10%
+
+### Grading normalization
+
+The service validates and clamps:
+
+- category scores
+- overall score
+- evidence turn IDs
+- highlight structure
+- weakness tags
+- summary length
+
+### Current divergence from target architecture
+
+- grading uses OpenAI, not Claude Opus
+- grading is transcript-wide but not scenario-rubric-aware
+- fallback grading is lightweight heuristic scoring, not an LLM-as-judge equivalent
+
+## 6. Training Loop Flow From Session Start To Scoring
 
 ```mermaid
 sequenceDiagram
-    participant Manager
-    participant RepClient as Rep Client
-    participant Rest as FastAPI REST
+    participant Rep as Mobile Rep App
+    participant API as FastAPI Rep API
     participant WS as WebSocket Gateway
     participant Orch as ConversationOrchestrator
-    participant Providers as ProviderSuite
-    participant Ledger as SessionLedgerService
+    participant Prov as ProviderSuite
     participant DB as Database
-    participant Grader as GradingService
-    participant Dashboard as Manager Dashboard
+    participant Post as Postprocess Service
+    participant Grade as Grading Service
+    participant Mgr as Manager Dashboard / Replay
 
-    Manager->>Rest: POST /manager/assignments
-    Rest->>DB: create Assignment
+    Rep->>API: POST /rep/sessions
+    API->>DB: create assignment if needed, create session
+    API-->>Rep: session_id
 
-    RepClient->>Rest: POST /rep/sessions
-    Rest->>DB: create Session(status=active)
+    Rep->>WS: connect /ws/sessions/{session_id}
+    WS->>DB: load session + scenario
+    WS->>Orch: bind_session_context()
+    WS-->>Rep: server.session.state connected
 
-    RepClient->>WS: connect /ws/sessions/{id}
-    WS->>DB: load Session
-    WS-->>RepClient: server.session.state(connected)
-
-    loop for each rep utterance
-        RepClient->>WS: client.audio.chunk
-        WS->>Ledger: buffer inbound event
-        WS->>Providers: STT.finalize_utterance
-        Providers-->>WS: transcript text
-        WS->>Orch: prepare_rep_turn(rep_text)
-        Orch-->>WS: stage + objection tags + system_prompt
+    loop Per rep utterance
+        Rep->>WS: client.audio.chunk + VAD signals
+        WS->>DB: buffer session event
+        WS->>Prov: STT finalize_utterance()
+        Prov-->>WS: transcript
+        WS->>Orch: prepare_rep_turn()
+        Orch-->>WS: stage, emotion, objections, system_prompt
         WS->>DB: commit rep turn
-        WS-->>RepClient: server.stt.final
-        WS-->>RepClient: optional stage change event
-        WS->>Providers: LLM.stream_reply
-        loop streamed reply chunks
-            Providers-->>WS: text delta
-            WS-->>RepClient: server.ai.text.delta
-            WS->>Providers: TTS.stream_audio(text chunk)
-            Providers-->>WS: audio chunk
-            WS-->>RepClient: server.ai.audio.chunk
-            WS->>Ledger: buffer outbound events
-        end
-        WS->>DB: commit AI turn
-        WS-->>RepClient: server.turn.committed
+        WS->>Prov: LLM stream_reply()
+        Prov-->>WS: text deltas
+        WS-->>Rep: server.ai.text.delta
+        WS->>Prov: TTS stream_audio()
+        Prov-->>WS: audio chunks
+        WS-->>Rep: server.ai.audio.chunk
+        WS->>DB: commit ai turn
     end
 
-    RepClient->>WS: client.session.end
-    WS->>Ledger: flush remaining events
-    WS->>DB: write transcript artifact + audio artifact metadata
-    WS->>DB: set Session(status=processing), set Assignment(status=completed)
-    WS->>Grader: grade_session
-    Grader->>DB: upsert Scorecard, set Session(status=graded)
+    Rep->>WS: client.session.end or disconnect
+    WS->>DB: flush events, compact transcript, create audio artifact, mark session processing
+    WS->>Post: enqueue_or_run(session_id)
+    Post->>DB: transcript cleanup artifact
+    Post->>Grade: grade_session()
+    Grade->>DB: upsert scorecard, mark session graded
 
-    Dashboard->>Rest: GET /manager/feed
-    Rest->>DB: join assignments/sessions/scorecards/reviews
-    Dashboard->>Rest: GET /manager/sessions/{id}/replay
-    Rest->>DB: load turns/artifacts/scorecard
+    Mgr->>DB: feed/replay queries through manager API
+    Rep->>API: GET /rep/sessions/{session_id}
+    API-->>Rep: session + scorecard + coaching note
 ```
 
-## Component Responsibilities
+### Step-by-step narrative
 
-### FastAPI app
+1. The mobile pre-session screen loads the assignment and scenario, then calls `createRepSession()`.
+2. The rep session is created in `backend/app/api/rep.py`, including a `prompt_version` label from the active prompt row.
+3. The live drill runs entirely inside `backend/app/voice/ws.py`.
+4. Each utterance is persisted twice:
+   - as raw websocket events in `session_events`
+   - as normalized conversational turns in `session_turns`
+5. When the drill ends, the session enters `processing`.
+6. Cleanup and grading run inline or asynchronously.
+7. The rep score screen polls `GET /rep/sessions/{session_id}` until a scorecard exists.
+8. The manager dashboard reads the same persisted session through feed and replay endpoints.
 
-- Compose routers
-- Initialize persistence
-- Provide healthcheck
+## 7. System Data Flow
 
-### Rep API
+### Assignment and session bootstrap
 
-- Session creation and rep access to session outcomes
-- Assignment discovery for the rep workflow
+- Managers create assignments through `POST /manager/assignments`.
+- Reps can also start a practice session without an assignment; `create_session()` auto-creates one.
+- Session rows join rep, scenario, and assignment identities early, so later replay/feed queries do not have to reconstruct ownership.
 
-### Manager API
+### Live event flow
 
-- Assignment creation
-- Review workflow
-- Replay retrieval
-- Follow-up assignment routing
+- raw client and server websocket events are buffered in Redis or memory
+- periodic flushes persist them to `session_events`
+- committed transcript turns persist to `session_turns`
+- state transitions persist as `server.session.state` events
 
-### Websocket gateway
+### Post-session artifact flow
 
-- Own the live drill loop
-- Normalize event protocol
-- Mediate providers
-- Capture transport telemetry
-- Trigger post-session finalization
+- transcript compaction creates a `canonical_transcript` artifact
+- cleanup creates a `transcript_cleanup` artifact
+- audio finalization creates an `audio` artifact record containing upload metadata
 
-### Conversation orchestrator
+### Consumption flow
 
-- Track current stage
-- Detect objections
-- Build prompt scaffolding
+- rep score screen consumes `session`, `scorecard`, and the latest rep-visible coaching note
+- manager feed joins `assignments`, `sessions`, `scorecards`, and `manager_reviews`
+- manager replay joins turns, events, artifacts, reviews, and scenario metadata
+- adaptive training reads scored historical sessions and scorecards to recommend next scenarios
 
-### Provider suite
+## 8. Potential Architectural Risks
 
-- Hide vendor-specific STT, LLM, and TTS implementations behind stable interfaces
-- Allow mock operation for local tests
-
-### Ledger subsystem
-
-- Preserve a durable event history
-- Build canonical transcript turns
-- Create replay artifacts
-
-### Grading subsystem
-
-- Transform transcript turns into scorecard data
-- Link evidence and weakness tags
-
-### Dashboard
-
-- Surface manager feed
-- Render replay state from backend data
-- Invoke review and follow-up actions
-
-## System Data Flow
-
-### Persistence flow
-
-- Assignments are created first and own the training obligation
-- Sessions are created per assignment attempt
-- Websocket events are buffered, then written to `session_events`
-- Higher-level transcript turns are written to `session_turns`
-- Post-session artifacts are written to `session_artifacts`
-- Grading outputs are written to `scorecards`
-- Human review is written to `manager_reviews`
-
-### Read flow for managers
-
-- Feed flow:
-  - `ManagerFeedService` starts from assignments owned by a manager
-  - walks to sessions
-  - optionally attaches scorecards
-  - marks whether a manager review exists
-- Replay flow:
-  - loads session turns in order
-  - derives objection and stage timelines from turns
-  - loads artifact metadata
-  - attaches scorecard details
-
-### Control flow
-
-- REST bootstraps long-lived entities such as assignments and sessions
-- Websocket handles the latency-sensitive part of the product
-- The dashboard is a thin client over manager endpoints
-
-## Potential Architectural Risks
-
-### 1. Scenario and persona data are not used in live conversations
-
-The schema already stores rich scenario metadata, but the runtime ignores it. This means product differentiation currently lives in future intent rather than executed behavior.
-
-### 2. Conversation state is process-local
-
-`ConversationOrchestrator` stores state in an in-memory dictionary. Multi-worker deployment, websocket handoff, or process restart would break stage continuity.
-
-### 3. The LLM sees almost no context
-
-The prompt contains only a generic instruction and current stage. There is no transcript history, no persona grounding, and no scenario-specific objective, so even a real LLM integration would produce weak and inconsistent roleplay quality.
-
-### 4. Provider integrations are still mock implementations
-
-`DeepgramSttClient`, `OpenAiLlmClient`, and `ElevenLabsTtsClient` are interface shells that currently delegate to mock behavior. The hardest production risks, especially latency and backpressure, are therefore still untested.
-
-### 5. Grading runs inline on websocket teardown
-
-Session finalization calls grading directly inside the websocket code path. Slow grading or provider failures would block teardown, complicate retries, and reduce reliability under load.
-
-### 6. Grading ignores the stored rubric
-
-The `Scenario.rubric` field exists but is unused. Scorecards are generated from hardcoded heuristics, so scenario-specific grading is not yet possible.
-
-### 7. Artifact persistence is only metadata-level
-
-The system creates transcript artifacts and audio artifact metadata rows, but it does not upload real audio or generate real presigned storage URLs. Replay fidelity and retention are therefore incomplete.
-
-### 8. Auth and tenancy are only scaffolded
-
-Authorization is based on headers and role checks. There is no JWT validation, no organization-scoped data enforcement, and no websocket auth handshake.
-
-### 9. Database and infra topology do not match the target stack
-
-The default runtime is SQLite with optional Redis. Postgres, Celery, and object storage are target architecture, not current architecture.
-
-### 10. Error handling leaves gaps in lifecycle guarantees
-
-The websocket finalizer logs exceptions and rolls back on failure, but there is no durable dead-letter path, failed-grading retry, or explicit transition to `SessionStatus.FAILED`.
-
-### 11. The frontend architecture is incomplete
-
-The repo contains only a small manager dashboard. The rep mobile client and broader dashboard analytics surface described in product docs are not implemented here.
-
-## Recommended Architecture Priorities
-
-1. Hydrate `Scenario` on session start and inject `description`, `persona`, `rubric`, and `stages` into orchestration.
-2. Replace in-memory conversation state with session-backed persisted state or Redis-backed state.
-3. Pass transcript history into the LLM adapter instead of only the latest rep utterance.
-4. Move grading onto a real async worker boundary and use explicit failure/retry states.
-5. Replace placeholder provider adapters and storage URLs with real integrations while preserving the current event contract.
-6. Add organization-aware auth for both REST and websocket flows before expanding manager analytics.
+1. Process-local conversation state can be lost or split. `ConversationOrchestrator` stores state in memory, so process restarts or multi-worker websocket routing can break stage and emotion continuity.
+2. Multi-turn LLM memory is effectively absent. Provider history is keyed to per-response asyncio tasks, so each LLM call behaves like a fresh turn with no transcript history beyond the current utterance.
+3. Prompt versioning is cosmetic. `PromptVersion.content` is seeded and stored, but runtime prompt generation ignores it, which blocks true prompt rollout, rollback, and auditability.
+4. Scenario rubrics are not enforced. `Scenario.rubric` is persisted but the grader uses fixed global weights, so scenario-specific evaluation logic does not exist yet.
+5. Mobile websocket auth is not production-ready. `SessionWsClient` opens the websocket without headers or `access_token`, so enabling strict websocket auth will break the mobile client until auth transport is added.
+6. Audio format expectations are misaligned. The mobile recorder emits AAC/M4A, while the Deepgram path is tuned for linear16 or opus; real STT quality will depend on fallback behavior unless codec handling is tightened.
+7. Audio artifacts may reference objects that do not exist. Session finalization stores presigned upload metadata, but the backend does not itself upload accumulated session audio bytes, which makes replay audio URLs and Whisper cleanup fragile.
+8. Turn indexing can race under concurrent connections. `_next_turn_index()` counts existing turns on each commit, so overlapping websocket connections for the same session could collide without a stronger concurrency guard.
+9. Response realism is only partially wired. `MicroBehaviorEngine` exists but is not applied in the live path, so persona nuance and speech cadence depend mostly on the base LLM output and TTS streaming.
+10. Provider behavior diverges from the product spec. The current implementation supports Deepgram/OpenAI/Anthropic/ElevenLabs conditionally, but defaults to mock providers in development and uses OpenAI rather than Claude for grading.
 
 ## Bottom Line
 
-DoorDrill currently has a solid backend skeleton for:
-
-- assignment lifecycle
-- websocket session orchestration
-- immutable interaction capture
-- transcript replay
-- scorecard persistence
-- manager review workflow
-
-The main architectural gap is that the repository's data model already anticipates a scenario-driven, persona-rich, provider-backed training system, but the live runtime is still a deterministic scaffold with generic prompts, process-local state, mock providers, and synchronous heuristic grading.
+DoorDrill already has a coherent backbone: session creation, real-time drill orchestration, durable ledgers, post-session grading, manager replay/feed, and adaptive follow-up recommendations all exist in the repository. The next architectural maturity step is not adding new surfaces; it is tightening the execution of existing ones by making prompt versions executable, preserving conversational memory across turns and workers, aligning audio storage and auth with production requirements, and making scenario rubrics first-class inputs to grading.

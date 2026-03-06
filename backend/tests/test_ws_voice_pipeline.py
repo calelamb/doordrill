@@ -113,5 +113,15 @@ def test_ws_voice_pipeline_streams_events_in_order(client, seed_org, monkeypatch
         if len(text_positions) >= 2:
             assert audio_idx < text_positions[1]
 
+        first_text = next(message for message in batch if message["type"] == "server.ai.text.delta")
+        first_audio = next(message for message in batch if message["type"] == "server.ai.audio.chunk")
+        committed_turn = next(message for message in batch if message["type"] == "server.turn.committed")
+
+        assert "micro_behavior" in first_text["payload"]
+        assert "tone" in first_text["payload"]["micro_behavior"]
+        assert "micro_behavior" in first_audio["payload"]
+        assert "pause_before_ms" in first_audio["payload"]["micro_behavior"]
+        assert committed_turn["payload"]["micro_behavior"]["realism_score"] >= 1.0
+
     committed = [message for message in all_messages if message["type"] == "server.turn.committed"]
     assert len(committed) == 3

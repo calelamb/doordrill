@@ -1,25 +1,58 @@
-# DoorDrill Adaptive Training Engine
+# Adaptive Training Engine
 
-Repository snapshot analyzed and implemented on March 6, 2026.
+Repository snapshot analyzed on March 6, 2026.
 
 ## Purpose
 
-The adaptive training engine turns DoorDrill from a static assignment system into a progression system. It evaluates graded session history, estimates a rep's current skill graph, recommends scenarios that target the weakest skills, and can create assignments with adaptive metadata embedded in the assignment policy.
+DoorDrill already has the beginnings of an adaptive training loop in [backend/app/services/adaptive_training_service.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/services/adaptive_training_service.py) and manager endpoints in [backend/app/api/manager.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/api/manager.py). Phase 7 should turn that into a first-class system that:
 
-Implemented files:
+- tracks rep skill progression across sessions
+- adjusts future scenario difficulty without oscillating wildly
+- recommends scenarios that target the rep's weakest skills
+- gives managers visibility into readiness, growth velocity, and challenge calibration
 
-- `backend/app/services/adaptive_training_service.py`
-- `backend/app/schemas/adaptive_training.py`
-- `backend/app/api/manager.py`
+The core design principle is simple: adapt challenge based on demonstrated skill, but keep the rep inside a productive difficulty band rather than maximizing hardness.
 
-Implemented endpoints:
+## Current Implementation Baseline
 
-- `GET /manager/reps/{rep_id}/adaptive-plan?manager_id=...`
+The current backend already computes an adaptive plan on demand:
+
+- `GET /manager/reps/{rep_id}/adaptive-plan`
 - `POST /manager/reps/{rep_id}/adaptive-assignment`
+
+Today the engine derives a profile from:
+
+- scorecard category scores in [backend/app/models/scorecard.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/models/scorecard.py)
+- transcript objection tags and turns in [backend/app/models/session.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/models/session.py)
+- emotion transitions emitted by [backend/app/services/conversation_orchestrator.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/services/conversation_orchestrator.py)
+- scenario metadata in [backend/app/models/scenario.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/models/scenario.py)
+
+The current engine is useful, but it still has two structural limitations:
+
+1. adaptive state is computed at request time instead of persisted as first-class history
+2. adaptive decisions are stored inside `Assignment.retry_policy.adaptive_training` instead of dedicated tables
+
+Phase 7 should preserve the current API behavior while adding durable adaptive data models and analytics outputs.
+
+## System Flow
+
+```mermaid
+flowchart TD
+    A["Completed Session"] --> B["Post-session grading"]
+    B --> C["Session + scorecard + turns + emotion events"]
+    C --> D["Adaptive skill snapshot builder"]
+    D --> E["Rep skill graph/profile"]
+    E --> F["Difficulty target generator"]
+    F --> G["Scenario recommender"]
+    G --> H["Adaptive assignment decision"]
+    E --> I["Manager analytics surfaces"]
+```
 
 ## Skill Tracking Model
 
-The current skill graph tracks five rep skills:
+### Skill Nodes
+
+The active skill graph in [backend/app/services/adaptive_training_service.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/services/adaptive_training_service.py) uses five nodes:
 
 - `opening`
 - `rapport`
@@ -27,82 +60,71 @@ The current skill graph tracks five rep skills:
 - `objection_handling`
 - `closing`
 
-These are derived from existing session data rather than a new table.
+This is the right backbone for Phase 7. Keep it as the primary graph because it maps cleanly to DoorDrill's scoring categories and coaching workflows.
 
-Primary source signals:
+### Skill Edges
 
-- `scorecards.category_scores`
-  - `opening`
-  - `pitch_delivery`
-  - `objection_handling`
-  - `closing_technique`
-  - `professionalism`
-- session emotion trajectory from `session_events`
-- objection load from `session_turns`
-- scenario difficulty from `scenarios.difficulty`
+The current propagation edges are directionally correct and should remain the default graph:
 
-### Direct skill estimates
+- `opening -> rapport` with weight `0.35`
+- `rapport -> pitch_clarity` with weight `0.20`
+- `pitch_clarity -> objection_handling` with weight `0.30`
+- `objection_handling -> closing` with weight `0.35`
+- `rapport -> closing` with weight `0.15`
 
-The service derives per-session skill estimates as follows:
+These edges let DoorDrill avoid a naive "five isolated scores" model. A rep who improves opening quality and rapport should see some downstream lift, but not enough to mask a weak close.
 
-- `opening`
-  - mostly from scorecard opening
-- `rapport`
-  - opening + professionalism + emotion recovery
-- `pitch_clarity`
-  - pitch delivery + opening + professionalism
-- `objection_handling`
-  - objection score + objection load + emotion recovery + challenge bonus
-- `closing`
-  - closing score + pitch clarity support + emotion recovery
+### Session-Level Skill Snapshot
 
-### Emotion recovery
+Each graded session should produce a normalized snapshot on a `0-10` scale.
 
-The engine looks at the emotional path across the session:
+Current derived inputs already exist:
 
-- starting homeowner emotion
-- ending homeowner emotion
+- `opening` from scorecard category score
+- `pitch_clarity` from `pitch_delivery`
+- `objection_handling` from scorecard plus objection load
+- `closing` from `closing_technique`
+- `rapport` from opening, professionalism, and emotion recovery
+- `emotion_recovery` from first/last homeowner emotion state
+- `objection_load` from transcript objection tags
+- `scenario_difficulty` from `Scenario.difficulty`
 
-If the rep moves the homeowner toward a more open state, that increases `emotion_recovery`, which lifts:
-
-- rapport
-- objection handling
-- closing
-
-### Recency weighting
-
-More recent sessions count more heavily than older sessions.
-
-This allows the skill profile to:
-
-- reflect improvement quickly
-- avoid overfitting to a rep's first few drills
-
-## Skill Graph Model
-
-The current graph is directed and weighted:
+Current formulas are roughly:
 
 ```text
-opening -> rapport (0.35)
-rapport -> pitch_clarity (0.20)
-pitch_clarity -> objection_handling (0.30)
-objection_handling -> closing (0.35)
-rapport -> closing (0.15)
+rapport = 0.35*opening + 0.35*professionalism + 0.30*emotion_recovery
+pitch_clarity = 0.80*pitch + 0.10*opening + 0.10*professionalism
+objection_handling = 0.75*objections + 0.15*emotion_recovery + 0.20*objection_load + challenge_bonus
+closing = 0.75*closing + 0.10*pitch + 0.15*emotion_recovery + 0.50*challenge_bonus
 ```
 
-Interpretation:
+That model is good enough to keep, with two safeguards:
 
-- better openings help a rep earn rapport
-- better rapport improves how clearly the pitch lands
-- better pitch clarity makes objections easier to handle
-- better objection handling improves close quality
-- rapport also supports the close directly
+- cap `objection_load` influence so raw tag count cannot inflate the score beyond actual quality
+- preserve `challenge_bonus`, because success in a harder scenario should count more than success in an easy one
 
-The engine first computes direct skill scores, then propagates small adjustments along the graph so downstream skills reflect upstream strength or weakness without fully replacing their direct measurements.
+### Aggregated Rep Skill Profile
 
-## Example Skill Profile
+The rep profile should be built from recent session snapshots using recency weighting plus graph propagation:
 
-Example output shape:
+```text
+direct_skill_score = weighted_mean(session_skill_scores, recent_sessions_weighted_more)
+propagated_skill_score = direct_score + upstream_graph_influence
+confidence = min(1.0, graded_session_count / 4)
+trend = recent_half_average - prior_half_average
+```
+
+The existing service already implements this pattern. Phase 7 should formalize the output as:
+
+| Field | Meaning |
+| --- | --- |
+| `score` | current normalized skill level on `0-10` |
+| `trend` | recent movement, positive or negative |
+| `confidence` | reliability of the estimate based on sample depth |
+| `contributing_metrics` | scorecard/session metrics used to compute the node |
+| `last_updated_at` | most recent graded session contributing to the node |
+
+### Example Profile
 
 ```text
 opening: 8.1
@@ -112,183 +134,289 @@ objection_handling: 5.0
 closing: 4.3
 ```
 
-Each node also includes:
+This profile implies the rep can start conversations well, but the engine should assign scenarios that force cleaner objection resolution and stronger closes before it raises overall difficulty aggressively.
 
-- `trend`
+### Recommended Persistence Additions
+
+Add durable adaptive tables instead of recomputing everything from raw history on every request:
+
+| Table | Purpose |
+| --- | --- |
+| `rep_skill_snapshots` | one row per graded session per skill node |
+| `rep_skill_profiles` | latest rolled-up skill state per rep |
+| `adaptive_assignment_decisions` | why a scenario was recommended or auto-assigned |
+| `scenario_difficulty_profiles` | normalized factor breakdown for each scenario |
+
+Suggested shapes:
+
+#### `rep_skill_snapshots`
+
+- `id`
+- `rep_id`
+- `session_id`
+- `scenario_id`
+- `skill_key`
+- `raw_score`
+- `adjusted_score`
+- `trend_delta`
 - `confidence`
-- `contributing_metrics`
+- `inputs_json`
+- `created_at`
+
+#### `rep_skill_profiles`
+
+- `rep_id`
+- `readiness_score`
+- `recommended_difficulty`
+- `weakest_skills_json`
+- `skill_profile_json`
+- `skill_graph_version`
+- `updated_at`
+
+#### `adaptive_assignment_decisions`
+
+- `id`
+- `rep_id`
+- `assignment_id`
+- `scenario_id`
+- `recommended_difficulty`
+- `target_difficulty_factors_json`
+- `selected_scenario_score`
+- `weakest_skills_json`
+- `decision_source`
+- `created_at`
+
+#### `scenario_difficulty_profiles`
+
+- `scenario_id`
+- `difficulty`
+- `objection_frequency`
+- `homeowner_resistance_level`
+- `patience_window_score`
+- `scenario_complexity`
+- `focus_skills_json`
+- `updated_at`
 
 ## Difficulty Adjustment Algorithm
 
-The engine derives a recommended next difficulty from:
-
-- current readiness score
-- weakest skill score
-- recent performance trend
-
 ### Inputs
 
-- readiness score = mean of the five skill scores
-- performance trend = later half of sessions minus earlier half of sessions
-- weakest skill = lowest skill in the current graph
+Difficulty should be set from a mix of readiness, recent trend, and weakest-skill floor.
 
-### Current logic
+The current engine already computes:
 
-1. Start from readiness:
-   - higher readiness lifts recommended difficulty
-2. If recent trend is positive and readiness is solid:
-   - increase difficulty by one step
-3. If the weakest skill is still materially weak:
-   - lower difficulty by one step to keep the next assignment challenging but recoverable
-4. Clamp to `1-5`
+- average readiness across skills
+- weakest skill score
+- performance trend from recent sessions
+- target difficulty factors:
+  - `objection_frequency`
+  - `homeowner_resistance_level`
+  - `patience_window`
+  - `scenario_complexity`
 
-### Target difficulty factors
+### Recommended Difficulty
 
-The engine does not only recommend a scalar difficulty. It also builds a target challenge profile:
+The current service logic is directionally right:
 
-- `objection_frequency`
-- `homeowner_resistance_level`
-- `patience_window`
-- `scenario_complexity`
+```text
+readiness = mean(skill scores)
+weakest = min(skill scores)
+base_difficulty = 1 + floor(max(0, readiness - 5.0) / 1.1)
+if performance_trend > 0.35 and readiness >= 6.5: +1
+if weakest < 5.2: -1
+recommended_difficulty = clamp(base_difficulty, 1, 5)
+```
 
-Those targets are shaped by the rep's weakest skills.
+Keep this structure, because it does three important things:
 
-Examples:
+- rewards broad competence
+- prevents a single hot streak from over-promoting the rep
+- blocks difficulty escalation when one core skill is still underdeveloped
 
-- weak `objection_handling`
-  - increase objection frequency
-- weak `opening` or `rapport`
-  - increase homeowner resistance
-  - shorten patience window
-- weak `closing`
-  - raise scenario complexity near the end of the drill
+### Factor-Level Difficulty Targets
 
-## Scenario Recommendation Algorithm
+Difficulty in DoorDrill should not just mean a bigger integer. It should map to runtime behaviors the simulator actually uses.
 
-Every scenario is evaluated against the rep's current skill graph.
+The existing factor model should remain the source of truth:
 
-### Scenario features extracted
+- `objection_frequency`: how many concerns surface and how often new objections stack
+- `homeowner_resistance_level`: how skeptical, busy, annoyed, or hostile the persona starts
+- `patience_window`: how quickly the homeowner disengages or punishes weak pacing
+- `scenario_complexity`: number of stages, concern stack depth, and pathing complexity
 
-From each `Scenario`, the engine derives:
+Current target generation is sensible:
 
-- objection frequency
-  - based on concern count and objection stages
-- homeowner resistance level
-  - based on persona attitude and difficulty
-- patience window
-  - based on persona attitude and difficulty
-- scenario complexity
-  - based on difficulty, stage count, and concern count
+- if `objection_handling` is weak, raise `objection_frequency`
+- if `opening` or `rapport` is weak, raise `homeowner_resistance_level` and shorten `patience_window`
+- if `closing` is weak, raise `scenario_complexity`
 
-### Scenario skill focus inference
+This is the key idea for Phase 7: difficulty should be targeted, not uniform.
 
-The engine infers which skills a scenario trains most:
+### Runtime Link To The Simulator
 
-- door / initial pitch stages -> opening, pitch clarity
-- objection stages or multiple concerns -> objection handling
-- close stages -> closing
-- skeptical / busy / annoyed / hostile personas -> rapport, opening
-- trust / price concerns -> pitch clarity, objection handling
-- spouse / timing / incumbent-provider concerns -> objection handling, closing
+These recommendations already line up with live conversation behavior in [backend/app/services/conversation_orchestrator.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/services/conversation_orchestrator.py):
 
-### Recommendation score
+- higher scenario difficulty hardens starting emotion
+- difficulty `4-5` increases pressure and punishments for weak close attempts
+- seeded objections and persona attitude affect active objections and objection pressure
+- high-difficulty scenarios trigger stronger backfire behavior when the rep pushes too early
 
-Each scenario gets a `recommendation_score` based on:
+That means the adaptive system does not need a second simulator. It needs to choose scenarios whose metadata drives the runtime in the desired direction.
 
-- weakness alignment
-  - how well the scenario's skill focus matches the rep's weakest skills
-- difficulty fit
-  - how closely the scenario's difficulty factors match the target difficulty profile
+### Scenario Recommendation Score
 
-The top-ranked scenarios are returned in `recommended_scenarios`.
+Scenario ranking should continue to combine two forces:
 
-Each recommendation includes:
+```text
+weakness_alignment = weighted match between scenario focus skills and rep weak skills
+difficulty_fit = closeness between scenario factors and target factors
+recommendation_score = clamp(0.75*weakness_alignment + 0.65*difficulty_fit, 0, 10)
+```
 
-- `scenario_id`
-- `scenario_name`
-- `difficulty`
-- `recommendation_score`
-- `focus_skills`
-- `target_weaknesses`
-- `difficulty_factors`
-- `rationale`
+The current service already does this. Phase 7 should make it durable and explainable by storing:
 
-## Integration with Scenario Assignment
+- top focus skills
+- targeted weaknesses
+- factor deltas versus target
+- final recommendation score
+- human-readable rationale
 
-The engine is integrated directly into assignment creation.
+### Safety Rails
 
-### Read path
+To avoid unstable difficulty jumps:
 
-`GET /manager/reps/{rep_id}/adaptive-plan`
+- never increase more than `+1` difficulty band off the rep's previous assigned band
+- require at least `2` graded sessions before increasing above difficulty `2`
+- require positive trend plus weakest-skill floor before assigning difficulty `4-5`
+- reduce difficulty after `2` consecutive regressions or repeated failure on the same skill cluster
 
-Returns:
+## Integration With Scenario Assignment
 
-- session count
-- readiness score
-- performance trend
-- recommended difficulty
-- weakest skills
-- target difficulty factors
-- skill profile nodes
-- skill graph edges
-- recommended scenarios
+### Assignment Entry Points
 
-### Write path
+Adaptive assignment should remain accessible from manager workflows, but the engine should also be callable automatically after grading.
 
-`POST /manager/reps/{rep_id}/adaptive-assignment`
+Current manual entry points:
 
-Behavior:
+- [backend/app/api/manager.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/api/manager.py) `GET /manager/reps/{rep_id}/adaptive-plan`
+- [backend/app/api/manager.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/api/manager.py) `POST /manager/reps/{rep_id}/adaptive-assignment`
 
-- if no `scenario_id` is provided:
-  - assign the top recommendation
-- if a `scenario_id` is provided:
-  - force that scenario while still attaching the adaptive plan
+### Post-Session Integration
 
-Adaptive assignments embed metadata in `assignments.retry_policy.adaptive_training`, including:
+Recommended production flow:
 
-- source
-- recommended difficulty
-- weakest skills
-- target difficulty factors
-- selected scenario id
-- recommendation score
+1. session is graded
+2. analytics refresh rebuilds `AnalyticsFactSession`
+3. adaptive snapshot job computes or updates `rep_skill_snapshots`
+4. rep profile is rolled up into `rep_skill_profiles`
+5. optional follow-up recommendation or assignment decision is generated
 
-This keeps the adaptive reasoning attached to the assignment without requiring new tables yet.
+The natural hook is immediately after grading in the post-session pipeline:
+
+- [backend/app/services/session_postprocess_service.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/services/session_postprocess_service.py)
+- [backend/app/tasks/post_session_tasks.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/tasks/post_session_tasks.py)
+
+Add an `adaptive.refresh_rep` task so skill updates happen asynchronously and do not block websocket teardown or grading.
+
+### Scenario Selection Rules
+
+When creating the next assignment:
+
+1. load the persisted rep skill profile
+2. compute target difficulty factors
+3. load scenario difficulty profiles for the org
+4. rank scenarios by recommendation score
+5. filter out recently repeated scenarios unless deliberate spaced repetition is requested
+6. create the assignment and persist the decision row
+
+Use spaced repetition intentionally:
+
+- repeat the same scenario family when a rep is fixing a single weak skill
+- broaden scenario variety once the weakest skill rises above threshold
+
+### Assignment Payload Strategy
+
+Short-term, keep writing adaptive metadata into `Assignment.retry_policy.adaptive_training` for backward compatibility.
+
+Long-term, make `adaptive_assignment_decisions` the source of truth and keep `retry_policy` as a lightweight execution policy field only.
 
 ## Manager Analytics Possibilities
 
-The current response shapes already support several manager analytics surfaces:
+DoorDrill already has strong analytics infrastructure in:
 
-- rep readiness score over time
-- weakest-skill leaderboard by team
-- recommended difficulty band by rep
-- scenario-to-skill coverage maps
-- scenario recommendation acceptance rate
-- skill improvement after adaptive assignments
-- objection-handling and closing recovery trends
+- [backend/app/models/analytics.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/models/analytics.py)
+- [backend/app/services/analytics_refresh_service.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/services/analytics_refresh_service.py)
+- [backend/app/services/management_analytics_service.py](/Users/calelamb/Desktop/personal%20projects/doordrill/backend/app/services/management_analytics_service.py)
 
-Potential future dashboard widgets:
+Phase 7 should add adaptive views on top of those facts rather than building a parallel analytics stack.
 
-- "Most at-risk skill" card per rep
-- "Recommended next drill" panel
-- "Difficulty progression" chart
-- "Skill graph delta over last 7 sessions"
-- "Scenario coverage gaps" by team
+### Recommended Manager Views
 
-## Current Constraints
+- `Skill graph by rep`
+  - current node scores, trend arrows, and confidence
+- `Readiness ladder`
+  - reps ordered by readiness score and current recommended difficulty
+- `Difficulty calibration`
+  - assigned difficulty versus achieved score and pass rate
+- `Weakness cluster heatmap`
+  - team-wide concentration of low `opening`, `rapport`, `pitch_clarity`, `objection_handling`, and `closing`
+- `Scenario effectiveness by skill`
+  - which scenarios most reliably improve a given weak skill after follow-up attempts
+- `Coaching impact`
+  - skill delta before and after coaching notes or score overrides
+- `Under-challenged / over-challenged alerts`
+  - reps cruising through easy drills or repeatedly failing above their band
 
-- The engine is derived, not persisted:
-  - no dedicated `rep_skill_profiles` table yet
-- It relies on current scorecard heuristics:
-  - category quality is only as strong as the grading output
-- Scenario focus is inferred:
-  - there is no explicit scenario skill-tag taxonomy yet
-- Adaptive difficulty is manager-facing today:
-  - the rep app does not yet consume the plan directly
+### Useful Derived Metrics
 
-## Recommended Next Steps
+Add adaptive metrics to the analytics layer:
 
-1. Persist longitudinal skill snapshots after each graded session.
-2. Add explicit `target_skills` and difficulty-factor metadata to scenarios.
-3. Feed adaptive difficulty into the conversation runtime so scenario resistance can change even within the same scenario family.
-4. Surface adaptive-plan data in the dashboard with charts and assignment controls.
+| Metric | Meaning |
+| --- | --- |
+| `readiness_score` | mean of current propagated skill scores |
+| `skill_velocity_opening` ... `skill_velocity_closing` | recent slope by skill |
+| `challenge_gap` | assigned difficulty minus recommended difficulty |
+| `difficulty_success_rate` | pass rate by assigned difficulty band |
+| `recovery_rate` | frequency of emotion improvement within high-resistance sessions |
+| `weak_skill_repeat_count` | consecutive assignments targeting the same weak node |
+| `scenario_lift_by_skill` | average improvement after scenarios focused on a skill |
+
+### Alerting Opportunities
+
+Examples:
+
+- rep readiness increasing, but closing remains flat for `5+` sessions
+- high objection difficulty assigned to reps with falling rapport trend
+- scenario pass rate collapsing for a difficulty band, suggesting poor calibration or a broken scenario
+- coaching notes repeatedly tagging the same weakness with no subsequent skill lift
+
+## Recommended Implementation Shape
+
+### Phase 7 Scope
+
+1. keep the current adaptive service and endpoints
+2. add first-class adaptive persistence tables
+3. move profile generation to async post-grade refresh
+4. cache or persist scenario difficulty profiles
+5. expose adaptive metrics through manager analytics endpoints
+
+### Minimal Code Changes
+
+- extend analytics refresh or post-session tasks with adaptive refresh work
+- persist per-session skill snapshots after grading
+- persist per-rep rolled-up skill profiles
+- persist assignment recommendation decisions
+- add manager analytics response fields for readiness, skill deltas, and calibration
+
+### What Not To Do
+
+- do not hardcode scenario recommendations in the dashboard
+- do not treat `Scenario.difficulty` alone as the full challenge model
+- do not let a single score spike move a rep multiple difficulty bands
+- do not create a separate adaptive scoring rubric disconnected from the existing scorecard categories
+
+## Summary
+
+DoorDrill already has a credible adaptive core: skill graph scoring, targeted difficulty factors, scenario recommendation, manager endpoints, and tests. Phase 7 should harden that core by persisting skill history, running adaptive refresh asynchronously after grading, and surfacing calibration analytics for managers.
+
+If implemented this way, the system will not just assign "harder scenarios." It will assign the right kind of hard scenario for the rep's current developmental bottleneck.

@@ -89,6 +89,10 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     assert "weakness_tags" in replay["scorecard"]
     assert replay["transport_metrics"]["barge_in_count"] >= 1
     assert replay["interruption_timeline"]
+    assert replay["micro_behavior_timeline"]
+    assert replay["micro_behavior_timeline"][0]["tone"] is not None
+    assert replay["conversational_realism"]["turn_count"] >= 1
+    assert replay["conversational_realism"]["average_score"] >= 1.0
 
     feed_resp = client.get("/manager/feed", params={"manager_id": seed_org["manager_id"]})
     assert feed_resp.status_code == 200
@@ -164,7 +168,7 @@ def test_event_persistence_integrity(client, seed_org):
         db = SessionLocal()
         events = db.scalars(select(SessionEvent).where(SessionEvent.session_id == session_id)).all()
         db.close()
-        if events:
+        if any(event.event_type == "server.turn.committed" for event in events):
             break
         time.sleep(0.02)
 
