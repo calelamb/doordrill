@@ -2,22 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { AlertTriangle, ArrowUpRight, BellRing, Gauge, Radar, TrendingDown, TrendingUp, Users } from "lucide-react";
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  ReferenceLine,
-  ResponsiveContainer,
-  Scatter,
-  ScatterChart,
-  Tooltip as RechartsTooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import type { EChartsOption } from "echarts";
 
+import { EChartSurface } from "../components/EChartSurface";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchManagerBenchmarks, fetchManagerCommandCenter } from "../lib/api";
@@ -117,14 +104,203 @@ export function AnalyticsPage() {
     [data?.score_trend]
   );
 
-  const riskBySeverity = useMemo(() => {
-    const source = data?.rep_risk_matrix ?? [];
+  const scoreTrendOption = useMemo<EChartsOption>(() => ({
+    backgroundColor: "transparent",
+    animationDuration: 480,
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "rgba(252,248,242,0.96)",
+      borderColor: "rgba(45,90,61,0.12)",
+      textStyle: { color: "#1d2a20" },
+    },
+    grid: { top: 24, right: 18, bottom: 28, left: 28 },
+    xAxis: {
+      type: "category",
+      data: trend.map((point) => point.date),
+      axisLine: { lineStyle: { color: "rgba(29,42,32,0.12)" } },
+      axisLabel: { color: "#667066", fontSize: 11 },
+      axisTick: { show: false },
+      boundaryGap: false,
+    },
+    yAxis: {
+      type: "value",
+      min: 0,
+      max: 10,
+      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
+      axisLabel: { color: "#667066", fontSize: 11 },
+    },
+    series: [
+      {
+        type: "line",
+        smooth: true,
+        data: trend.map((point) => point.score),
+        symbolSize: 8,
+        lineStyle: { width: 3, color: "#2d5a3d" },
+        areaStyle: { color: "rgba(45,90,61,0.14)" },
+        itemStyle: { color: "#2d5a3d" },
+        markLine: {
+          symbol: "none",
+          lineStyle: { type: "dashed", color: "#c6951f" },
+          data: [
+            { yAxis: 7, label: { formatter: "Pass", color: "#8b6710" } },
+            ...(typeof benchmarks?.score_benchmarks.upper_quartile === "number"
+              ? [{ yAxis: benchmarks.score_benchmarks.upper_quartile, label: { formatter: "UQ", color: "#2d5a3d" } }]
+              : []),
+          ],
+        },
+      },
+    ],
+  }), [benchmarks?.score_benchmarks.upper_quartile, trend]);
+
+  const riskMatrixOption = useMemo<EChartsOption>(() => ({
+    backgroundColor: "transparent",
+    animationDuration: 420,
+    tooltip: {
+      trigger: "item",
+      backgroundColor: "rgba(252,248,242,0.96)",
+      borderColor: "rgba(45,90,61,0.12)",
+      formatter: (params: any) => {
+        const rep = params?.data as {
+          rep_name: string;
+          average_score: number;
+          score_delta: number;
+          volatility: number;
+        } | undefined;
+        if (!rep) return "";
+        return `${rep.rep_name}<br/>Avg ${rep.average_score.toFixed(1)}<br/>Delta ${formatDelta(rep.score_delta)}<br/>Volatility ${rep.volatility.toFixed(1)}`;
+      },
+    },
+    grid: { top: 20, right: 16, bottom: 24, left: 32 },
+    xAxis: {
+      type: "value",
+      name: "Delta",
+      nameTextStyle: { color: "#667066", fontSize: 11 },
+      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
+      axisLabel: { color: "#667066", fontSize: 11 },
+    },
+    yAxis: {
+      type: "value",
+      min: 0,
+      max: 10,
+      name: "Average",
+      nameTextStyle: { color: "#667066", fontSize: 11 },
+      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
+      axisLabel: { color: "#667066", fontSize: 11 },
+    },
+    series: [
+      {
+        type: "scatter",
+        data: (data?.rep_risk_matrix ?? []).map((rep) => ({
+          value: [rep.score_delta, rep.average_score, rep.risk_score],
+          ...rep,
+        })),
+        symbolSize: (_value: unknown, params: any) =>
+          12 + Math.max(0, Number(params?.data?.risk_score ?? 0) * 3),
+        itemStyle: {
+          color: (params: any) => {
+            if (params?.data?.risk_level === "high") return "#b5331e";
+            if (params?.data?.risk_level === "medium") return "#c6951f";
+            return "#2d5a3d";
+          },
+          shadowBlur: 18,
+          shadowColor: "rgba(20,20,20,0.12)",
+        },
+        markLine: {
+          symbol: "none",
+          lineStyle: { type: "dashed", color: "rgba(26,46,26,0.24)" },
+          data: [{ xAxis: 0 }, { yAxis: 7 }],
+        },
+      },
+    ],
+  }), [data?.rep_risk_matrix]);
+
+  const distributionOption = useMemo<EChartsOption>(() => ({
+    backgroundColor: "transparent",
+    animationDuration: 400,
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    grid: { top: 20, right: 16, bottom: 24, left: 24 },
+    xAxis: {
+      type: "category",
+      data: histogram.map((entry) => entry.label),
+      axisLabel: { color: "#667066", fontSize: 11 },
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: "rgba(29,42,32,0.12)" } },
+    },
+    yAxis: {
+      type: "value",
+      axisLabel: { color: "#667066", fontSize: 11 },
+      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
+    },
+    series: [
+      {
+        type: "bar",
+        data: histogram.map((entry) => ({
+          value: entry.count,
+          itemStyle: { color: entry.fill, borderRadius: [14, 14, 0, 0] },
+        })),
+        barWidth: "58%",
+      },
+    ],
+  }), [histogram]);
+
+  const scenarioHeatmapOption = useMemo<EChartsOption>(() => {
+    const scenarioRows = data?.scenario_pass_matrix?.slice(0, 10) ?? [];
+    const scenarioNames = scenarioRows.map((scenario) => scenario.scenario_name);
     return {
-      high: source.filter((item) => item.risk_level === "high"),
-      medium: source.filter((item) => item.risk_level === "medium"),
-      low: source.filter((item) => item.risk_level === "low"),
-    };
-  }, [data?.rep_risk_matrix]);
+      backgroundColor: "transparent",
+      animationDuration: 420,
+      tooltip: {
+        position: "top",
+        formatter: (params: any) => {
+          const [x, y, value] = (params?.data ?? []) as [number, number, number];
+          const metric = ["Pass Rate", "Avg Score", "Difficulty"][y] ?? "Metric";
+          const label = scenarioNames[x] ?? "Scenario";
+          const formatted = y === 0 ? `${Math.round(value * 10)}%` : value.toFixed(1);
+          return `${label}<br/>${metric}: ${formatted}`;
+        },
+      },
+      grid: { top: 18, right: 16, bottom: 60, left: 92 },
+      xAxis: {
+        type: "category",
+        data: scenarioNames,
+        axisLabel: { color: "#667066", fontSize: 11, interval: 0, rotate: 18 },
+        splitArea: { show: false },
+      },
+      yAxis: {
+        type: "category",
+        data: ["Pass Rate", "Avg Score", "Difficulty"],
+        axisLabel: { color: "#667066", fontSize: 11 },
+      },
+      visualMap: {
+        min: 0,
+        max: 10,
+        orient: "horizontal",
+        left: "center",
+        bottom: 8,
+        calculable: false,
+        textStyle: { color: "#667066", fontSize: 11 },
+        inRange: { color: ["#b5331e", "#c6951f", "#2d5a3d"] },
+      },
+      series: [
+        {
+          type: "heatmap",
+          data: scenarioRows.flatMap((scenario, index) => ([
+            [index, 0, scenario.pass_rate * 10],
+            [index, 1, scenario.average_score ?? 0],
+            [index, 2, scenario.difficulty * 2],
+          ])),
+          label: {
+            show: true,
+            color: "#fff8f0",
+            formatter: (params: any) => {
+              const [, metricIndex, value] = (params?.data ?? []) as [number, number, number];
+              return metricIndex === 0 ? `${Math.round(value * 10)}%` : value.toFixed(1);
+            },
+          },
+        },
+      ],
+    } as EChartsOption;
+  }, [data?.scenario_pass_matrix]);
 
   if (loading) return <EmptyState variant="loading" message="Loading command center..." />;
   if (error) return <EmptyState variant="error" message={error} onRetry={() => void loadData()} />;
@@ -223,7 +399,7 @@ export function AnalyticsPage() {
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[1.35fr_0.65fr]">
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <div className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_left,rgba(45,90,61,0.18),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
           <div className="mb-5 flex items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold tracking-tight text-ink">Score Momentum</h2>
@@ -234,29 +410,7 @@ export function AnalyticsPage() {
             </div>
           </div>
           {trend.length ? (
-            <div className="h-[320px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={trend} margin={{ top: 20, right: 16, left: -20, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="scoreFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#2d5a3d" stopOpacity={0.28} />
-                      <stop offset="100%" stopColor="#2d5a3d" stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="rgba(45,90,61,0.08)" strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="date" tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                  <YAxis domain={[0, 10]} tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                  <RechartsTooltip
-                    contentStyle={{ backgroundColor: "rgba(255,255,255,0.96)", borderRadius: "16px", border: "1px solid rgba(45,90,61,0.12)" }}
-                  />
-                  <ReferenceLine y={7} stroke="#c6951f" strokeDasharray="4 4" />
-                  {typeof benchmarks?.score_benchmarks.upper_quartile === "number" ? (
-                    <ReferenceLine y={benchmarks.score_benchmarks.upper_quartile} stroke="#2d5a3d" strokeDasharray="4 4" opacity={0.45} />
-                  ) : null}
-                  <Area type="monotone" dataKey="score" stroke="#2d5a3d" strokeWidth={3} fill="url(#scoreFill)" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
+            <EChartSurface option={scoreTrendOption} height={340} />
           ) : (
             <EmptyState variant="empty" message="No score trend available yet." />
           )}
@@ -297,28 +451,14 @@ export function AnalyticsPage() {
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <div className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_right,rgba(198,149,31,0.16),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
           <div className="mb-5 flex items-center gap-2">
             <Radar className="h-4 w-4 text-accent" />
             <h2 className="text-lg font-bold tracking-tight text-ink">Rep Risk Matrix</h2>
           </div>
           {data.rep_risk_matrix.length ? (
             <>
-              <div className="h-[280px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ScatterChart margin={{ top: 10, right: 10, bottom: 10, left: -20 }}>
-                    <CartesianGrid stroke="rgba(45,90,61,0.08)" />
-                    <XAxis type="number" dataKey="score_delta" name="Score Delta" tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                    <YAxis type="number" dataKey="average_score" name="Average Score" domain={[0, 10]} tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                    <RechartsTooltip cursor={{ strokeDasharray: "3 3" }} />
-                    <ReferenceLine y={7} stroke="#c6951f" strokeDasharray="4 4" />
-                    <ReferenceLine x={0} stroke="rgba(26,46,26,0.2)" strokeDasharray="4 4" />
-                    <Scatter data={riskBySeverity.low} fill="#2d5a3d" />
-                    <Scatter data={riskBySeverity.medium} fill="#c6951f" />
-                    <Scatter data={riskBySeverity.high} fill="#b5331e" />
-                  </ScatterChart>
-                </ResponsiveContainer>
-              </div>
+              <EChartSurface option={riskMatrixOption} height={300} />
               <div className="mt-4 space-y-2">
                 {data.rep_risk_matrix.slice(0, 5).map((rep) => (
                   <button
@@ -345,7 +485,7 @@ export function AnalyticsPage() {
           )}
         </div>
 
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <div className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_left,rgba(181,51,30,0.12),transparent_35%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
           <div className="mb-5 flex items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold tracking-tight text-ink">Score Distribution</h2>
@@ -359,21 +499,7 @@ export function AnalyticsPage() {
             </button>
           </div>
           {histogram.length ? (
-            <div className="h-[320px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={histogram} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <CartesianGrid stroke="rgba(45,90,61,0.08)" strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="label" tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                  <RechartsTooltip />
-                  <Bar dataKey="count" radius={[12, 12, 0, 0]}>
-                    {histogram.map((entry) => (
-                      <Cell key={entry.label} fill={entry.fill} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+            <EChartSurface option={distributionOption} height={340} />
           ) : (
             <EmptyState variant="empty" message="No scored sessions to plot yet." />
           )}
@@ -381,7 +507,7 @@ export function AnalyticsPage() {
       </section>
 
       <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <div className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_center,rgba(45,90,61,0.12),transparent_40%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold tracking-tight text-ink">Scenario Pressure Map</h2>
@@ -394,6 +520,9 @@ export function AnalyticsPage() {
               Scenario Lab
             </button>
           </div>
+          {data.scenario_pass_matrix.length ? (
+            <EChartSurface option={scenarioHeatmapOption} height={260} className="mb-5" />
+          ) : null}
           <div className="space-y-3">
             {data.scenario_pass_matrix.slice(0, 8).map((scenario) => (
               <div key={scenario.scenario_id} className="rounded-2xl border border-white/25 bg-white/45 p-4">

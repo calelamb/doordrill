@@ -2,19 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import { AlertTriangle, Layers3, ShieldCheck } from "lucide-react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  ResponsiveContainer,
-  Scatter,
-  ScatterChart,
-  Tooltip as RechartsTooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import type { EChartsOption } from "echarts";
 
+import { EChartSurface } from "../components/EChartSurface";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchManagerScenarioIntelligence } from "../lib/api";
@@ -75,13 +65,75 @@ export function ScenarioIntelligencePage() {
     [data?.items]
   );
 
-  const objectionMap = useMemo(
-    () =>
-      (data?.objection_failure_map ?? [])
-        .slice(0, 10)
-        .map((item, index) => ({ ...item, fill: index % 2 === 0 ? "#2d5a3d" : "#b77a13" })),
-    [data?.objection_failure_map]
-  );
+  const objectionMap = useMemo(() => (data?.objection_failure_map ?? []).slice(0, 12), [data?.objection_failure_map]);
+
+  const difficultyOption = useMemo<EChartsOption>(() => ({
+    backgroundColor: "transparent",
+    tooltip: {
+      trigger: "item",
+      formatter: (params: any) => {
+        const item = params?.data as { scenario_name: string; y: number; z: number } | undefined;
+        if (!item) return "";
+        return `${item.scenario_name}<br/>Pass ${item.y}%<br/>Avg ${item.z.toFixed(1)}`;
+      },
+    },
+    grid: { top: 18, right: 18, bottom: 24, left: 28 },
+    xAxis: {
+      type: "value",
+      min: 1,
+      max: 5,
+      name: "Difficulty",
+      axisLabel: { color: "#667066", fontSize: 11 },
+      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
+    },
+    yAxis: {
+      type: "value",
+      min: 0,
+      max: 100,
+      name: "Pass %",
+      axisLabel: { color: "#667066", fontSize: 11 },
+      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
+    },
+    series: [
+      {
+        type: "scatter",
+        data: scatterData.map((item) => ({
+          value: [item.x, item.y, item.z],
+          ...item,
+        })),
+        symbolSize: (_value: unknown, params: any) => 18 + Math.max(0, Number(params?.data?.z ?? 0) * 2),
+        itemStyle: { color: "#2d5a3d", shadowBlur: 18, shadowColor: "rgba(20,20,20,0.12)" },
+      },
+    ],
+  }), [scatterData]);
+
+  const objectionOption = useMemo<EChartsOption>(() => ({
+    backgroundColor: "transparent",
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    grid: { top: 18, right: 18, bottom: 28, left: 100 },
+    xAxis: {
+      type: "value",
+      axisLabel: { color: "#667066", fontSize: 11 },
+      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
+    },
+    yAxis: {
+      type: "category",
+      data: objectionMap.map((item) => item.objection_tag),
+      axisLabel: { color: "#667066", fontSize: 11 },
+    },
+    series: [
+      {
+        type: "bar",
+        data: objectionMap.map((item, index) => ({
+          value: item.count,
+          itemStyle: {
+            color: index % 2 === 0 ? "#2d5a3d" : "#b77a13",
+            borderRadius: [0, 12, 12, 0],
+          },
+        })),
+      },
+    ],
+  }), [objectionMap]);
 
   const strongestScenario = useMemo(() => {
     const items = [...(data?.items ?? [])].filter((item) => item.average_score !== null);
@@ -164,17 +216,7 @@ export function ScenarioIntelligencePage() {
             <ShieldCheck className="h-4 w-4 text-accent" />
             <h2 className="text-lg font-bold tracking-tight text-ink">Difficulty vs Pass Rate</h2>
           </div>
-          <div className="h-[320px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <ScatterChart margin={{ top: 10, right: 10, bottom: 10, left: -20 }}>
-                <CartesianGrid stroke="rgba(45,90,61,0.08)" />
-                <XAxis type="number" dataKey="x" name="Difficulty" domain={[1, 5]} tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                <YAxis type="number" dataKey="y" name="Pass Rate" unit="%" domain={[0, 100]} tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                <RechartsTooltip />
-                <Scatter data={scatterData} fill="#2d5a3d" />
-              </ScatterChart>
-            </ResponsiveContainer>
-          </div>
+          <EChartSurface option={difficultyOption} height={320} />
         </div>
 
         <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
@@ -182,21 +224,7 @@ export function ScenarioIntelligencePage() {
             <AlertTriangle className="h-4 w-4 text-accent" />
             <h2 className="text-lg font-bold tracking-tight text-ink">Objection Failure Clusters</h2>
           </div>
-          <div className="h-[320px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={objectionMap} layout="vertical" margin={{ top: 10, right: 12, left: 30, bottom: 0 }}>
-                <CartesianGrid stroke="rgba(45,90,61,0.08)" strokeDasharray="3 3" horizontal={false} />
-                <XAxis type="number" tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                <YAxis type="category" dataKey="objection_tag" width={110} tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
-                <RechartsTooltip />
-                <Bar dataKey="count" radius={[0, 12, 12, 0]}>
-                  {objectionMap.map((item) => (
-                    <Cell key={`${item.scenario_id}-${item.objection_tag}`} fill={item.fill} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          <EChartSurface option={objectionOption} height={320} />
         </div>
       </section>
 
