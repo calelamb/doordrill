@@ -767,9 +767,6 @@ class ManagementAnalyticsService:
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
-        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="coaching_analytics", period=period)
-        if materialized is not None:
-            return materialized
         sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
         session_ids = [session.session_id for session in sessions]
         if not session_ids:
@@ -1198,9 +1195,6 @@ class ManagementAnalyticsService:
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
-        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="alerts", period=period)
-        if materialized is not None:
-            return materialized
         command_center = self.get_command_center(
             db,
             manager_id=manager_id,
