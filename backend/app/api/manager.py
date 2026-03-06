@@ -15,6 +15,11 @@ from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, ReviewReason, SessionStatus, UserRole
 from app.models.user import Team, User
+from app.schemas.adaptive_training import (
+    AdaptiveAssignmentRequest,
+    AdaptiveAssignmentResponse,
+    AdaptiveTrainingPlanResponse,
+)
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
 from app.schemas.notification import NotificationDeliveryResponse
 from app.schemas.scorecard import (
@@ -26,6 +31,7 @@ from app.schemas.scorecard import (
     ScorecardOverrideRequest,
 )
 from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
+from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.manager_action_service import ManagerActionService
 from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.services.management_analytics_runtime_service import ManagementAnalyticsRuntimeService
@@ -35,6 +41,7 @@ from app.services.notification_service import NotificationService
 from app.services.storage_service import StorageService
 
 router = APIRouter(prefix="/manager", tags=["manager"])
+adaptive_training_service = AdaptiveTrainingService()
 feed_service = ManagerFeedService()
 storage_service = StorageService()
 action_service = ManagerActionService()
@@ -1316,3 +1323,53 @@ def get_manager_notifications(
         for row in rows
     ]
     return {"items": items}
+
+
+@router.get("/reps/{rep_id}/adaptive-plan", response_model=AdaptiveTrainingPlanResponse)
+def get_adaptive_training_plan(
+    rep_id: str,
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> AdaptiveTrainingPlanResponse:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own adaptive plans")
+    return adaptive_training_service.build_plan(db, rep_id=rep_id)
+
+
+@router.post("/reps/{rep_id}/adaptive-assignment", response_model=AdaptiveAssignmentResponse)
+def create_adaptive_assignment(
+    rep_id: str,
+    payload: AdaptiveAssignmentRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> AdaptiveAssignmentResponse:
+    if actor.user_id and actor.role == "manager" and actor.user_id != payload.assigned_by:
+        raise HTTPException(status_code=403, detail="manager can only assign as themselves")
+
+    if payload.scenario_id is not None:
+        scenario = db.scalar(select(Scenario).where(Scenario.id == payload.scenario_id))
+        if scenario is None:
+            raise HTTPException(status_code=404, detail="scenario not found")
+
+    try:
+        result = adaptive_training_service.create_adaptive_assignment(
+            db,
+            rep_id=rep_id,
+            assigned_by=payload.assigned_by,
+            due_at=payload.due_at,
+            min_score_target=payload.min_score_target,
+            retry_policy=payload.retry_policy,
+            scenario_id=payload.scenario_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "scenario not found" in message:
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(status_code=400, detail=message) from exc
+
+    return {
+        "assignment": AssignmentResponse.model_validate(result["assignment"]).model_dump(),
+        "adaptive_plan": result["adaptive_plan"],
+        "selected_scenario": result["selected_scenario"],
+    }
