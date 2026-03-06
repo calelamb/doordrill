@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
-import { AlertTriangle, Bookmark, BookmarkPlus, Search, Trash2, Zap } from "lucide-react";
+import { AlertTriangle, Bookmark, BookmarkPlus, Download, Search, Trash2, Zap } from "lucide-react";
 import { Virtuoso } from "react-virtuoso";
 
 import { EmptyState } from "../components/shared/EmptyState";
@@ -18,6 +18,10 @@ type SavedView = {
   reviewed: ReviewedFilter;
   bargeInOnly: boolean;
   weaknessFilter: string;
+  repFilter: string;
+  scenarioFilter: string;
+  scoreMin: string;
+  scoreMax: string;
 };
 
 const SAVED_VIEWS_KEY = "doordrill.management.explorer.saved-views.v1";
@@ -49,14 +53,20 @@ export function ExplorerPage() {
   const managerId = auth?.user.id ?? "";
 
   const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
   const [reviewed, setReviewed] = useState<ReviewedFilter>("all");
   const [bargeInOnly, setBargeInOnly] = useState(false);
+  const [repFilter, setRepFilter] = useState("all");
+  const [scenarioFilter, setScenarioFilter] = useState("all");
+  const [scoreMin, setScoreMin] = useState("");
+  const [scoreMax, setScoreMax] = useState("");
   const [data, setData] = useState<ExplorerResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [weaknessFilter, setWeaknessFilter] = useState("all");
   const [savedViews, setSavedViews] = useState<SavedView[]>(() => readSavedViews());
   const [viewName, setViewName] = useState("");
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
 
   function openReplay(sessionId: string, focusTurnId?: string | null) {
     const params = new URLSearchParams();
@@ -71,12 +81,17 @@ export function ExplorerPage() {
     try {
       const response = await fetchManagerExplorer(managerId, {
         period: "90",
+        repId: repFilter !== "all" ? repFilter : undefined,
+        scenarioId: scenarioFilter !== "all" ? scenarioFilter : undefined,
         reviewed,
         bargeInOnly,
-        search: search.trim() || undefined,
+        scoreMin: scoreMin ? Number(scoreMin) : undefined,
+        scoreMax: scoreMax ? Number(scoreMax) : undefined,
+        search: deferredSearch.trim() || undefined,
         limit: 400,
       });
       setData(response);
+      setSelectedSessionId((current) => current ?? response.items[0]?.session_id ?? null);
     } catch (err) {
       if (isAuthError(err)) {
         clearStoredAuth();
@@ -87,7 +102,7 @@ export function ExplorerPage() {
     } finally {
       setLoading(false);
     }
-  }, [bargeInOnly, managerId, navigate, reviewed, search]);
+  }, [bargeInOnly, deferredSearch, managerId, navigate, repFilter, reviewed, scenarioFilter, scoreMax, scoreMin]);
 
   useEffect(() => {
     void loadData();
@@ -101,10 +116,31 @@ export function ExplorerPage() {
     return Array.from(tags).sort();
   }, [data?.items]);
 
+  const repOptions = useMemo(() => {
+    const reps = new Map<string, string>();
+    for (const item of data?.items ?? []) {
+      reps.set(item.rep_id, item.rep_name);
+    }
+    return Array.from(reps.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  }, [data?.items]);
+
+  const scenarioOptions = useMemo(() => {
+    const scenarios = new Map<string, string>();
+    for (const item of data?.items ?? []) {
+      scenarios.set(item.scenario_id, item.scenario_name);
+    }
+    return Array.from(scenarios.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  }, [data?.items]);
+
   const filteredItems = useMemo(() => {
     const source = data?.items ?? [];
     return source.filter((item) => weaknessFilter === "all" || item.weakness_tags.includes(weaknessFilter));
   }, [data?.items, weaknessFilter]);
+
+  const selectedItem = useMemo(
+    () => filteredItems.find((item) => item.session_id === selectedSessionId) ?? filteredItems[0] ?? null,
+    [filteredItems, selectedSessionId]
+  );
 
   function saveCurrentView() {
     const name = viewName.trim();
@@ -119,6 +155,10 @@ export function ExplorerPage() {
         reviewed,
         bargeInOnly,
         weaknessFilter,
+        repFilter,
+        scenarioFilter,
+        scoreMin,
+        scoreMax,
       },
       ...savedViews,
     ].slice(0, 8);
@@ -132,12 +172,46 @@ export function ExplorerPage() {
     setReviewed(view.reviewed);
     setBargeInOnly(view.bargeInOnly);
     setWeaknessFilter(view.weaknessFilter);
+    setRepFilter(view.repFilter ?? "all");
+    setScenarioFilter(view.scenarioFilter ?? "all");
+    setScoreMin(view.scoreMin ?? "");
+    setScoreMax(view.scoreMax ?? "");
   }
 
   function deleteSavedView(viewId: string) {
     const next = savedViews.filter((view) => view.id !== viewId);
     setSavedViews(next);
     persistSavedViews(next);
+  }
+
+  function exportCsv() {
+    if (!filteredItems.length || typeof window === "undefined") {
+      return;
+    }
+    const rows = [
+      ["session_id", "rep_name", "scenario_name", "started_at", "overall_score", "reviewed", "barge_in_count", "weakness_tags", "objection_tags"],
+      ...filteredItems.map((item) => [
+        item.session_id,
+        item.rep_name,
+        item.scenario_name,
+        item.started_at ?? "",
+        typeof item.overall_score === "number" ? String(item.overall_score) : "",
+        String(item.manager_reviewed),
+        String(item.barge_in_count),
+        item.weakness_tags.join("|"),
+        item.objection_tags.join("|"),
+      ]),
+    ];
+    const csv = rows
+      .map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const anchor = window.document.createElement("a");
+    anchor.href = url;
+    anchor.download = "doordrill-session-explorer.csv";
+    anchor.click();
+    window.URL.revokeObjectURL(url);
   }
 
   if (loading) return <EmptyState variant="loading" message="Loading session explorer..." />;
@@ -180,6 +254,30 @@ export function ExplorerPage() {
             />
           </label>
           <select
+            value={repFilter}
+            onChange={(event) => setRepFilter(event.target.value)}
+            className="rounded-2xl border border-white/35 bg-white/60 px-4 py-3 text-sm text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
+          >
+            <option value="all">All reps</option>
+            {repOptions.map(([repId, repName]) => (
+              <option key={repId} value={repId}>
+                {repName}
+              </option>
+            ))}
+          </select>
+          <select
+            value={scenarioFilter}
+            onChange={(event) => setScenarioFilter(event.target.value)}
+            className="rounded-2xl border border-white/35 bg-white/60 px-4 py-3 text-sm text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
+          >
+            <option value="all">All scenarios</option>
+            {scenarioOptions.map(([scenarioId, scenarioName]) => (
+              <option key={scenarioId} value={scenarioId}>
+                {scenarioName}
+              </option>
+            ))}
+          </select>
+          <select
             value={reviewed}
             onChange={(event) => setReviewed(event.target.value as ReviewedFilter)}
             className="rounded-2xl border border-white/35 bg-white/60 px-4 py-3 text-sm text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
@@ -205,6 +303,38 @@ export function ExplorerPage() {
             className={`rounded-2xl border px-4 py-3 text-sm font-semibold transition ${bargeInOnly ? "border-accent bg-accent text-white" : "border-white/35 bg-white/60 text-ink hover:bg-white/75"}`}
           >
             {bargeInOnly ? "Barge-ins only" : "Include all sessions"}
+          </button>
+        </div>
+
+        <div className="mt-3 grid gap-3 xl:grid-cols-[0.7fr_0.7fr_auto]">
+          <input
+            type="number"
+            inputMode="decimal"
+            min="0"
+            max="10"
+            step="0.1"
+            value={scoreMin}
+            onChange={(event) => setScoreMin(event.target.value)}
+            placeholder="Min score"
+            className="rounded-2xl border border-white/35 bg-white/60 px-4 py-3 text-sm text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
+          />
+          <input
+            type="number"
+            inputMode="decimal"
+            min="0"
+            max="10"
+            step="0.1"
+            value={scoreMax}
+            onChange={(event) => setScoreMax(event.target.value)}
+            placeholder="Max score"
+            className="rounded-2xl border border-white/35 bg-white/60 px-4 py-3 text-sm text-ink outline-none transition focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
+          />
+          <button
+            onClick={exportCsv}
+            className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/35 bg-white/65 px-4 py-3 text-sm font-semibold text-ink transition hover:bg-white/80"
+          >
+            <Download className="h-4 w-4" />
+            Export CSV
           </button>
         </div>
 
@@ -242,7 +372,8 @@ export function ExplorerPage() {
       {!filteredItems.length ? (
         <EmptyState variant="empty" message="No sessions match the current explorer filters." />
       ) : (
-        <section className="rounded-[32px] border border-white/30 bg-white/40 p-3 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+          <div className="rounded-[32px] border border-white/30 bg-white/40 p-3 shadow-xl shadow-black/5 backdrop-blur-2xl">
           <div className="mb-3 flex items-center justify-between px-3 pt-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
             <span>Virtualized Replay Archive</span>
             <span>{filteredItems.length} rows</span>
@@ -256,8 +387,12 @@ export function ExplorerPage() {
                 <div className="pb-3">
                   <button
                     key={item.session_id}
-                    onClick={() => openReplay(item.session_id, item.focus_turn_id)}
-                    className="w-full rounded-[26px] border border-white/30 bg-[linear-gradient(135deg,rgba(255,255,255,0.72),rgba(244,239,231,0.5))] p-5 text-left shadow-lg shadow-black/5 transition hover:bg-white/80"
+                    onClick={() => setSelectedSessionId(item.session_id)}
+                    className={`w-full rounded-[26px] border p-5 text-left shadow-lg shadow-black/5 transition hover:bg-white/80 ${
+                      selectedItem?.session_id === item.session_id
+                        ? "border-accent/40 bg-[linear-gradient(135deg,rgba(239,245,240,0.9),rgba(244,239,231,0.6))]"
+                        : "border-white/30 bg-[linear-gradient(135deg,rgba(255,255,255,0.72),rgba(244,239,231,0.5))]"
+                    }`}
                   >
                     <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                       <div className="min-w-0 flex-1">
@@ -319,11 +454,88 @@ export function ExplorerPage() {
                         </div>
                       </div>
                     </div>
+                    <div className="mt-4 flex items-center justify-end">
+                      <span className="rounded-full border border-white/35 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-ink">
+                        Preview
+                      </span>
+                    </div>
                   </button>
                 </div>
               );
             }}
           />
+          </div>
+
+          <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Quick Preview</div>
+                <h2 className="mt-2 text-lg font-bold tracking-tight text-ink">
+                  {selectedItem?.rep_name ?? "Select a session"}
+                </h2>
+                <p className="mt-1 text-sm text-muted">{selectedItem?.scenario_name ?? "Replay-linked transcript preview"}</p>
+              </div>
+              {selectedItem ? (
+                <button
+                  onClick={() => openReplay(selectedItem.session_id, selectedItem.focus_turn_id)}
+                  className="rounded-full border border-white/35 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-ink transition hover:bg-white/85"
+                >
+                  Open Replay
+                </button>
+              ) : null}
+            </div>
+
+            {selectedItem ? (
+              <div className="mt-5 space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-white/25 bg-white/45 p-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Score</div>
+                    <div className="mt-2 text-2xl font-black tracking-tight text-ink">
+                      {typeof selectedItem.overall_score === "number" ? selectedItem.overall_score.toFixed(1) : "--"}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/25 bg-white/45 p-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Status</div>
+                    <div className="mt-2 text-sm font-semibold text-ink">
+                      {selectedItem.manager_reviewed ? "Reviewed" : "Needs review"} · {selectedItem.assignment_status}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/25 bg-white/45 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Transcript Preview</div>
+                  <p className="mt-3 text-sm leading-7 text-ink">
+                    {selectedItem.transcript_preview || "No transcript preview available."}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-white/25 bg-white/45 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Evidence Tags</div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {selectedItem.weakness_tags.map((tag) => (
+                      <span key={tag} className="rounded-full bg-accent-soft px-2.5 py-1 text-[11px] font-medium text-accent">
+                        {tag}
+                      </span>
+                    ))}
+                    {selectedItem.objection_tags.map((tag) => (
+                      <span key={tag} className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-medium text-amber-900">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/25 bg-white/45 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Manager Note</div>
+                  <div className="mt-3 text-sm leading-7 text-ink">
+                    {selectedItem.latest_coaching_note_preview ?? "No coaching note attached yet."}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <EmptyState variant="empty" message="Choose a session to inspect the transcript and evidence preview." />
+            )}
+          </div>
         </section>
       )}
     </motion.main>

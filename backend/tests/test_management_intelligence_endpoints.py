@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -6,16 +7,16 @@ from app.db.session import SessionLocal
 from app.models.scorecard import Scorecard
 
 
-def _create_assignment(client, seed_org: dict[str, str]) -> dict:
-    response = client.post(
-        "/manager/assignments",
-        json={
-            "scenario_id": seed_org["scenario_id"],
-            "rep_id": seed_org["rep_id"],
-            "assigned_by": seed_org["manager_id"],
-            "retry_policy": {"max_attempts": 2},
-        },
-    )
+def _create_assignment(client, seed_org: dict[str, str], *, due_at: str | None = None) -> dict:
+    payload = {
+        "scenario_id": seed_org["scenario_id"],
+        "rep_id": seed_org["rep_id"],
+        "assigned_by": seed_org["manager_id"],
+        "retry_policy": {"max_attempts": 2},
+    }
+    if due_at is not None:
+        payload["due_at"] = due_at
+    response = client.post("/manager/assignments", json=payload)
     assert response.status_code == 200
     return response.json()
 
@@ -114,6 +115,22 @@ def test_management_intelligence_endpoints(client, seed_org):
     assert "rep_risk_matrix" in command_center_body
     assert "scenario_pass_matrix" in command_center_body
 
+    team_alias = client.get(
+        "/manager/analytics/team",
+        params={"manager_id": seed_org["manager_id"], "period": "30"},
+        headers=manager_headers,
+    )
+    assert team_alias.status_code == 200
+    assert "summary" in team_alias.json()
+
+    rep_alias = client.get(
+        f"/manager/analytics/reps/{seed_org['rep_id']}",
+        params={"manager_id": seed_org["manager_id"], "days": 30},
+        headers=manager_headers,
+    )
+    assert rep_alias.status_code == 200
+    assert rep_alias.json()["rep_id"] == seed_org["rep_id"]
+
     scenarios = client.get(
         "/manager/analytics/scenarios",
         params={"manager_id": seed_org["manager_id"], "period": "30"},
@@ -132,6 +149,8 @@ def test_management_intelligence_endpoints(client, seed_org):
     )
     assert coaching_analytics.status_code == 200
     coaching_body = coaching_analytics.json()
+    if "_projection" in coaching_body:
+        assert coaching_body["_projection"]["view_name"] == "coaching_analytics"
     assert coaching_body["summary"]["coaching_note_count"] >= 1
     assert "manager_calibration" in coaching_body
     assert "recent_notes" in coaching_body
@@ -153,13 +172,48 @@ def test_management_intelligence_endpoints(client, seed_org):
     assert "transcript_preview" in explorer_body["items"][0]
     assert "focus_turn_id" in explorer_body["items"][0]
 
+    _create_assignment(
+        client,
+        seed_org,
+        due_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    )
+
     alerts = client.get(
         "/manager/alerts",
         params={"manager_id": seed_org["manager_id"], "period": "30"},
         headers=manager_headers,
     )
     assert alerts.status_code == 200
-    assert "items" in alerts.json()
+    alerts_body = alerts.json()
+    if "_projection" in alerts_body:
+        assert alerts_body["_projection"]["view_name"] == "alerts"
+    assert "items" in alerts_body
+    overdue_alert = next((item for item in alerts_body["items"] if item["kind"] == "overdue_assignments"), None)
+    assert overdue_alert is not None
+
+    ack = client.post(
+        f"/manager/alerts/{overdue_alert['id']}/ack",
+        params={"manager_id": seed_org["manager_id"]},
+        headers=manager_headers,
+    )
+    assert ack.status_code == 200
+    assert ack.json()["status"] == "acknowledged"
+
+    alerts_after_ack = client.get(
+        "/manager/alerts",
+        params={"manager_id": seed_org["manager_id"], "period": "30"},
+        headers=manager_headers,
+    )
+    assert alerts_after_ack.status_code == 200
+    assert overdue_alert["id"] not in {item["id"] for item in alerts_after_ack.json()["items"]}
+
+    command_center_after_ack = client.get(
+        "/manager/command-center",
+        params={"manager_id": seed_org["manager_id"], "period": "30"},
+        headers=manager_headers,
+    )
+    assert command_center_after_ack.status_code == 200
+    assert overdue_alert["id"] not in {item["id"] for item in command_center_after_ack.json()["alerts_preview"]}
 
     benchmarks = client.get(
         "/manager/benchmarks",
@@ -176,3 +230,11 @@ def test_management_intelligence_endpoints(client, seed_org):
     )
     assert metric_definitions.status_code == 200
     assert metric_definitions.json()["items"]
+
+    actions = client.get(
+        "/manager/actions",
+        params={"manager_id": seed_org["manager_id"], "limit": 50},
+        headers=manager_headers,
+    )
+    assert actions.status_code == 200
+    assert any(item["action_type"] == "alert.acknowledged" for item in actions.json()["items"])

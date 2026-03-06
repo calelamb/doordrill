@@ -2,11 +2,13 @@ import { clearStoredAuth, createAuthRequiredError, getValidStoredAuth, storeAuth
 import type { AuthSession } from "./auth";
 import type {
   AlertItem,
+  AnalyticsMetricDefinition,
   BenchmarksResponse,
   CoachingAnalyticsResponse,
   CommandCenterResponse,
   ExplorerResponse,
   FeedItem,
+  ManagerAnalyticsOperations,
   ManagerActionLog,
   ManagerAnalytics,
   ManagerAssignment,
@@ -159,6 +161,29 @@ export async function fetchManagerAssignments(managerId: string): Promise<Manage
   return response.items ?? [];
 }
 
+export async function createManagerAssignment(
+  managerId: string,
+  payload: {
+    scenario_id: string;
+    rep_id: string;
+    due_at?: string;
+    min_score_target?: number;
+    retry_policy?: Record<string, unknown>;
+  }
+): Promise<ManagerAssignment> {
+  return requestJson<ManagerAssignment>(
+    "/manager/assignments",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ...payload,
+        assigned_by: managerId,
+      }),
+    },
+    { userId: managerId, role: "manager" }
+  );
+}
+
 export async function fetchScenarios(): Promise<ScenarioSummary[]> {
   const auth = getValidStoredAuth();
   if (!auth) {
@@ -275,9 +300,15 @@ export async function createCoachingNote(
   );
 }
 
-export async function fetchManagerAnalytics(managerId: string): Promise<ManagerAnalytics> {
+export async function fetchManagerAnalytics(
+  managerId: string,
+  options: { period?: string; dateFrom?: string; dateTo?: string } = {}
+): Promise<ManagerAnalytics> {
+  const params = new URLSearchParams({ manager_id: managerId, period: options.period ?? "30" });
+  if (options.dateFrom) params.set("date_from", new Date(`${options.dateFrom}T00:00:00`).toISOString());
+  if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
   return requestJson<ManagerAnalytics>(
-    `/manager/analytics?manager_id=${encodeURIComponent(managerId)}`,
+    `/manager/analytics/team?${params.toString()}`,
     {},
     { userId: managerId, role: "manager" }
   );
@@ -376,6 +407,14 @@ export async function fetchManagerAlerts(
   return response.items ?? [];
 }
 
+export async function acknowledgeManagerAlert(managerId: string, alertId: string): Promise<void> {
+  await requestJson(
+    `/manager/alerts/${encodeURIComponent(alertId)}/ack?manager_id=${encodeURIComponent(managerId)}`,
+    { method: "POST" },
+    { userId: managerId, role: "manager" }
+  );
+}
+
 export async function fetchManagerBenchmarks(
   managerId: string,
   options: { period?: string; dateFrom?: string; dateTo?: string } = {}
@@ -390,9 +429,26 @@ export async function fetchManagerBenchmarks(
   );
 }
 
+export async function fetchManagerAnalyticsOperations(managerId: string): Promise<ManagerAnalyticsOperations> {
+  return requestJson<ManagerAnalyticsOperations>(
+    `/manager/analytics/operations?manager_id=${encodeURIComponent(managerId)}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchAnalyticsMetricDefinitions(managerId: string): Promise<AnalyticsMetricDefinition[]> {
+  const response = await requestJson<{ items: AnalyticsMetricDefinition[] }>(
+    `/manager/analytics/metrics/definitions?manager_id=${encodeURIComponent(managerId)}`,
+    {},
+    { userId: managerId, role: "manager" }
+  );
+  return response.items ?? [];
+}
+
 export async function fetchRepProgress(managerId: string, repId: string): Promise<RepProgress> {
   return requestJson<RepProgress>(
-    `/manager/reps/${encodeURIComponent(repId)}/progress?manager_id=${encodeURIComponent(managerId)}`,
+    `/manager/analytics/reps/${encodeURIComponent(repId)}?manager_id=${encodeURIComponent(managerId)}`,
     {},
     { userId: managerId, role: "manager" }
   );

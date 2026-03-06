@@ -210,6 +210,18 @@ export function ScenarioIntelligencePage() {
         </div>
       </section>
 
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {(data.difficulty_bands ?? []).map((band) => (
+          <div key={band.difficulty} className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Difficulty {band.difficulty}</div>
+            <div className="mt-3 text-2xl font-black tracking-tight text-ink">{Math.round(band.pass_rate * 100)}%</div>
+            <div className="mt-2 text-sm text-muted">
+              Pass rate · avg {band.average_score?.toFixed(1) ?? "--"} · {band.session_count} sessions
+            </div>
+          </div>
+        ))}
+      </section>
+
       <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
         <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
           <div className="mb-4 flex items-center gap-2">

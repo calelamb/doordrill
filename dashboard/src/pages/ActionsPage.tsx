@@ -5,7 +5,7 @@ import { BellRing, History, ShieldAlert } from "lucide-react";
 
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
-import { fetchManagerActions, fetchManagerAlerts } from "../lib/api";
+import { acknowledgeManagerAlert, fetchManagerActions, fetchManagerAlerts } from "../lib/api";
 import type { AlertItem, ManagerActionLog } from "../lib/types";
 
 function severityTone(alert: AlertItem) {
@@ -23,6 +23,7 @@ export function ActionsPage() {
   const [actions, setActions] = useState<ManagerActionLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [acknowledgingAlertId, setAcknowledgingAlertId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     if (!managerId) return;
@@ -51,6 +52,24 @@ export function ActionsPage() {
     void loadData();
   }, [loadData]);
 
+  const handleAcknowledge = useCallback(async (alertId: string) => {
+    if (!managerId) return;
+    setAcknowledgingAlertId(alertId);
+    try {
+      await acknowledgeManagerAlert(managerId, alertId);
+      await loadData();
+    } catch (err) {
+      if (isAuthError(err)) {
+        clearStoredAuth();
+        navigate("/login", { replace: true });
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Failed to acknowledge alert");
+    } finally {
+      setAcknowledgingAlertId(null);
+    }
+  }, [loadData, managerId, navigate]);
+
   if (loading) return <EmptyState variant="loading" message="Loading manager activity..." />;
   if (error) return <EmptyState variant="error" message={error} onRetry={() => void loadData()} />;
 
@@ -74,24 +93,39 @@ export function ActionsPage() {
           </div>
           <div className="space-y-3">
             {alerts.length ? alerts.map((alert) => (
-              <button
+              <div
                 key={alert.id}
-                onClick={() => {
-                  if (alert.session_id) navigate(`/manager/sessions/${alert.session_id}/replay`);
-                  else if (alert.rep_id) navigate(`/manager/reps/${alert.rep_id}/progress`);
-                }}
-                className={`w-full rounded-2xl border px-4 py-4 text-left transition hover:translate-x-0.5 ${severityTone(alert)}`}
+                className={`w-full rounded-2xl border px-4 py-4 text-left ${severityTone(alert)}`}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-sm font-semibold">{alert.title}</div>
-                    <p className="mt-1 text-sm leading-6 opacity-85">{alert.description}</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (alert.session_id) navigate(`/manager/sessions/${alert.session_id}/replay`);
+                        else if (alert.rep_id) navigate(`/manager/reps/${alert.rep_id}/progress`);
+                      }}
+                      className="text-left transition hover:translate-x-0.5"
+                    >
+                      <div className="text-sm font-semibold">{alert.title}</div>
+                      <p className="mt-1 text-sm leading-6 opacity-85">{alert.description}</p>
+                    </button>
                   </div>
-                  <span className="rounded-full bg-white/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]">
-                    {alert.severity}
-                  </span>
+                  <div className="flex flex-col items-end gap-2">
+                    <span className="rounded-full bg-white/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]">
+                      {alert.severity}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void handleAcknowledge(alert.id)}
+                      disabled={acknowledgingAlertId === alert.id}
+                      className="rounded-full border border-white/40 bg-white/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-ink transition hover:bg-white/85 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {acknowledgingAlertId === alert.id ? "Saving" : "Acknowledge"}
+                    </button>
+                  </div>
                 </div>
-              </button>
+              </div>
             )) : <EmptyState variant="empty" message="No active alerts right now." />}
           </div>
         </div>

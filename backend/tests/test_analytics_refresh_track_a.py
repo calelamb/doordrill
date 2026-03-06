@@ -7,6 +7,9 @@ from app.models.analytics import (
     AnalyticsDimManager,
     AnalyticsDimRep,
     AnalyticsDimScenario,
+    AnalyticsDimTeam,
+    AnalyticsDimTime,
+    AnalyticsFactAlert,
     AnalyticsFactCoachingIntervention,
     AnalyticsFactManagerCalibration,
     AnalyticsFactRepDay,
@@ -126,12 +129,16 @@ def test_track_a_analytics_warehouse_refresh(client, seed_org):
         assert db.get(AnalyticsDimManager, seed_org["manager_id"]) is not None
         assert db.get(AnalyticsDimRep, seed_org["rep_id"]) is not None
         assert db.get(AnalyticsDimScenario, seed_org["scenario_id"]) is not None
+        team_day = db.scalar(select(AnalyticsFactTeamDay).where(AnalyticsFactTeamDay.manager_id == seed_org["manager_id"]))
+        assert team_day is not None
+        assert db.get(AnalyticsDimTeam, team_day.team_id) is not None
+        assert db.get(AnalyticsDimTime, fact_session.session_date) is not None
         assert db.scalar(select(AnalyticsFactRepDay).where(AnalyticsFactRepDay.rep_id == seed_org["rep_id"])) is not None
         assert db.scalar(select(AnalyticsFactRepWeek).where(AnalyticsFactRepWeek.rep_id == seed_org["rep_id"])) is not None
-        assert db.scalar(select(AnalyticsFactTeamDay).where(AnalyticsFactTeamDay.manager_id == seed_org["manager_id"])) is not None
         assert db.scalar(select(AnalyticsFactScenarioDay).where(AnalyticsFactScenarioDay.scenario_id == seed_org["scenario_id"])) is not None
         assert db.scalar(select(AnalyticsFactManagerCalibration).where(AnalyticsFactManagerCalibration.session_id == session_id)) is not None
         assert db.scalar(select(AnalyticsFactCoachingIntervention).where(AnalyticsFactCoachingIntervention.session_id == session_id)) is not None
+        assert db.scalar(select(func.count(AnalyticsFactAlert.id)).where(AnalyticsFactAlert.manager_id == seed_org["manager_id"])) is not None
         assert db.scalar(select(AnalyticsMetricSnapshot).where(AnalyticsMetricSnapshot.manager_id == seed_org["manager_id"])) is not None
         assert db.scalar(
             select(AnalyticsMaterializedView).where(

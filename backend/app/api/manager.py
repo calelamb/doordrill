@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_manager
 from app.db.session import get_db
+from app.models.analytics import AnalyticsFactAlert
 from app.models.assignment import Assignment
 from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
@@ -379,6 +380,7 @@ def create_assignment(
         },
     )
 
+    analytics_refresh_service.refresh_manager(db, manager_id=manager.id)
     db.commit()
     db.refresh(assignment)
     return assignment
@@ -446,6 +448,7 @@ def create_followup_assignment(
         },
     )
 
+    analytics_refresh_service.refresh_manager(db, manager_id=manager.id)
     db.commit()
     db.refresh(assignment)
 
@@ -612,6 +615,25 @@ def get_manager_analytics(
     )
 
 
+@router.get("/analytics/team")
+def get_manager_team_analytics(
+    manager_id: str = Query(...),
+    period: str = Query(default="30"),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    return get_manager_analytics(
+        manager_id=manager_id,
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+        actor=actor,
+        db=db,
+    )
+
+
 @router.get("/command-center")
 def get_command_center(
     manager_id: str = Query(...),
@@ -698,6 +720,25 @@ def get_coaching_analytics(
     )
 
 
+@router.get("/analytics/reps/{rep_id}")
+def get_rep_analytics(
+    rep_id: str,
+    manager_id: str = Query(...),
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=30, ge=1, le=100),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    return get_rep_progress(
+        rep_id=rep_id,
+        manager_id=manager_id,
+        days=days,
+        limit=limit,
+        actor=actor,
+        db=db,
+    )
+
+
 @router.get("/analytics/explorer")
 def get_session_explorer(
     manager_id: str = Query(...),
@@ -769,6 +810,62 @@ def get_manager_alerts(
         date_to=current_end,
         period=period,
     )
+
+
+@router.post("/alerts/{alert_id}/ack")
+def acknowledge_manager_alert(
+    alert_id: str,
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only acknowledge their own alerts")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+
+    alert_row = db.scalar(
+        select(AnalyticsFactAlert)
+        .where(
+            AnalyticsFactAlert.manager_id == manager_id,
+            AnalyticsFactAlert.alert_key == alert_id,
+            AnalyticsFactAlert.is_active.is_(True),
+        )
+        .order_by(AnalyticsFactAlert.occurred_at.desc())
+        .limit(1)
+    )
+    if alert_row is None:
+        raise HTTPException(status_code=404, detail="alert not found")
+
+    action = action_service.log(
+        db,
+        manager_id=manager_id,
+        action_type="alert.acknowledged",
+        target_type="alert",
+        target_id=alert_id,
+        summary=f"Acknowledged {alert_row.kind} alert",
+        payload={
+            "alert_id": alert_id,
+            "period_key": alert_row.period_key,
+            "severity": alert_row.severity,
+            "kind": alert_row.kind,
+            "title": alert_row.title,
+            "session_id": alert_row.session_id,
+            "rep_id": alert_row.rep_id,
+            "scenario_id": alert_row.scenario_id,
+        },
+    )
+    refresh = analytics_refresh_service.refresh_manager(db, manager_id=manager_id)
+    db.commit()
+    db.refresh(action)
+    return {
+        "status": "acknowledged",
+        "alert_id": alert_id,
+        "manager_id": manager_id,
+        "action_id": action.id,
+        "refresh": refresh,
+    }
 
 
 @router.get("/benchmarks")

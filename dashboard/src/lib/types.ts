@@ -122,31 +122,61 @@ export type ReplayResponse = {
 
 export type ManagerAnalytics = {
   manager_id: string;
+  period?: string;
+  date_from?: string;
+  date_to?: string;
   assignment_count: number;
   completed_assignment_count: number;
   sessions_count: number;
   active_rep_count: number;
   average_score: number | null;
   completion_rate: number;
+  team_average_score?: number | null;
+  team_average_delta_vs_previous_period?: number | null;
+  completion_rate_by_rep?: Array<{
+    rep_id: string;
+    rep_name: string;
+    assignment_count: number;
+    completed_assignment_count: number;
+    completion_rate: number;
+  }>;
+  scenario_pass_rates?: Array<{
+    scenario_id: string;
+    scenario_name: string;
+    scored_session_count: number;
+    pass_count: number;
+    pass_rate: number;
+  }>;
+  score_distribution_histogram?: CommandCenterResponse["score_distribution_histogram"];
   summary?: CommandCenterResponse["summary"];
   score_trend?: CommandCenterResponse["score_trend"];
   scenario_pass_matrix?: CommandCenterResponse["scenario_pass_matrix"];
   rep_risk_matrix?: CommandCenterResponse["rep_risk_matrix"];
   weakest_categories?: CommandCenterResponse["weakest_categories"];
   alerts_preview?: CommandCenterResponse["alerts_preview"];
+  _meta?: CommandCenterResponse["_meta"];
 };
 
 export type RepProgress = {
   rep_id: string;
   rep_name?: string;
-  rep_email?: string;
+  days?: number;
   session_count: number;
   scored_session_count: number;
   average_score: number | null;
+  current_period_category_averages?: Record<string, number>;
+  weak_area_tags?: string[];
   latest_sessions: Array<{
     session_id: string;
+    scenario_id?: string | null;
+    scenario_name?: string | null;
     started_at: string | null;
     status: string | null;
+    overall_score: number | null;
+  }>;
+  trend?: Array<{
+    session_id: string;
+    started_at: string | null;
     overall_score: number | null;
   }>;
 };
@@ -322,6 +352,7 @@ export type CommandCenterResponse = {
     session_id?: string | null;
     focus_turn_id?: string | null;
   }>;
+  alerts?: AlertItem[];
   alerts_preview: AlertItem[];
   _meta?: {
     query_name: string;
@@ -331,6 +362,15 @@ export type CommandCenterResponse = {
     analytics_last_refresh_at: string | null;
     freshness_seconds: number | null;
     query_duration_ms: number;
+    cache?: {
+      backend: string;
+      entries?: number;
+      hits?: number;
+      misses?: number;
+      writes?: number;
+      max_entries?: number;
+      ttl_seconds?: number;
+    };
   };
 };
 
@@ -510,4 +550,77 @@ export type BenchmarksResponse = {
     lower_quartile: number | null;
     session_count: number;
   };
+};
+
+export type ManagerAnalyticsOperations = {
+  manager_id: string;
+  analytics_last_refresh_at: string | null;
+  cache: {
+    backend: string;
+    entries?: number;
+    hits?: number;
+    misses?: number;
+    writes?: number;
+    max_entries?: number;
+    ttl_seconds?: number;
+  };
+  refresh_runs: {
+    failed_count: number;
+    running_count: number;
+    recent: Array<{
+      id: string;
+      scope_type: string;
+      scope_id: string | null;
+      status: string;
+      started_at: string | null;
+      completed_at: string | null;
+      error: string | null;
+      row_counts_json: Record<string, unknown>;
+    }>;
+  };
+  warehouse: {
+    fact_session_count: number;
+    manager_dim_last_refreshed_at: string | null;
+    manager_rep_count: number;
+  };
+  materialized_views: {
+    count: number;
+    recent: Array<{
+      id: string;
+      view_name: string;
+      period_key: string;
+      row_count: number;
+      window_start: string | null;
+      window_end: string | null;
+      refreshed_at: string | null;
+    }>;
+  };
+  partitions: {
+    count: number;
+    active: Array<{
+      table_name: string;
+      partition_key: string;
+      backend: string;
+      status: string;
+      range_start: string | null;
+      range_end: string | null;
+    }>;
+  };
+  runtime: {
+    redis_configured: boolean;
+    cache_ttl_seconds: number;
+    warn_ms: number;
+    critical_ms: number;
+  };
+  _meta?: CommandCenterResponse["_meta"];
+};
+
+export type AnalyticsMetricDefinition = {
+  metric_key: string;
+  display_name: string;
+  description: string;
+  entity_type: string;
+  aggregation_method: string;
+  owner: string;
+  metadata_json: Record<string, unknown>;
 };

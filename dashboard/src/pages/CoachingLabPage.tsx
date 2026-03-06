@@ -97,6 +97,10 @@ export function CoachingLabPage() {
     () => (data?.calibration_drift_timeline ?? []).map((item) => ({ ...item, avg_abs: item.average_absolute_delta ?? 0 })),
     [data?.calibration_drift_timeline]
   );
+  const interventionTimeline = useMemo(
+    () => (data?.intervention_timeline ?? []).map((item) => ({ ...item })),
+    [data?.intervention_timeline]
+  );
 
   if (loading) return <EmptyState variant="loading" message="Loading coaching lab..." />;
   if (error) return <EmptyState variant="error" message={error} onRetry={() => void loadData()} />;
@@ -143,9 +147,19 @@ export function CoachingLabPage() {
             icon: TrendingUp,
           },
           {
+            label: "Coached Retry Δ",
+            value: typeof data.summary.coached_retry_uplift_avg === "number" ? `${data.summary.coached_retry_uplift_avg >= 0 ? "+" : ""}${data.summary.coached_retry_uplift_avg.toFixed(1)}` : "--",
+            icon: TrendingUp,
+          },
+          {
             label: "Improved Interventions",
             value: typeof data.summary.intervention_improved_rate === "number" ? formatPercent(data.summary.intervention_improved_rate) : "--",
             icon: BookOpenText,
+          },
+          {
+            label: "Drift Score",
+            value: typeof data.summary.calibration_drift_score === "number" ? data.summary.calibration_drift_score.toFixed(2) : "--",
+            icon: Scale,
           },
         ].map((card) => (
           <div key={card.label} className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
@@ -315,6 +329,62 @@ export function CoachingLabPage() {
               ))
             ) : (
               <EmptyState variant="empty" message="No coaching notes have been added yet." />
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <h2 className="text-lg font-bold tracking-tight text-ink">Intervention Timeline</h2>
+          <div className="mt-4 h-[280px] w-full">
+            {interventionTimeline.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={interventionTimeline} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(45,90,61,0.08)" strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fill: "var(--color-muted)", fontSize: 12 }} axisLine={false} tickLine={false} />
+                  <RechartsTooltip />
+                  <Bar dataKey="review_count" radius={[12, 12, 0, 0]} fill="#2d5a3d" />
+                  <Bar dataKey="coaching_note_count" radius={[12, 12, 0, 0]} fill="#b77a13" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <EmptyState variant="empty" message="No intervention timeline yet." />
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <h2 className="text-lg font-bold tracking-tight text-ink">Scenario Drift Watchlist</h2>
+          <div className="mt-4 space-y-3">
+            {(data.score_drift_by_scenario ?? []).length ? (
+              (data.score_drift_by_scenario ?? []).map((item) => (
+                <div key={item.scenario_id} className="rounded-2xl border border-white/25 bg-white/45 p-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-ink">{item.scenario_name}</div>
+                      <div className="mt-1 text-xs text-muted">{item.review_count} reviewed sessions</div>
+                    </div>
+                    <div className="grid gap-3 text-sm sm:grid-cols-2">
+                      <div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Avg Δ</div>
+                        <div className="mt-1 font-bold text-ink">
+                          {typeof item.average_delta === "number" ? `${item.average_delta >= 0 ? "+" : ""}${item.average_delta.toFixed(1)}` : "--"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Avg |Δ|</div>
+                        <div className="mt-1 font-bold text-ink">
+                          {typeof item.average_absolute_delta === "number" ? item.average_absolute_delta.toFixed(1) : "--"}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <EmptyState variant="empty" message="No scenario drift signals yet." />
             )}
           </div>
         </div>

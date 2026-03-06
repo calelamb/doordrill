@@ -95,6 +95,22 @@ class AnalyticsDimRep(Base, TimestampMixin):
     last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AnalyticsDimTeam(Base, TimestampMixin):
+    __tablename__ = "analytics_dim_teams"
+    __table_args__ = (
+        Index("ix_analytics_dim_teams_org_manager", "org_id", "manager_id"),
+    )
+
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True, nullable=False)
+    manager_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
+    team_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    manager_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rep_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_session_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AnalyticsDimScenario(Base, TimestampMixin):
     __tablename__ = "analytics_dim_scenarios"
     __table_args__ = (
@@ -108,6 +124,26 @@ class AnalyticsDimScenario(Base, TimestampMixin):
     difficulty: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     stage_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AnalyticsDimTime(Base, TimestampMixin):
+    __tablename__ = "analytics_dim_time"
+    __table_args__ = (
+        Index("ix_analytics_dim_time_month", "year", "month"),
+        Index("ix_analytics_dim_time_iso_week", "iso_year", "iso_week"),
+    )
+
+    day_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    week_start: Mapped[date] = mapped_column(Date, nullable=False)
+    month_start: Mapped[date] = mapped_column(Date, nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    quarter: Mapped[int] = mapped_column(Integer, nullable=False)
+    month: Mapped[int] = mapped_column(Integer, nullable=False)
+    day_of_month: Mapped[int] = mapped_column(Integer, nullable=False)
+    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False)
+    iso_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    iso_week: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_weekend: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class AnalyticsFactSession(Base, TimestampMixin):
@@ -307,6 +343,39 @@ class AnalyticsFactManagerCalibration(Base, TimestampMixin):
     override_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     delta_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class AnalyticsFactAlert(Base, TimestampMixin):
+    __tablename__ = "analytics_fact_alerts"
+    __table_args__ = (
+        UniqueConstraint("manager_id", "period_key", "alert_key", name="uq_analytics_fact_alert"),
+        Index("ix_analytics_fact_alert_manager_period", "manager_id", "period_key", "is_active", "occurred_at"),
+        Index("ix_analytics_fact_alert_manager_severity", "manager_id", "severity", "occurred_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    alert_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    manager_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True, nullable=False)
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="SET NULL"), index=True, nullable=True)
+    period_key: Mapped[str] = mapped_column(String(24), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    kind: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    rep_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True)
+    scenario_id: Mapped[str | None] = mapped_column(ForeignKey("scenarios.id", ondelete="SET NULL"), index=True, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("sessions.id", ondelete="SET NULL"), index=True, nullable=True)
+    focus_turn_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    baseline_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    observed_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    z_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
 class AnalyticsMaterializedView(Base, TimestampMixin):

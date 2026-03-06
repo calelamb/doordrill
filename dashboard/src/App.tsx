@@ -27,6 +27,11 @@ function ProtectedLayout() {
     return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}` }} />;
   }
 
+  if (!["manager", "admin"].includes(auth.user.role)) {
+    clearStoredAuth();
+    return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}` }} />;
+  }
+
   return (
     <div className="flex min-h-screen">
       <Sidebar />

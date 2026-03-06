@@ -1,14 +1,29 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { AlertTriangle, ArrowUpRight, BellRing, Gauge, Radar, TrendingDown, TrendingUp, Users } from "lucide-react";
+import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
+import { AlertTriangle, ArrowUpRight, BellRing, Clock3, Database, Gauge, Layers3, Radar, TrendingDown, TrendingUp, Users } from "lucide-react";
 import type { EChartsOption } from "echarts";
 
 import { EChartSurface } from "../components/EChartSurface";
+import { DataTable } from "../components/shared/DataTable";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
-import { fetchManagerBenchmarks, fetchManagerCommandCenter } from "../lib/api";
-import type { AlertItem, BenchmarksResponse, CommandCenterResponse } from "../lib/types";
+import {
+  fetchAnalyticsMetricDefinitions,
+  fetchManagerAnalytics,
+  fetchManagerAnalyticsOperations,
+  fetchManagerBenchmarks,
+  fetchManagerCommandCenter,
+} from "../lib/api";
+import type {
+  AlertItem,
+  AnalyticsMetricDefinition,
+  BenchmarksResponse,
+  CommandCenterResponse,
+  ManagerAnalytics,
+  ManagerAnalyticsOperations,
+} from "../lib/types";
 
 const PERIOD_OPTIONS = [
   { key: "7", label: "7 days" },
@@ -44,7 +59,10 @@ export function AnalyticsPage() {
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
   const [data, setData] = useState<CommandCenterResponse | null>(null);
+  const [teamAnalytics, setTeamAnalytics] = useState<ManagerAnalytics | null>(null);
   const [benchmarks, setBenchmarks] = useState<BenchmarksResponse | null>(null);
+  const [operations, setOperations] = useState<ManagerAnalyticsOperations | null>(null);
+  const [metricDefinitions, setMetricDefinitions] = useState<AnalyticsMetricDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,12 +86,18 @@ export function AnalyticsPage() {
         dateFrom: period === "custom" ? customStart : undefined,
         dateTo: period === "custom" ? customEnd : undefined,
       };
-      const [commandCenter, benchmarkData] = await Promise.all([
+      const [commandCenter, benchmarkData, teamAnalyticsData, operationsData, definitionsData] = await Promise.all([
         fetchManagerCommandCenter(managerId, options),
         fetchManagerBenchmarks(managerId, options),
+        fetchManagerAnalytics(managerId, options),
+        fetchManagerAnalyticsOperations(managerId),
+        fetchAnalyticsMetricDefinitions(managerId),
       ]);
       setData(commandCenter);
       setBenchmarks(benchmarkData);
+      setTeamAnalytics(teamAnalyticsData);
+      setOperations(operationsData);
+      setMetricDefinitions(definitionsData);
     } catch (err) {
       if (isAuthError(err)) {
         clearStoredAuth();
@@ -302,6 +326,82 @@ export function AnalyticsPage() {
     } as EChartsOption;
   }, [data?.scenario_pass_matrix]);
 
+  const repCompletionColumns = useMemo<Array<ColumnDef<NonNullable<ManagerAnalytics["completion_rate_by_rep"]>[number]>>>(() => {
+    const columnHelper = createColumnHelper<NonNullable<ManagerAnalytics["completion_rate_by_rep"]>[number]>();
+    return [
+      columnHelper.accessor("rep_name", {
+        header: "Rep",
+        cell: (info) => (
+          <button
+            type="button"
+            onClick={() => navigate(`/manager/reps/${info.row.original.rep_id}/progress`)}
+            className="font-semibold text-ink transition hover:text-accent"
+          >
+            {info.getValue()}
+          </button>
+        ),
+      }),
+      columnHelper.accessor("completed_assignment_count", {
+        header: "Done",
+        cell: (info) => String(info.getValue()),
+      }),
+      columnHelper.accessor("assignment_count", {
+        header: "Assigned",
+        cell: (info) => String(info.getValue()),
+      }),
+      columnHelper.accessor("completion_rate", {
+        header: "Completion",
+        cell: (info) => formatPercent(info.getValue()),
+      }),
+    ] as ColumnDef<NonNullable<ManagerAnalytics["completion_rate_by_rep"]>[number]>[];
+  }, [navigate]);
+
+  const scenarioPassColumns = useMemo<Array<ColumnDef<NonNullable<ManagerAnalytics["scenario_pass_rates"]>[number]>>>(() => {
+    const columnHelper = createColumnHelper<NonNullable<ManagerAnalytics["scenario_pass_rates"]>[number]>();
+    return [
+      columnHelper.accessor("scenario_name", {
+        header: "Scenario",
+      }),
+      columnHelper.accessor("pass_rate", {
+        header: "Pass",
+        cell: (info) => formatPercent(info.getValue()),
+      }),
+      columnHelper.accessor("pass_count", {
+        header: "Passes",
+        cell: (info) => String(info.getValue()),
+      }),
+      columnHelper.accessor("scored_session_count", {
+        header: "Samples",
+        cell: (info) => String(info.getValue()),
+      }),
+    ] as ColumnDef<NonNullable<ManagerAnalytics["scenario_pass_rates"]>[number]>[];
+  }, []);
+
+  const metricDefinitionColumns = useMemo<Array<ColumnDef<AnalyticsMetricDefinition>>>(() => {
+    const columnHelper = createColumnHelper<AnalyticsMetricDefinition>();
+    return [
+      columnHelper.accessor("display_name", {
+        header: "Metric",
+        cell: (info) => (
+          <div>
+            <div className="font-semibold text-ink">{info.getValue()}</div>
+            <div className="mt-1 text-xs leading-5 text-muted">{info.row.original.description}</div>
+          </div>
+        ),
+      }),
+      columnHelper.accessor("entity_type", {
+        header: "Entity",
+        cell: (info) => <span className="uppercase tracking-[0.16em] text-muted">{info.getValue()}</span>,
+      }),
+      columnHelper.accessor("aggregation_method", {
+        header: "Method",
+      }),
+      columnHelper.accessor("owner", {
+        header: "Owner",
+      }),
+    ] as ColumnDef<AnalyticsMetricDefinition>[];
+  }, []);
+
   if (loading) return <EmptyState variant="loading" message="Loading command center..." />;
   if (error) return <EmptyState variant="error" message={error} onRetry={() => void loadData()} />;
   if (!data) return <EmptyState variant="empty" message="No command center data available." />;
@@ -325,11 +425,20 @@ export function AnalyticsPage() {
           <p className="mt-1 max-w-3xl text-sm text-muted">
             Team health, rep risk, scenario performance, and coaching signals linked back to session evidence.
           </p>
-          {data?._meta?.analytics_last_refresh_at ? (
-            <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-white/35 bg-white/55 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
-              Data fresh {data._meta.freshness_seconds ?? 0}s ago
-            </div>
-          ) : null}
+          <div className="mt-3 flex flex-wrap gap-2">
+            {data?._meta?.analytics_last_refresh_at ? (
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/35 bg-white/55 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+                <Clock3 className="h-3.5 w-3.5 text-accent" />
+                Data fresh {data._meta.freshness_seconds ?? 0}s ago
+              </div>
+            ) : null}
+            {data?._meta?.cache_status ? (
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/35 bg-white/55 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+                <Database className="h-3.5 w-3.5 text-accent" />
+                Cache {data._meta.cache_status}
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <div className="space-y-3">
@@ -604,6 +713,121 @@ export function AnalyticsPage() {
               ))}
             </div>
           </div>
+        </div>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <div className="mb-4 flex items-center gap-2">
+            <Users className="h-4 w-4 text-accent" />
+            <h2 className="text-lg font-bold tracking-tight text-ink">Completion By Rep</h2>
+          </div>
+          <DataTable
+            columns={repCompletionColumns}
+            data={teamAnalytics?.completion_rate_by_rep ?? []}
+            emptyMessage="No assignment completion data in this window."
+          />
+        </div>
+
+        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <div className="mb-4 flex items-center gap-2">
+            <Layers3 className="h-4 w-4 text-accent" />
+            <h2 className="text-lg font-bold tracking-tight text-ink">Scenario Pass Leaderboard</h2>
+          </div>
+          <DataTable
+            columns={scenarioPassColumns}
+            data={teamAnalytics?.scenario_pass_rates ?? []}
+            emptyMessage="No scenario pass-rate samples in this window."
+          />
+        </div>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+        <div className="rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_left,rgba(45,90,61,0.14),transparent_36%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <div className="mb-5 flex items-center gap-2">
+            <Database className="h-4 w-4 text-accent" />
+            <h2 className="text-lg font-bold tracking-tight text-ink">Analytics Runtime</h2>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            {[
+              {
+                label: "Last Refresh",
+                value: operations?.analytics_last_refresh_at
+                  ? new Date(operations.analytics_last_refresh_at).toLocaleString()
+                  : "--",
+              },
+              {
+                label: "Fact Sessions",
+                value: String(operations?.warehouse.fact_session_count ?? 0),
+              },
+              {
+                label: "Materialized Views",
+                value: String(operations?.materialized_views.count ?? 0),
+              },
+              {
+                label: "Refresh Failures",
+                value: String(operations?.refresh_runs.failed_count ?? 0),
+              },
+            ].map((card) => (
+              <div key={card.label} className="rounded-2xl border border-white/25 bg-white/50 p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">{card.label}</div>
+                <div className="mt-2 text-lg font-bold text-ink">{card.value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-5 grid gap-3 text-sm md:grid-cols-2">
+            <div className="rounded-2xl border border-white/25 bg-white/45 p-4">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Cache</div>
+              <div className="mt-2 text-ink">
+                {operations?.cache.backend ?? "--"} · TTL {operations?.runtime.cache_ttl_seconds ?? 0}s
+              </div>
+              <div className="mt-1 text-xs text-muted">
+                hits {operations?.cache.hits ?? 0} · misses {operations?.cache.misses ?? 0} · writes {operations?.cache.writes ?? 0}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/25 bg-white/45 p-4">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Latency Budget</div>
+              <div className="mt-2 text-ink">
+                warn {operations?.runtime.warn_ms ?? 0}ms · critical {operations?.runtime.critical_ms ?? 0}ms
+              </div>
+              <div className="mt-1 text-xs text-muted">
+                partitions {operations?.partitions.count ?? 0} · active manager reps {operations?.warehouse.manager_rep_count ?? 0}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 space-y-3">
+            {(operations?.refresh_runs.recent ?? []).slice(0, 5).map((run) => (
+              <div key={run.id} className="rounded-2xl border border-white/25 bg-white/45 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-ink">{run.scope_type} · {run.status}</div>
+                    <div className="mt-1 text-xs text-muted">
+                      {run.started_at ? new Date(run.started_at).toLocaleString() : "--"}
+                    </div>
+                  </div>
+                  <span className="rounded-full bg-white/65 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted">
+                    {run.scope_id ? run.scope_id.slice(0, 12) : "global"}
+                  </span>
+                </div>
+                {run.error ? <div className="mt-2 text-xs text-error">{run.error}</div> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <div className="mb-4 flex items-center gap-2">
+            <Gauge className="h-4 w-4 text-accent" />
+            <h2 className="text-lg font-bold tracking-tight text-ink">Metric Registry</h2>
+          </div>
+          <DataTable
+            columns={metricDefinitionColumns}
+            data={metricDefinitions}
+            emptyMessage="No active metric definitions registered."
+          />
         </div>
       </section>
     </motion.main>

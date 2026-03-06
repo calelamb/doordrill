@@ -12,6 +12,9 @@ from app.models.analytics import (
     AnalyticsDimManager,
     AnalyticsDimRep,
     AnalyticsDimScenario,
+    AnalyticsDimTeam,
+    AnalyticsDimTime,
+    AnalyticsFactAlert,
     AnalyticsFactCoachingIntervention,
     AnalyticsFactManagerCalibration,
     AnalyticsFactRepDay,
@@ -31,7 +34,7 @@ from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.scenario import Scenario
 from app.models.session import Session as DrillSession
 from app.models.session import SessionEvent, SessionTurn
-from app.models.types import AssignmentStatus, TurnSpeaker
+from app.models.types import AssignmentStatus, TurnSpeaker, UserRole
 from app.models.user import Team, User
 from app.services.management_analytics_service import ManagementAnalyticsService
 
@@ -144,7 +147,6 @@ def _shift_month(value: datetime, offset: int) -> datetime:
 def _period_bounds(period_key: str, *, now: datetime) -> tuple[datetime, datetime, datetime, datetime]:
     days = int(period_key)
     current_end = _normalize_dt(now) or _utcnow()
-    current_end = current_end.replace(microsecond=0)
     current_start = current_end - timedelta(days=days)
     previous_end = current_start
     previous_start = previous_end - max(timedelta(days=1), current_end - current_start)
@@ -424,6 +426,33 @@ class AnalyticsRefreshService:
         row.last_session_at = last_session_at
         row.last_refreshed_at = _utcnow()
 
+    def _upsert_team_dim(
+        self,
+        db: Session,
+        *,
+        team: Team,
+        manager: User,
+        last_session_at: datetime | None,
+    ) -> None:
+        row = db.get(AnalyticsDimTeam, team.id)
+        if row is None:
+            row = AnalyticsDimTeam(
+                team_id=team.id,
+                org_id=team.org_id,
+                manager_id=manager.id,
+                team_name=team.name,
+            )
+            db.add(row)
+        row.org_id = team.org_id
+        row.manager_id = manager.id
+        row.team_name = team.name
+        row.manager_name = manager.name
+        row.rep_count = db.scalar(
+            select(func.count(User.id)).where(User.team_id == team.id, User.role == UserRole.REP)
+        ) or 0
+        row.last_session_at = last_session_at
+        row.last_refreshed_at = _utcnow()
+
     def _upsert_scenario_dim(self, db: Session, *, scenario: Scenario) -> None:
         row = db.get(AnalyticsDimScenario, scenario.id)
         if row is None:
@@ -442,6 +471,38 @@ class AnalyticsRefreshService:
         row.difficulty = scenario.difficulty
         row.stage_count = len(scenario.stages or [])
         row.last_refreshed_at = _utcnow()
+
+    def _ensure_time_dim(self, db: Session, *, day_value: date) -> None:
+        row = db.get(AnalyticsDimTime, day_value)
+        iso_year, iso_week, _ = day_value.isocalendar()
+        week_start = _week_start(day_value)
+        month_start = day_value.replace(day=1)
+        if row is None:
+            row = AnalyticsDimTime(
+                day_date=day_value,
+                week_start=week_start,
+                month_start=month_start,
+                year=day_value.year,
+                quarter=((day_value.month - 1) // 3) + 1,
+                month=day_value.month,
+                day_of_month=day_value.day,
+                day_of_week=day_value.weekday(),
+                iso_year=iso_year,
+                iso_week=iso_week,
+                is_weekend=day_value.weekday() >= 5,
+            )
+            db.add(row)
+            return
+        row.week_start = week_start
+        row.month_start = month_start
+        row.year = day_value.year
+        row.quarter = ((day_value.month - 1) // 3) + 1
+        row.month = day_value.month
+        row.day_of_month = day_value.day
+        row.day_of_week = day_value.weekday()
+        row.iso_year = iso_year
+        row.iso_week = iso_week
+        row.is_weekend = day_value.weekday() >= 5
 
     def _first_response_latency_ms(self, events: list[SessionEvent]) -> int | None:
         first_client = None
@@ -599,6 +660,7 @@ class AnalyticsRefreshService:
 
         day_count = 0
         for day_date, items in day_groups.items():
+            self._ensure_time_dim(db, day_value=day_date)
             scored = [item for item in items if item.overall_score is not None]
             weak_tags = Counter(tag for item in items for tag in item.weakness_tags_json or [])
             db.add(
@@ -623,6 +685,7 @@ class AnalyticsRefreshService:
 
         week_count = 0
         for week_start, items in week_groups.items():
+            self._ensure_time_dim(db, day_value=week_start)
             scored = [item for item in items if item.overall_score is not None]
             scores = [item.overall_score for item in scored if item.overall_score is not None]
             weak_tags = Counter(tag for item in items for tag in item.weakness_tags_json or [])
@@ -669,6 +732,7 @@ class AnalyticsRefreshService:
 
         count = 0
         for day_date in sorted(set(session_groups) | set(assignment_groups)):
+            self._ensure_time_dim(db, day_value=day_date)
             items = session_groups.get(day_date, [])
             scored = [item for item in items if item.overall_score is not None]
             statuses = assignment_groups.get(day_date, [])
@@ -709,6 +773,7 @@ class AnalyticsRefreshService:
 
         count = 0
         for day_date, items in groups.items():
+            self._ensure_time_dim(db, day_value=day_date)
             scored = [item for item in items if item.overall_score is not None]
             weak_tags = Counter(tag for item in items for tag in item.weakness_tags_json or [])
             objection_tags = Counter(tag for item in items for tag in item.objection_tags_json or [])
@@ -971,6 +1036,65 @@ class AnalyticsRefreshService:
             "metric_snapshots": 6 + len(scenario_groups),
         }
 
+    def _refresh_alert_facts(self, db: Session, *, manager_id: str) -> dict[str, int]:
+        manager = db.get(User, manager_id)
+        if manager is None:
+            return {"alert_rows": 0}
+
+        refreshed_at = _utcnow()
+        existing_first_seen = {
+            (row.period_key, row.alert_key): _normalize_dt(row.first_seen_at) or refreshed_at
+            for row in db.scalars(
+                select(AnalyticsFactAlert).where(AnalyticsFactAlert.manager_id == manager_id)
+            ).all()
+        }
+        db.execute(delete(AnalyticsFactAlert).where(AnalyticsFactAlert.manager_id == manager_id))
+
+        inserted = 0
+        for period_key in MATERIALIZED_PERIODS:
+            current_start, current_end, previous_start, previous_end = _period_bounds(period_key, now=refreshed_at)
+            command_center = self.management_analytics.get_command_center(
+                db,
+                manager_id=manager_id,
+                date_from=current_start,
+                date_to=current_end,
+                previous_start=previous_start,
+                previous_end=previous_end,
+                period=period_key,
+            )
+            for item in command_center.get("alerts", []):
+                occurred_at = _normalize_dt(datetime.fromisoformat(item["occurred_at"])) or refreshed_at
+                db.add(
+                    AnalyticsFactAlert(
+                        alert_key=item["id"],
+                        manager_id=manager_id,
+                        org_id=manager.org_id,
+                        team_id=manager.team_id,
+                        period_key=period_key,
+                        severity=item["severity"],
+                        kind=item["kind"],
+                        title=item["title"],
+                        description=item["description"],
+                        occurred_at=occurred_at,
+                        rep_id=item.get("rep_id"),
+                        scenario_id=item.get("scenario_id"),
+                        session_id=item.get("session_id"),
+                        focus_turn_id=item.get("focus_turn_id"),
+                        baseline_value=item.get("baseline_value"),
+                        observed_value=item.get("observed_value"),
+                        delta=item.get("delta"),
+                        z_score=item.get("z_score"),
+                        is_active=True,
+                        first_seen_at=existing_first_seen.get((period_key, item["id"]), refreshed_at),
+                        last_seen_at=refreshed_at,
+                        metadata_json={
+                            "rep_name": item.get("rep_name"),
+                        },
+                    )
+                )
+                inserted += 1
+        return {"alert_rows": inserted}
+
     def refresh_session(self, db: Session, *, session_id: str, refresh_materialized: bool = True) -> dict[str, Any]:
         self.ensure_metric_definitions(db)
         run = self._start_run(db, scope_type="session", scope_id=session_id)
@@ -1003,6 +1127,13 @@ class AnalyticsRefreshService:
                 first_session_at=_normalize_dt(first_session_at),
                 last_session_at=_normalize_dt(last_session_at),
             )
+            if team is not None:
+                self._upsert_team_dim(
+                    db,
+                    team=team,
+                    manager=manager,
+                    last_session_at=_normalize_dt(last_session_at),
+                )
             self._upsert_scenario_dim(db, scenario=scenario)
 
             fact_session_payload, turn_metrics_payload = self._session_metrics(
@@ -1018,6 +1149,7 @@ class AnalyticsRefreshService:
             fact_session_payload["org_id"] = rep.org_id
             fact_session_payload["team_id"] = rep.team_id
             turn_metrics_payload["manager_id"] = manager.id
+            self._ensure_time_dim(db, day_value=fact_session_payload["session_date"])
             self._upsert_session_fact(db, payload=fact_session_payload)
             self._upsert_turn_metrics(db, payload=turn_metrics_payload)
 
@@ -1042,6 +1174,7 @@ class AnalyticsRefreshService:
             row_counts.update(self._refresh_metric_snapshots(db, manager_id=manager.id, snapshot_date=fact_session_payload["session_date"]))
             row_counts.update(self.ensure_partition_windows(db))
             if refresh_materialized:
+                row_counts.update(self._refresh_alert_facts(db, manager_id=manager.id))
                 row_counts.update(self._refresh_materialized_views(db, manager_id=manager.id, run_id=run.id))
 
             self._finish_run(db, run=run, status="completed", row_counts=row_counts)
@@ -1064,6 +1197,7 @@ class AnalyticsRefreshService:
             for session_id in session_ids:
                 self.refresh_session(db, session_id=session_id, refresh_materialized=False)
                 row_counts["refreshed_sessions"] += 1
+            row_counts.update(self._refresh_alert_facts(db, manager_id=manager_id))
             row_counts.update(self.ensure_partition_windows(db))
             row_counts.update(self._refresh_materialized_views(db, manager_id=manager_id, run_id=run.id))
             self._finish_run(db, run=run, status="completed", row_counts=row_counts)

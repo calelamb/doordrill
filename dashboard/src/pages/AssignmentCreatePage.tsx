@@ -1,28 +1,19 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { Check, ChevronRight, Search, AlertCircle, Loader2, X } from "lucide-react";
 
 import { DifficultyBadge } from "../components/shared/DifficultyBadge";
+import { EmptyState } from "../components/shared/EmptyState";
 import { SkillChip } from "../components/shared/SkillChip";
-
-// Mock Data
-const MOCK_SCENARIOS = [
-    { id: "S1", name: "First time homeowner", level: 1 as const, skills: ["Opening", "Discovery"], description: "A simple introduction out door knocking." },
-    { id: "S2", name: "Angry resident", level: 4 as const, skills: ["De-escalation", "Professionalism"], description: "Handle a hostile rejection professionally." },
-    { id: "S3", name: "Price objection hard", level: 5 as const, skills: ["Objection", "Closing"], description: "Navigate a steep price objection after pitching." },
-    { id: "S4", name: "Spouse isn't home", level: 2 as const, skills: ["Objection", "Follow-up"], description: "Standard 'let me talk to my wife' stall." },
-];
-
-const MOCK_REPS = [
-    { id: "R1", name: "Alice Chen" },
-    { id: "R2", name: "Bob Smith" },
-    { id: "R3", name: "Charlie Davis" },
-    { id: "R4", name: "Diana Prince" },
-];
+import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
+import { createManagerAssignment, fetchManagerTeam, fetchScenarios } from "../lib/api";
+import type { ManagerTeamMember, ScenarioSummary } from "../lib/types";
 
 export function AssignmentCreatePage() {
     const navigate = useNavigate();
+    const auth = getValidStoredAuth();
+    const managerId = auth?.user.id ?? "";
 
     const [step, setStep] = useState<1 | 2 | 3>(1);
     const [scenarioId, setScenarioId] = useState<string | null>(null);
@@ -33,43 +24,99 @@ export function AssignmentCreatePage() {
 
     const [dueDate, setDueDate] = useState("");
     const [minScore, setMinScore] = useState("");
-    const [coachNote, setCoachNote] = useState("");
+    const [maxAttempts, setMaxAttempts] = useState("2");
 
+    const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+    const [reps, setReps] = useState<ManagerTeamMember[]>([]);
+    const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const filteredScenarios = MOCK_SCENARIOS.filter(s => s.name.toLowerCase().includes(scenarioSearch.toLowerCase()));
-    const filteredReps = MOCK_REPS.filter(r => r.name.toLowerCase().includes(repSearch.toLowerCase()));
+    const loadData = useCallback(async () => {
+        if (!managerId) return;
+        setLoading(true);
+        setError(null);
+        try {
+            const [scenarioData, repData] = await Promise.all([
+                fetchScenarios(),
+                fetchManagerTeam(managerId),
+            ]);
+            setScenarios(scenarioData);
+            setReps(repData);
+        } catch (err) {
+            if (isAuthError(err)) {
+                clearStoredAuth();
+                navigate("/login", { replace: true });
+                return;
+            }
+            setError(err instanceof Error ? err.message : "Failed to load assignment builder");
+        } finally {
+            setLoading(false);
+        }
+    }, [managerId, navigate]);
+
+    useEffect(() => {
+        void loadData();
+    }, [loadData]);
+
+    const filteredScenarios = useMemo(
+        () => scenarios.filter((s) => s.name.toLowerCase().includes(scenarioSearch.toLowerCase())),
+        [scenarioSearch, scenarios]
+    );
+    const filteredReps = useMemo(
+        () => reps.filter((r) => r.name.toLowerCase().includes(repSearch.toLowerCase())),
+        [repSearch, reps]
+    );
 
     const handleToggleRep = (id: string) => {
         setSelectedReps(prev => prev.includes(id) ? prev.filter(r => r !== id) : [...prev, id]);
     };
 
     const handleSelectAllReps = () => {
-        if (selectedReps.length === MOCK_REPS.length) {
+        if (selectedReps.length === reps.length) {
             setSelectedReps([]);
         } else {
-            setSelectedReps(MOCK_REPS.map(r => r.id));
+            setSelectedReps(reps.map(r => r.id));
         }
     };
 
     const handleSubmit = async () => {
+        if (!managerId || !scenarioId || !selectedReps.length) {
+            return;
+        }
         setSubmitting(true);
         setError(null);
         try {
-            // Simulate API call
-            await new Promise(resolve => setTimeout(resolve, 1500));
-            // In a real app we would call an API like `createAssignment` here.
-            alert("Assignment created!");
+            await Promise.all(selectedReps.map((repId) => createManagerAssignment(managerId, {
+                scenario_id: scenarioId,
+                rep_id: repId,
+                due_at: dueDate ? new Date(`${dueDate}T23:59:59`).toISOString() : undefined,
+                min_score_target: minScore ? Number(minScore) : undefined,
+                retry_policy: { max_attempts: maxAttempts ? Number(maxAttempts) : 2 },
+            })));
+            window.dispatchEvent(new Event("manager-feed:refresh"));
             navigate("/manager/feed");
         } catch (err) {
-            setError("Failed to create assignment");
+            if (isAuthError(err)) {
+                clearStoredAuth();
+                navigate("/login", { replace: true });
+                return;
+            }
+            setError(err instanceof Error ? err.message : "Failed to create assignment");
             setSubmitting(false);
         }
     };
 
-    const selectedScenarioInfo = MOCK_SCENARIOS.find(s => s.id === scenarioId);
-    const selectedRepsInfo = MOCK_REPS.filter(r => selectedReps.includes(r.id));
+    const selectedScenarioInfo = scenarios.find(s => s.id === scenarioId);
+    const selectedRepsInfo = reps.filter(r => selectedReps.includes(r.id));
+
+    if (loading) {
+        return (
+            <main className="max-w-4xl mx-auto px-6 py-8">
+                <EmptyState variant="loading" message="Loading assignment builder..." />
+            </main>
+        );
+    }
 
     return (
         <motion.main
@@ -137,6 +184,7 @@ export function AssignmentCreatePage() {
                         <div className="flex flex-col gap-3">
                             {filteredScenarios.map(sc => {
                                 const isSelected = sc.id === scenarioId;
+                                const scenarioSkills = Object.keys(sc.rubric ?? {}).slice(0, 4).map((skill) => skill.replace(/_/g, " "));
                                 return (
                                     <button
                                         key={sc.id}
@@ -148,11 +196,11 @@ export function AssignmentCreatePage() {
                                     >
                                         <div className="flex justify-between items-start mb-2">
                                             <h3 className="font-medium text-ink">{sc.name}</h3>
-                                            <DifficultyBadge level={sc.level} />
+                                            <DifficultyBadge level={sc.difficulty as 1 | 2 | 3 | 4 | 5} />
                                         </div>
                                         <p className="text-sm text-muted mb-4">{sc.description}</p>
                                         <div className="flex flex-wrap gap-2">
-                                            {sc.skills.map(skill => (
+                                            {scenarioSkills.map(skill => (
                                                 <SkillChip key={skill} label={skill} />
                                             ))}
                                         </div>
@@ -195,7 +243,7 @@ export function AssignmentCreatePage() {
                                     onClick={handleSelectAllReps}
                                     className="text-accent text-sm font-medium hover:underline"
                                 >
-                                    {selectedReps.length === MOCK_REPS.length ? "Deselect All" : "Select All"}
+                                    {selectedReps.length === reps.length ? "Deselect All" : "Select All"}
                                 </button>
                             </div>
 
@@ -267,13 +315,15 @@ export function AssignmentCreatePage() {
                             </div>
 
                             <div>
-                                <label className="block text-xs font-semibold text-muted uppercase tracking-wide mb-1.5">Coaching Note</label>
-                                <textarea
-                                    rows={3}
-                                    value={coachNote}
-                                    onChange={e => setCoachNote(e.target.value)}
-                                    placeholder="Leave a note for the reps reviewing this drill..."
-                                    className="w-full bg-white/50 border border-white/40 rounded-xl py-2.5 px-3 text-sm text-ink focus:ring-2 focus:ring-accent outline-none resize-none"
+                                <label className="block text-xs font-semibold text-muted uppercase tracking-wide mb-1.5">Retry Attempts</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="10"
+                                    step="1"
+                                    value={maxAttempts}
+                                    onChange={e => setMaxAttempts(e.target.value)}
+                                    className="w-full bg-white/50 border border-white/40 rounded-xl py-2.5 px-3 text-sm text-ink focus:ring-2 focus:ring-accent outline-none"
                                 />
                             </div>
                         </div>
@@ -324,7 +374,7 @@ export function AssignmentCreatePage() {
                                     <span className="block text-xs font-semibold text-muted uppercase tracking-wide mb-2">Scenario</span>
                                     <div className="flex items-center gap-3 text-ink font-medium">
                                         {selectedScenarioInfo?.name}
-                                        <DifficultyBadge level={selectedScenarioInfo?.level as any} />
+                                        <DifficultyBadge level={selectedScenarioInfo?.difficulty as 1 | 2 | 3 | 4 | 5} />
                                     </div>
                                 </div>
 
@@ -342,8 +392,8 @@ export function AssignmentCreatePage() {
                                     </div>
                                 </div>
 
-                                {(dueDate || minScore) && (
-                                    <div className="grid grid-cols-2 gap-4 border-t border-white/20 pt-4">
+                                {(dueDate || minScore || maxAttempts) && (
+                                    <div className="grid grid-cols-3 gap-4 border-t border-white/20 pt-4">
                                         {dueDate && (
                                             <div>
                                                 <span className="block text-xs font-semibold text-muted uppercase tracking-wide mb-1">Due Date</span>
@@ -356,13 +406,10 @@ export function AssignmentCreatePage() {
                                                 <span className="text-sm text-ink font-medium bg-amber-100 text-amber-800 px-2 py-0.5 rounded-md">{minScore}</span>
                                             </div>
                                         )}
-                                    </div>
-                                )}
-
-                                {coachNote && (
-                                    <div className="border-t border-white/20 pt-4">
-                                        <span className="block text-xs font-semibold text-muted uppercase tracking-wide mb-2">Coaching Note</span>
-                                        <p className="text-sm text-ink bg-white/40 p-3 rounded-lg italic border border-white/30">{coachNote}</p>
+                                        <div>
+                                            <span className="block text-xs font-semibold text-muted uppercase tracking-wide mb-1">Retry Attempts</span>
+                                            <span className="text-sm text-ink font-medium">{maxAttempts || "2"}</span>
+                                        </div>
                                     </div>
                                 )}
                             </div>

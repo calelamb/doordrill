@@ -10,12 +10,14 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.models.analytics import (
+    AnalyticsFactAlert,
     AnalyticsFactCoachingIntervention,
     AnalyticsFactManagerCalibration,
     AnalyticsMaterializedView,
     AnalyticsFactSession,
 )
 from app.models.assignment import Assignment
+from app.models.manager_action import ManagerActionLog
 from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.session import SessionTurn
@@ -164,6 +166,62 @@ class ManagementAnalyticsService:
             "row_count": row.row_count,
         }
         return payload
+
+    def _acknowledged_alert_ids(self, db: Session, *, manager_id: str) -> set[str]:
+        rows = db.scalars(
+            select(ManagerActionLog.target_id).where(
+                ManagerActionLog.manager_id == manager_id,
+                ManagerActionLog.target_type == "alert",
+                ManagerActionLog.action_type == "alert.acknowledged",
+            )
+        ).all()
+        return {row for row in rows if row}
+
+    def _apply_acknowledged_alerts(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        alerts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        acknowledged_ids = self._acknowledged_alert_ids(db, manager_id=manager_id)
+        if not acknowledged_ids:
+            return alerts
+        return [item for item in alerts if item.get("id") not in acknowledged_ids]
+
+    def _load_alert_facts(self, db: Session, *, manager_id: str, period: str) -> list[dict[str, Any]]:
+        rows = db.scalars(
+            select(AnalyticsFactAlert)
+            .where(
+                AnalyticsFactAlert.manager_id == manager_id,
+                AnalyticsFactAlert.period_key == period,
+                AnalyticsFactAlert.is_active.is_(True),
+            )
+            .order_by(AnalyticsFactAlert.occurred_at.desc())
+        ).all()
+        items = []
+        for row in rows:
+            items.append(
+                {
+                    "id": row.alert_key,
+                    "severity": row.severity,
+                    "kind": row.kind,
+                    "title": row.title,
+                    "description": row.description,
+                    "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
+                    "rep_id": row.rep_id,
+                    "rep_name": (row.metadata_json or {}).get("rep_name"),
+                    "session_id": row.session_id,
+                    "scenario_id": row.scenario_id,
+                    "focus_turn_id": row.focus_turn_id,
+                    "baseline_value": row.baseline_value,
+                    "observed_value": row.observed_value,
+                    "delta": row.delta,
+                    "z_score": row.z_score,
+                }
+            )
+        items.sort(key=lambda item: (_severity_rank(item["severity"]), item["occurred_at"] or ""), reverse=True)
+        return items
 
     def _load_sessions(
         self,
@@ -330,6 +388,7 @@ class ManagementAnalyticsService:
             scores = [item.overall_score for item in rep_sessions if item.overall_score is not None]
             if not scores:
                 continue
+            latest_session = rep_sessions[-1]
             focus_session = min(
                 rep_sessions,
                 key=lambda item: (
@@ -384,6 +443,8 @@ class ManagementAnalyticsService:
                     "risk_score": round(risk_score, 2),
                     "session_id": focus_session.session_id,
                     "focus_turn_id": focus_session.focus_turn_id,
+                    "latest_session_id": latest_session.session_id,
+                    "latest_started_at": latest_session.started_at.isoformat() if latest_session.started_at else None,
                 }
             )
 
@@ -420,7 +481,7 @@ class ManagementAnalyticsService:
             focus_session = recent_sessions[-1]
             rows.append(
                 {
-                    "id": f"rep-stat-regression-{focus_session.rep_id}",
+                    "id": f"rep-stat-regression-{focus_session.rep_id}-{focus_session.session_id}",
                     "severity": severity,
                     "kind": "rep_statistical_regression",
                     "title": f"{focus_session.rep_name} is falling below baseline",
@@ -465,7 +526,7 @@ class ManagementAnalyticsService:
             focus_session = recent_sessions[-1]
             rows.append(
                 {
-                    "id": f"scenario-pass-regression-{focus_session.scenario_id}",
+                    "id": f"scenario-pass-regression-{focus_session.scenario_id}-{focus_session.session_id}",
                     "severity": "medium",
                     "kind": "scenario_statistical_regression",
                     "title": f"{focus_session.scenario_name} is regressing",
@@ -517,12 +578,12 @@ class ManagementAnalyticsService:
                 continue
             alerts.append(
                 {
-                    "id": f"rep-risk-{rep['rep_id']}",
+                    "id": f"rep-risk-{rep['rep_id']}-{rep.get('latest_session_id') or rep.get('session_id') or 'current'}",
                     "severity": "high",
                     "kind": "rep_regression_risk",
                     "title": f"{rep['rep_name']} is trending down",
                     "description": f"Average {rep['average_score']:.1f}, delta {rep['score_delta']:+.1f}, volatility {rep['volatility']:.1f}.",
-                    "occurred_at": now.isoformat(),
+                    "occurred_at": rep.get("latest_started_at") or now.isoformat(),
                     "rep_id": rep["rep_id"],
                     "rep_name": rep["rep_name"],
                     "session_id": rep.get("session_id"),
@@ -535,12 +596,12 @@ class ManagementAnalyticsService:
             if scenario["session_count"] >= 3 and scenario["pass_rate"] < 0.6:
                 alerts.append(
                     {
-                        "id": f"scenario-fail-spike-{scenario['scenario_id']}",
+                        "id": f"scenario-fail-spike-{scenario['scenario_id']}-{scenario.get('latest_session_id') or scenario.get('sample_session_id') or 'current'}",
                         "severity": "medium",
                         "kind": "scenario_fail_rate",
                         "title": f"{scenario['scenario_name']} is underperforming",
                         "description": f"Pass rate is {scenario['pass_rate'] * 100:.0f}% across {scenario['session_count']} sessions.",
-                        "occurred_at": now.isoformat(),
+                        "occurred_at": scenario.get("latest_started_at") or now.isoformat(),
                         "rep_id": None,
                         "rep_name": None,
                         "session_id": scenario.get("sample_session_id"),
@@ -552,7 +613,7 @@ class ManagementAnalyticsService:
         if overdue_assignments:
             alerts.append(
                 {
-                    "id": "overdue-assignments",
+                    "id": f"overdue-assignments-{overdue_assignments}",
                     "severity": "medium",
                     "kind": "overdue_assignments",
                     "title": "Assignments are overdue",
@@ -583,6 +644,11 @@ class ManagementAnalyticsService:
     ) -> dict[str, Any]:
         materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="command_center", period=period)
         if materialized is not None:
+            alert_facts = self._load_alert_facts(db, manager_id=manager_id, period=period)
+            if alert_facts:
+                materialized = dict(materialized)
+                materialized["alerts"] = alert_facts
+                materialized["alerts_preview"] = alert_facts[:6]
             return materialized
         sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
         previous_sessions = self._load_sessions(db, manager_id=manager_id, date_from=previous_start, date_to=previous_end)
@@ -621,11 +687,18 @@ class ManagementAnalyticsService:
                         "sample_session_id": session.session_id,
                         "focus_turn_id": session.focus_turn_id,
                         "lowest_score": session.overall_score if session.overall_score is not None else 11.0,
+                        "latest_session_id": session.session_id,
+                        "latest_started_at": session.started_at.isoformat() if session.started_at else None,
                     },
                 )
                 group["session_count"] += 1
                 group["scored_count"] += 1
                 group["score_sum"] += session.overall_score
+                latest_started_at = _normalize_dt(datetime.fromisoformat(group["latest_started_at"])) if group.get("latest_started_at") else None
+                session_started_at = _normalize_dt(session.started_at)
+                if session_started_at and (latest_started_at is None or session_started_at >= latest_started_at):
+                    group["latest_session_id"] = session.session_id
+                    group["latest_started_at"] = session_started_at.isoformat()
                 if session.overall_score >= 7.0:
                     group["pass_count"] += 1
                 if session.overall_score is not None and session.overall_score <= group["lowest_score"]:
@@ -682,6 +755,7 @@ class ManagementAnalyticsService:
             or 0
         )
         alerts = self._build_alerts(sessions, rep_risk_matrix, scenario_rows, overdue_assignments=int(overdue_assignments))
+        alerts = self._apply_acknowledged_alerts(db, manager_id=manager_id, alerts=alerts)
 
         trend = []
         for key in sorted(trend_buckets):
@@ -730,6 +804,7 @@ class ManagementAnalyticsService:
             "scenario_pass_matrix": scenario_rows,
             "rep_risk_matrix": rep_risk_matrix,
             "weakest_categories": weakest_categories[:5],
+            "alerts": alerts,
             "alerts_preview": alerts[:6],
         }
 
@@ -862,6 +937,28 @@ class ManagementAnalyticsService:
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
+        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="coaching_analytics", period=period)
+        if materialized is not None:
+            summary = materialized.get("summary") or {}
+            expected_note_count = db.scalar(
+                select(func.count(AnalyticsFactCoachingIntervention.coaching_note_id)).where(
+                    AnalyticsFactCoachingIntervention.manager_id == manager_id,
+                    AnalyticsFactCoachingIntervention.note_created_at >= date_from,
+                    AnalyticsFactCoachingIntervention.note_created_at <= date_to,
+                )
+            ) or 0
+            expected_review_count = db.scalar(
+                select(func.count(AnalyticsFactManagerCalibration.review_id)).where(
+                    AnalyticsFactManagerCalibration.manager_id == manager_id,
+                    AnalyticsFactManagerCalibration.reviewed_at >= date_from,
+                    AnalyticsFactManagerCalibration.reviewed_at <= date_to,
+                )
+            ) or 0
+            if (
+                int(summary.get("coaching_note_count") or 0) == int(expected_note_count)
+                and int(summary.get("review_count") or 0) == int(expected_review_count)
+            ):
+                return materialized
         sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
         session_ids = [session.session_id for session in sessions]
         if not session_ids:
@@ -1290,6 +1387,18 @@ class ManagementAnalyticsService:
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
+        alert_facts = self._load_alert_facts(db, manager_id=manager_id, period=period)
+        if alert_facts:
+            return {
+                "manager_id": manager_id,
+                "period": period,
+                "date_from": date_from.isoformat(),
+                "date_to": date_to.isoformat(),
+                "items": alert_facts,
+            }
+        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="alerts", period=period)
+        if materialized is not None:
+            return materialized
         command_center = self.get_command_center(
             db,
             manager_id=manager_id,
@@ -1304,7 +1413,7 @@ class ManagementAnalyticsService:
             "period": period,
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
-            "items": command_center["alerts_preview"],
+            "items": command_center.get("alerts", command_center["alerts_preview"]),
         }
 
     def get_benchmarks(

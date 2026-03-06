@@ -22,7 +22,7 @@ import { ScoreChip } from "../components/shared/ScoreChip";
 import { SkillChip } from "../components/shared/SkillChip";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchManagerFeed, fetchRepProgress } from "../lib/api";
-import type { CategoryScoreValue, FeedItem, RepProgress } from "../lib/types";
+import type { FeedItem, RepProgress } from "../lib/types";
 
 const CATEGORY_META = [
     { key: "opening", label: "Opening" },
@@ -31,13 +31,6 @@ const CATEGORY_META = [
     { key: "closing_technique", label: "Closing" },
     { key: "professionalism", label: "Professionalism" },
 ] as const;
-
-function scoreValue(value: CategoryScoreValue | undefined): number | null {
-    if (typeof value === "number") {
-        return value;
-    }
-    return typeof value?.score === "number" ? value.score : null;
-}
 
 function formatDuration(durationSeconds?: number | null): string {
     if (!durationSeconds) {
@@ -104,9 +97,8 @@ export function RepProgressPage() {
     }, [scoredSessions]);
 
     const lineData = useMemo(() => {
-        return (progress?.latest_sessions ?? [])
-            .slice(0, 30)
-            .reverse()
+        return (progress?.trend ?? [])
+            .slice(-30)
             .map((session) => ({
                 date: session.started_at
                     ? new Date(session.started_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })
@@ -116,40 +108,54 @@ export function RepProgressPage() {
     }, [progress]);
 
     const trendDelta = useMemo(() => {
-        if (scoredSessions.length < 2) {
+        const trendScores = (progress?.trend ?? [])
+            .map((session) => session.overall_score)
+            .filter((score): score is number => typeof score === "number");
+        if (trendScores.length < 2) {
             return null;
         }
-        const latest = scoredSessions[0]?.overall_score ?? 0;
-        const oldest = scoredSessions[scoredSessions.length - 1]?.overall_score ?? 0;
+        const latest = trendScores[trendScores.length - 1] ?? 0;
+        const oldest = trendScores[0] ?? 0;
         return latest - oldest;
-    }, [scoredSessions]);
+    }, [progress?.trend]);
 
     const radarData = useMemo(() => {
-        const source = feed
-            .filter((item) => typeof item.overall_score === "number")
-            .slice(0, 30);
         return CATEGORY_META.map((category) => {
-            const values = source
-                .map((item) => scoreValue(item.category_scores?.[category.key]))
-                .filter((value): value is number => typeof value === "number");
-            const average = values.length
-                ? values.reduce((sum, value) => sum + value, 0) / values.length
-                : 0;
+            const average = progress?.current_period_category_averages?.[category.key]
+                ?? progress?.current_period_category_averages?.[category.key.replace("_delivery", "").replace("_technique", "")]
+                ?? 0;
             return {
                 subject: category.label,
                 score: Number(average.toFixed(1))
             };
         });
-    }, [feed]);
+    }, [progress?.current_period_category_averages]);
 
-    const weakSkills = useMemo(() => radarData.filter((skill) => skill.score < 6.0), [radarData]);
+    const weakSkills = useMemo(() => {
+        const backendWeakTags = progress?.weak_area_tags ?? [];
+        if (backendWeakTags.length) {
+            return backendWeakTags.map((tag) => ({
+                subject: tag.replace(/_/g, " "),
+                score: radarData.find((skill) => skill.subject.toLowerCase().includes(tag.replace(/_/g, " ").toLowerCase()))?.score ?? 0,
+            }));
+        }
+        return radarData.filter((skill) => skill.score < 6.0);
+    }, [progress?.weak_area_tags, radarData]);
 
     const sessionRows = useMemo(() => {
         const feedBySessionId = new Map(feed.map((item) => [item.session_id, item]));
-        return (progress?.latest_sessions ?? []).map((session) => ({
-            ...session,
-            feed: feedBySessionId.get(session.session_id)
-        }));
+        return (progress?.latest_sessions ?? []).map((session, index, sessions) => {
+            const previousScore = sessions[index + 1]?.overall_score;
+            const scoreDelta = typeof session.overall_score === "number" && typeof previousScore === "number"
+                ? session.overall_score - previousScore
+                : null;
+            return {
+                ...session,
+                previousScore,
+                scoreDelta,
+                feed: feedBySessionId.get(session.session_id)
+            };
+        });
     }, [feed, progress]);
 
     if (loading) {
@@ -295,6 +301,7 @@ export function RepProgressPage() {
                                     <th className="py-3 px-2 text-xs font-semibold tracking-wide text-muted uppercase">Scenario</th>
                                     <th className="py-3 px-2 text-xs font-semibold tracking-wide text-muted uppercase">Duration</th>
                                     <th className="py-3 px-2 text-xs font-semibold tracking-wide text-muted uppercase">Score</th>
+                                    <th className="py-3 px-2 text-xs font-semibold tracking-wide text-muted uppercase">Δ Prev</th>
                                     <th className="py-3 px-2 text-xs font-semibold tracking-wide text-muted uppercase text-right">Actions</th>
                                 </tr>
                             </thead>
@@ -307,11 +314,14 @@ export function RepProgressPage() {
                                                 : "--"}
                                         </td>
                                         <td className="py-3 px-2 text-sm text-ink">
-                                            {session.feed?.scenario_name ?? session.feed?.scenario_id ?? "Unknown scenario"}
+                                            {session.scenario_name ?? session.feed?.scenario_name ?? session.feed?.scenario_id ?? "Unknown scenario"}
                                         </td>
                                         <td className="py-3 px-2 text-sm text-muted">{formatDuration(session.feed?.duration_seconds)}</td>
                                         <td className="py-3 px-2">
                                             <ScoreChip score={session.overall_score} />
+                                        </td>
+                                        <td className="py-3 px-2 text-sm font-medium text-ink">
+                                            {typeof session.scoreDelta === "number" ? `${session.scoreDelta >= 0 ? "+" : ""}${session.scoreDelta.toFixed(1)}` : "--"}
                                         </td>
                                         <td className="py-3 px-2 text-right">
                                             <button
