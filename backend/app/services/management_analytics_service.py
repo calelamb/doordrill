@@ -390,6 +390,99 @@ class ManagementAnalyticsService:
         rows.sort(key=lambda item: (item["risk_score"], -item["average_score"]), reverse=True)
         return rows[:limit]
 
+    def _rep_regression_anomalies(self, sessions: list[SessionRecord]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        grouped: dict[str, list[SessionRecord]] = defaultdict(list)
+        for session in sessions:
+            if session.overall_score is not None:
+                grouped[session.rep_id].append(session)
+
+        for rep_sessions in grouped.values():
+            rep_sessions.sort(key=lambda item: item.started_at or datetime.min.replace(tzinfo=timezone.utc))
+            if len(rep_sessions) < 5:
+                continue
+            baseline_sessions = rep_sessions[:-3]
+            recent_sessions = rep_sessions[-3:]
+            baseline_scores = [item.overall_score for item in baseline_sessions if item.overall_score is not None]
+            recent_scores = [item.overall_score for item in recent_sessions if item.overall_score is not None]
+            if len(baseline_scores) < 2 or not recent_scores:
+                continue
+
+            baseline_avg = sum(baseline_scores) / len(baseline_scores)
+            recent_avg = sum(recent_scores) / len(recent_scores)
+            baseline_std = pstdev(baseline_scores) if len(baseline_scores) >= 2 else 0.0
+            delta = round(recent_avg - baseline_avg, 2)
+            z_score = round(delta / baseline_std, 2) if baseline_std > 0 else (-2.0 if delta <= -1.0 else 0.0)
+            if delta > -0.8 or z_score > -1.0:
+                continue
+
+            severity = "high" if z_score <= -1.75 or delta <= -1.4 else "medium"
+            focus_session = recent_sessions[-1]
+            rows.append(
+                {
+                    "id": f"rep-stat-regression-{focus_session.rep_id}",
+                    "severity": severity,
+                    "kind": "rep_statistical_regression",
+                    "title": f"{focus_session.rep_name} is falling below baseline",
+                    "description": f"Recent avg {recent_avg:.1f} vs baseline {baseline_avg:.1f} ({delta:+.1f}, z={z_score:+.1f}).",
+                    "occurred_at": focus_session.started_at.isoformat() if focus_session.started_at else datetime.now(timezone.utc).isoformat(),
+                    "rep_id": focus_session.rep_id,
+                    "rep_name": focus_session.rep_name,
+                    "session_id": focus_session.session_id,
+                    "scenario_id": focus_session.scenario_id,
+                    "focus_turn_id": focus_session.focus_turn_id,
+                    "baseline_value": round(baseline_avg, 2),
+                    "observed_value": round(recent_avg, 2),
+                    "delta": delta,
+                    "z_score": z_score,
+                }
+            )
+        return rows
+
+    def _scenario_regression_anomalies(self, sessions: list[SessionRecord]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        grouped: dict[str, list[SessionRecord]] = defaultdict(list)
+        for session in sessions:
+            if session.overall_score is not None:
+                grouped[session.scenario_id].append(session)
+
+        for scenario_sessions in grouped.values():
+            scenario_sessions.sort(key=lambda item: item.started_at or datetime.min.replace(tzinfo=timezone.utc))
+            if len(scenario_sessions) < 6:
+                continue
+            split = max(3, len(scenario_sessions) // 2)
+            baseline_sessions = scenario_sessions[:-split]
+            recent_sessions = scenario_sessions[-split:]
+            if len(baseline_sessions) < 3 or len(recent_sessions) < 3:
+                continue
+            baseline_pass = sum(1 for item in baseline_sessions if (item.overall_score or 0) >= 7.0) / len(baseline_sessions)
+            recent_pass = sum(1 for item in recent_sessions if (item.overall_score or 0) >= 7.0) / len(recent_sessions)
+            baseline_avg = sum(item.overall_score or 0 for item in baseline_sessions) / len(baseline_sessions)
+            recent_avg = sum(item.overall_score or 0 for item in recent_sessions) / len(recent_sessions)
+            if recent_pass >= baseline_pass - 0.2 and recent_avg >= baseline_avg - 0.8:
+                continue
+
+            focus_session = recent_sessions[-1]
+            rows.append(
+                {
+                    "id": f"scenario-pass-regression-{focus_session.scenario_id}",
+                    "severity": "medium",
+                    "kind": "scenario_statistical_regression",
+                    "title": f"{focus_session.scenario_name} is regressing",
+                    "description": f"Recent pass {recent_pass * 100:.0f}% vs baseline {baseline_pass * 100:.0f}%; recent avg {recent_avg:.1f}.",
+                    "occurred_at": focus_session.started_at.isoformat() if focus_session.started_at else datetime.now(timezone.utc).isoformat(),
+                    "rep_id": focus_session.rep_id,
+                    "rep_name": focus_session.rep_name,
+                    "session_id": focus_session.session_id,
+                    "scenario_id": focus_session.scenario_id,
+                    "focus_turn_id": focus_session.focus_turn_id,
+                    "baseline_value": round(baseline_pass, 3),
+                    "observed_value": round(recent_pass, 3),
+                    "delta": round(recent_pass - baseline_pass, 3),
+                }
+            )
+        return rows
+
     def _build_alerts(
         self,
         sessions: list[SessionRecord],
@@ -472,6 +565,8 @@ class ManagementAnalyticsService:
                 }
             )
 
+        alerts.extend(self._rep_regression_anomalies(sessions))
+        alerts.extend(self._scenario_regression_anomalies(sessions))
         alerts.sort(key=lambda item: (_severity_rank(item["severity"]), item["occurred_at"]), reverse=True)
         return alerts[:24]
 
