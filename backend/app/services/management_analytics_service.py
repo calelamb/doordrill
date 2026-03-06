@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.models.analytics import (
     AnalyticsFactCoachingIntervention,
     AnalyticsFactManagerCalibration,
+    AnalyticsMaterializedView,
     AnalyticsFactSession,
 )
 from app.models.assignment import Assignment
@@ -134,6 +135,36 @@ def _focus_turn_id(highlights: list[dict[str, Any]] | None, evidence_turn_ids: l
 
 
 class ManagementAnalyticsService:
+    def __init__(self, *, prefer_materialized_views: bool = True) -> None:
+        self.prefer_materialized_views = prefer_materialized_views
+
+    def _get_materialized_payload(self, db: Session, *, manager_id: str, view_name: str, period: str) -> dict[str, Any] | None:
+        if not self.prefer_materialized_views or period not in {"7", "30", "90"}:
+            return None
+        row = db.scalar(
+            select(AnalyticsMaterializedView)
+            .where(
+                AnalyticsMaterializedView.manager_id == manager_id,
+                AnalyticsMaterializedView.view_name == view_name,
+                AnalyticsMaterializedView.period_key == period,
+            )
+            .order_by(AnalyticsMaterializedView.refreshed_at.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        payload = dict(row.payload_json or {})
+        payload.setdefault("_projection", {})
+        payload["_projection"] = {
+            "view_name": view_name,
+            "period_key": period,
+            "window_start": row.window_start.isoformat() if row.window_start else None,
+            "window_end": row.window_end.isoformat() if row.window_end else None,
+            "refreshed_at": row.refreshed_at.isoformat() if row.refreshed_at else None,
+            "row_count": row.row_count,
+        }
+        return payload
+
     def _load_sessions(
         self,
         db: Session,
@@ -455,6 +486,9 @@ class ManagementAnalyticsService:
         previous_end: datetime,
         period: str,
     ) -> dict[str, Any]:
+        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="command_center", period=period)
+        if materialized is not None:
+            return materialized
         sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
         previous_sessions = self._load_sessions(db, manager_id=manager_id, date_from=previous_start, date_to=previous_end)
         session_ids = [session.session_id for session in sessions]
@@ -613,6 +647,9 @@ class ManagementAnalyticsService:
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
+        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="scenario_intelligence", period=period)
+        if materialized is not None:
+            return materialized
         sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
         session_ids = [session.session_id for session in sessions]
         objection_tags = self._load_objection_tags(db, session_ids)
@@ -730,6 +767,9 @@ class ManagementAnalyticsService:
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
+        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="coaching_analytics", period=period)
+        if materialized is not None:
+            return materialized
         sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
         session_ids = [session.session_id for session in sessions]
         if not session_ids:
@@ -1158,6 +1198,9 @@ class ManagementAnalyticsService:
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
+        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="alerts", period=period)
+        if materialized is not None:
+            return materialized
         command_center = self.get_command_center(
             db,
             manager_id=manager_id,
@@ -1184,6 +1227,9 @@ class ManagementAnalyticsService:
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
+        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="benchmarks", period=period)
+        if materialized is not None:
+            return materialized
         sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
         scores = sorted(session.overall_score for session in sessions if session.overall_score is not None)
         if scores:

@@ -4,7 +4,7 @@ from sqlalchemy import select
 
 from app.api.manager import management_analytics_service
 from app.db.session import SessionLocal
-from app.models.analytics import AnalyticsFactSession
+from app.models.analytics import AnalyticsFactSession, AnalyticsMaterializedView
 from app.models.scorecard import Scorecard
 
 
@@ -96,6 +96,7 @@ def test_management_analytics_cache_and_operations(client, seed_org):
     assert second.status_code == 200
     second_body = second.json()
     assert second_body["_meta"]["cache_status"] == "hit"
+    assert second_body["_projection"]["view_name"] == "command_center"
 
     team = client.get(
         "/manager/analytics",
@@ -115,6 +116,20 @@ def test_management_analytics_cache_and_operations(client, seed_org):
     assert ops_body["cache"]["backend"] in {"memory", "redis"}
     assert "refresh_runs" in ops_body
     assert "warehouse" in ops_body
+    assert ops_body["materialized_views"]["count"] >= 1
+    assert ops_body["partitions"]["count"] >= 1
+
+    db = SessionLocal()
+    try:
+        assert db.scalar(
+            select(AnalyticsMaterializedView.id).where(
+                AnalyticsMaterializedView.manager_id == seed_org["manager_id"],
+                AnalyticsMaterializedView.view_name == "command_center",
+                AnalyticsMaterializedView.period_key == "30",
+            )
+        ) is not None
+    finally:
+        db.close()
 
     coaching = client.post(
         f"/manager/scorecards/{scorecard.id}/coaching-notes",

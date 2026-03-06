@@ -10,8 +10,10 @@ from app.models.analytics import (
     AnalyticsFactSession,
     AnalyticsFactSessionTurnMetrics,
     AnalyticsFactTeamDay,
+    AnalyticsMaterializedView,
     AnalyticsMetricDefinition,
     AnalyticsMetricSnapshot,
+    AnalyticsPartitionWindow,
     AnalyticsRefreshRun,
 )
 from app.models.assignment import Assignment
@@ -39,8 +41,10 @@ __all__ = [
     "AnalyticsFactSession",
     "AnalyticsFactSessionTurnMetrics",
     "AnalyticsFactTeamDay",
+    "AnalyticsMaterializedView",
     "AnalyticsMetricDefinition",
     "AnalyticsMetricSnapshot",
+    "AnalyticsPartitionWindow",
     "AnalyticsRefreshRun",
     "Base",
     "DeviceToken",

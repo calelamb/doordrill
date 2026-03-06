@@ -307,3 +307,44 @@ class AnalyticsFactManagerCalibration(Base, TimestampMixin):
     override_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     delta_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class AnalyticsMaterializedView(Base, TimestampMixin):
+    __tablename__ = "analytics_materialized_views"
+    __table_args__ = (
+        UniqueConstraint("view_name", "manager_id", "period_key", name="uq_analytics_materialized_view"),
+        Index("ix_analytics_materialized_manager_view", "manager_id", "view_name", "refreshed_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    view_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    manager_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    period_key: Mapped[str] = mapped_column(String(24), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_refresh_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("analytics_refresh_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+
+
+class AnalyticsPartitionWindow(Base, TimestampMixin):
+    __tablename__ = "analytics_partition_windows"
+    __table_args__ = (
+        UniqueConstraint("table_name", "partition_key", name="uq_analytics_partition_window"),
+        Index("ix_analytics_partition_table_start", "table_name", "range_start"),
+        Index("ix_analytics_partition_status_start", "status", "range_start"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    table_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    partition_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    backend: Mapped[str] = mapped_column(String(24), nullable=False, default="logical")
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="planned")
+    range_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    range_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)

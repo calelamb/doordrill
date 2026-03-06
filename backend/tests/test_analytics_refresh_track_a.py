@@ -15,8 +15,10 @@ from app.models.analytics import (
     AnalyticsFactSession,
     AnalyticsFactSessionTurnMetrics,
     AnalyticsFactTeamDay,
+    AnalyticsMaterializedView,
     AnalyticsMetricDefinition,
     AnalyticsMetricSnapshot,
+    AnalyticsPartitionWindow,
     AnalyticsRefreshRun,
 )
 from app.models.scorecard import Scorecard
@@ -131,6 +133,18 @@ def test_track_a_analytics_warehouse_refresh(client, seed_org):
         assert db.scalar(select(AnalyticsFactManagerCalibration).where(AnalyticsFactManagerCalibration.session_id == session_id)) is not None
         assert db.scalar(select(AnalyticsFactCoachingIntervention).where(AnalyticsFactCoachingIntervention.session_id == session_id)) is not None
         assert db.scalar(select(AnalyticsMetricSnapshot).where(AnalyticsMetricSnapshot.manager_id == seed_org["manager_id"])) is not None
+        assert db.scalar(
+            select(AnalyticsMaterializedView).where(
+                AnalyticsMaterializedView.manager_id == seed_org["manager_id"],
+                AnalyticsMaterializedView.view_name == "command_center",
+                AnalyticsMaterializedView.period_key == "30",
+            )
+        ) is not None
+        assert db.scalar(
+            select(func.count(AnalyticsPartitionWindow.id)).where(
+                AnalyticsPartitionWindow.table_name == "session_events"
+            )
+        ) >= 1
         assert db.scalar(select(AnalyticsRefreshRun).where(AnalyticsRefreshRun.scope_type == "session", AnalyticsRefreshRun.scope_id == session_id)) is not None
         assert db.scalar(select(AnalyticsRefreshRun).where(AnalyticsRefreshRun.scope_type == "global")) is not None
     finally:

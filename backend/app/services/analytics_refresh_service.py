@@ -20,8 +20,10 @@ from app.models.analytics import (
     AnalyticsFactSession,
     AnalyticsFactSessionTurnMetrics,
     AnalyticsFactTeamDay,
+    AnalyticsMaterializedView,
     AnalyticsMetricDefinition,
     AnalyticsMetricSnapshot,
+    AnalyticsPartitionWindow,
     AnalyticsRefreshRun,
 )
 from app.models.assignment import Assignment
@@ -31,6 +33,7 @@ from app.models.session import Session as DrillSession
 from app.models.session import SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, TurnSpeaker
 from app.models.user import Team, User
+from app.services.management_analytics_service import ManagementAnalyticsService
 
 METRIC_DEFINITIONS = [
     {
@@ -94,6 +97,16 @@ CLOSE_ATTEMPT_HINTS = (
     "book",
 )
 
+MATERIALIZED_PERIODS = ("7", "30", "90")
+PARTITIONED_TABLES = (
+    "sessions",
+    "session_turns",
+    "session_events",
+    "analytics_fact_sessions",
+    "analytics_metric_snapshots",
+    "analytics_materialized_views",
+)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -109,6 +122,33 @@ def _normalize_dt(value: datetime | None) -> datetime | None:
 
 def _week_start(day_value: date) -> date:
     return day_value - timedelta(days=day_value.weekday())
+
+
+def _month_start(value: datetime) -> datetime:
+    normalized = _normalize_dt(value) or _utcnow()
+    return normalized.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _shift_month(value: datetime, offset: int) -> datetime:
+    year = value.year
+    month = value.month + offset
+    while month <= 0:
+        year -= 1
+        month += 12
+    while month > 12:
+        year += 1
+        month -= 12
+    return value.replace(year=year, month=month, day=1)
+
+
+def _period_bounds(period_key: str, *, now: datetime) -> tuple[datetime, datetime, datetime, datetime]:
+    days = int(period_key)
+    current_end = _normalize_dt(now) or _utcnow()
+    current_end = current_end.replace(microsecond=0)
+    current_start = current_end - timedelta(days=days)
+    previous_end = current_start
+    previous_start = previous_end - max(timedelta(days=1), current_end - current_start)
+    return current_start, current_end, previous_start, previous_end
 
 
 def _word_count(text: str | None) -> int:
@@ -128,6 +168,9 @@ def _score_value(value: Any) -> float | None:
 
 
 class AnalyticsRefreshService:
+    def __init__(self) -> None:
+        self.management_analytics = ManagementAnalyticsService(prefer_materialized_views=False)
+
     def ensure_metric_definitions(self, db: Session) -> int:
         created = 0
         for payload in METRIC_DEFINITIONS:
@@ -143,6 +186,163 @@ class AnalyticsRefreshService:
             row.aggregation_method = payload["aggregation_method"]
             row.active = True
         return created
+
+    def _payload_row_count(self, payload: dict[str, Any]) -> int:
+        for key in ("items", "alerts_preview", "score_trend", "scenario_pass_matrix", "coaching_uplift"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return len(value)
+        summary = payload.get("summary")
+        if isinstance(summary, dict):
+            return len(summary)
+        return len(payload)
+
+    def _upsert_materialized_view(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        view_name: str,
+        period_key: str,
+        window_start: datetime,
+        window_end: datetime,
+        payload: dict[str, Any],
+        refreshed_at: datetime,
+        run_id: str | None,
+    ) -> None:
+        row = db.scalar(
+            select(AnalyticsMaterializedView).where(
+                AnalyticsMaterializedView.manager_id == manager_id,
+                AnalyticsMaterializedView.view_name == view_name,
+                AnalyticsMaterializedView.period_key == period_key,
+            )
+        )
+        if row is None:
+            row = AnalyticsMaterializedView(
+                manager_id=manager_id,
+                view_name=view_name,
+                period_key=period_key,
+                window_start=window_start,
+                window_end=window_end,
+                payload_json=payload,
+                row_count=self._payload_row_count(payload),
+                refreshed_at=refreshed_at,
+                source_refresh_run_id=run_id,
+            )
+            db.add(row)
+            return
+        row.window_start = window_start
+        row.window_end = window_end
+        row.payload_json = payload
+        row.row_count = self._payload_row_count(payload)
+        row.refreshed_at = refreshed_at
+        row.source_refresh_run_id = run_id
+
+    def _refresh_materialized_views(self, db: Session, *, manager_id: str, run_id: str | None) -> dict[str, int]:
+        refreshed_at = _utcnow()
+        stored = 0
+        for period_key in MATERIALIZED_PERIODS:
+            current_start, current_end, previous_start, previous_end = _period_bounds(period_key, now=refreshed_at)
+            payloads = {
+                "command_center": self.management_analytics.get_command_center(
+                    db,
+                    manager_id=manager_id,
+                    date_from=current_start,
+                    date_to=current_end,
+                    previous_start=previous_start,
+                    previous_end=previous_end,
+                    period=period_key,
+                ),
+                "scenario_intelligence": self.management_analytics.get_scenario_intelligence(
+                    db,
+                    manager_id=manager_id,
+                    date_from=current_start,
+                    date_to=current_end,
+                    period=period_key,
+                ),
+                "coaching_analytics": self.management_analytics.get_coaching_analytics(
+                    db,
+                    manager_id=manager_id,
+                    date_from=current_start,
+                    date_to=current_end,
+                    period=period_key,
+                ),
+                "benchmarks": self.management_analytics.get_benchmarks(
+                    db,
+                    manager_id=manager_id,
+                    date_from=current_start,
+                    date_to=current_end,
+                    period=period_key,
+                ),
+                "alerts": self.management_analytics.get_alerts(
+                    db,
+                    manager_id=manager_id,
+                    date_from=current_start,
+                    date_to=current_end,
+                    period=period_key,
+                ),
+            }
+            for view_name, payload in payloads.items():
+                self._upsert_materialized_view(
+                    db,
+                    manager_id=manager_id,
+                    view_name=view_name,
+                    period_key=period_key,
+                    window_start=current_start,
+                    window_end=current_end,
+                    payload=payload,
+                    refreshed_at=refreshed_at,
+                    run_id=run_id,
+                )
+                stored += 1
+        return {"materialized_view_rows": stored}
+
+    def ensure_partition_windows(self, db: Session, *, months_back: int = 3, months_forward: int = 6) -> dict[str, int]:
+        backend = getattr(getattr(db, "bind", None), "dialect", None)
+        backend_name = getattr(backend, "name", "logical") or "logical"
+        now = _utcnow()
+        base = _month_start(now)
+        ensured = 0
+        for table_name in PARTITIONED_TABLES:
+            for offset in range(-months_back, months_forward + 1):
+                start = _shift_month(base, offset)
+                end = _shift_month(base, offset + 1)
+                partition_key = f"{start.year:04d}_{start.month:02d}"
+                status = "active"
+                if start > now:
+                    status = "upcoming"
+                elif end <= now:
+                    status = "retained"
+
+                row = db.scalar(
+                    select(AnalyticsPartitionWindow).where(
+                        AnalyticsPartitionWindow.table_name == table_name,
+                        AnalyticsPartitionWindow.partition_key == partition_key,
+                    )
+                )
+                metadata = {
+                    "strategy": "monthly-range",
+                    "physical_partitioning": backend_name == "postgresql",
+                }
+                if row is None:
+                    row = AnalyticsPartitionWindow(
+                        table_name=table_name,
+                        partition_key=partition_key,
+                        backend=backend_name if backend_name == "postgresql" else "logical",
+                        status=status,
+                        range_start=start,
+                        range_end=end,
+                        metadata_json=metadata,
+                    )
+                    db.add(row)
+                    ensured += 1
+                    continue
+                row.backend = backend_name if backend_name == "postgresql" else "logical"
+                row.status = status
+                row.range_start = start
+                row.range_end = end
+                row.metadata_json = metadata
+        return {"partition_window_rows": ensured}
 
     def _start_run(self, db: Session, *, scope_type: str, scope_id: str | None) -> AnalyticsRefreshRun:
         row = AnalyticsRefreshRun(
@@ -771,7 +971,7 @@ class AnalyticsRefreshService:
             "metric_snapshots": 6 + len(scenario_groups),
         }
 
-    def refresh_session(self, db: Session, *, session_id: str) -> dict[str, Any]:
+    def refresh_session(self, db: Session, *, session_id: str, refresh_materialized: bool = True) -> dict[str, Any]:
         self.ensure_metric_definitions(db)
         run = self._start_run(db, scope_type="session", scope_id=session_id)
         row_counts: dict[str, Any] = {}
@@ -840,6 +1040,9 @@ class AnalyticsRefreshService:
             row_counts.update(self._rebuild_coaching_interventions(db, manager_id=manager.id, rep_id=rep.id))
             row_counts.update(self._rebuild_manager_calibration(db, manager_id=manager.id))
             row_counts.update(self._refresh_metric_snapshots(db, manager_id=manager.id, snapshot_date=fact_session_payload["session_date"]))
+            row_counts.update(self.ensure_partition_windows(db))
+            if refresh_materialized:
+                row_counts.update(self._refresh_materialized_views(db, manager_id=manager.id, run_id=run.id))
 
             self._finish_run(db, run=run, status="completed", row_counts=row_counts)
             return {"status": "completed", "run_id": run.id, **row_counts}
@@ -859,8 +1062,10 @@ class AnalyticsRefreshService:
                 .order_by(DrillSession.started_at.asc())
             ).all()
             for session_id in session_ids:
-                self.refresh_session(db, session_id=session_id)
+                self.refresh_session(db, session_id=session_id, refresh_materialized=False)
                 row_counts["refreshed_sessions"] += 1
+            row_counts.update(self.ensure_partition_windows(db))
+            row_counts.update(self._refresh_materialized_views(db, manager_id=manager_id, run_id=run.id))
             self._finish_run(db, run=run, status="completed", row_counts=row_counts)
             return {"status": "completed", "run_id": run.id, **row_counts}
         except Exception as exc:
@@ -872,6 +1077,7 @@ class AnalyticsRefreshService:
         run = self._start_run(db, scope_type="global", scope_id=None)
         row_counts: dict[str, Any] = {"refreshed_managers": 0}
         try:
+            row_counts.update(self.ensure_partition_windows(db))
             manager_ids = db.scalars(
                 select(func.distinct(Assignment.assigned_by)).where(Assignment.assigned_by.is_not(None))
             ).all()

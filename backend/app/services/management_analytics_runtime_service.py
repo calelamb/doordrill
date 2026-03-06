@@ -9,7 +9,14 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models.analytics import AnalyticsDimManager, AnalyticsFactSession, AnalyticsMetricDefinition, AnalyticsRefreshRun
+from app.models.analytics import (
+    AnalyticsDimManager,
+    AnalyticsFactSession,
+    AnalyticsMaterializedView,
+    AnalyticsMetricDefinition,
+    AnalyticsPartitionWindow,
+    AnalyticsRefreshRun,
+)
 from app.models.assignment import Assignment
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
@@ -509,6 +516,15 @@ class ManagementAnalyticsRuntimeService:
             fact_count = db.scalar(
                 select(func.count(AnalyticsFactSession.session_id)).where(AnalyticsFactSession.manager_id == manager_id)
             ) or 0
+            materialized_rows = db.execute(
+                select(AnalyticsMaterializedView)
+                .where(AnalyticsMaterializedView.manager_id == manager_id)
+                .order_by(AnalyticsMaterializedView.refreshed_at.desc())
+            ).scalars().all()
+            partition_rows = db.execute(
+                select(AnalyticsPartitionWindow)
+                .order_by(AnalyticsPartitionWindow.table_name.asc(), AnalyticsPartitionWindow.range_start.asc())
+            ).scalars().all()
             manager_dim = db.get(AnalyticsDimManager, manager_id)
             return {
                 "manager_id": manager_id,
@@ -535,6 +551,36 @@ class ManagementAnalyticsRuntimeService:
                     "fact_session_count": int(fact_count),
                     "manager_dim_last_refreshed_at": manager_dim.last_refreshed_at.isoformat() if manager_dim and manager_dim.last_refreshed_at else None,
                     "manager_rep_count": int(manager_dim.rep_count or 0) if manager_dim else 0,
+                },
+                "materialized_views": {
+                    "count": len(materialized_rows),
+                    "recent": [
+                        {
+                            "id": row.id,
+                            "view_name": row.view_name,
+                            "period_key": row.period_key,
+                            "row_count": row.row_count,
+                            "window_start": row.window_start.isoformat() if row.window_start else None,
+                            "window_end": row.window_end.isoformat() if row.window_end else None,
+                            "refreshed_at": row.refreshed_at.isoformat() if row.refreshed_at else None,
+                        }
+                        for row in materialized_rows[:24]
+                    ],
+                },
+                "partitions": {
+                    "count": len(partition_rows),
+                    "active": [
+                        {
+                            "table_name": row.table_name,
+                            "partition_key": row.partition_key,
+                            "backend": row.backend,
+                            "status": row.status,
+                            "range_start": row.range_start.isoformat() if row.range_start else None,
+                            "range_end": row.range_end.isoformat() if row.range_end else None,
+                        }
+                        for row in partition_rows
+                        if row.status in {"active", "upcoming"}
+                    ][:48],
                 },
                 "runtime": {
                     "redis_configured": bool(self.settings.redis_url),
