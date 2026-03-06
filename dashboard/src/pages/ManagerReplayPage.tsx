@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { AlertCircle, ArrowLeft, RefreshCcw } from "lucide-react";
@@ -6,8 +6,8 @@ import { AlertCircle, ArrowLeft, RefreshCcw } from "lucide-react";
 import { ReplayPanel } from "../components/ReplayPanel";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
-import { fetchReplay } from "../lib/api";
-import type { ReplayResponse } from "../lib/types";
+import { fetchReplay, fetchSessionAnnotations } from "../lib/api";
+import type { ReplayResponse, SessionAnnotation } from "../lib/types";
 
 export function ManagerReplayPage() {
   const navigate = useNavigate();
@@ -19,29 +19,81 @@ export function ManagerReplayPage() {
   const focusCategory = searchParams.get("category");
 
   const [replay, setReplay] = useState<ReplayResponse | null>(null);
+  const [annotations, setAnnotations] = useState<SessionAnnotation[]>([]);
+  const [annotationsLoading, setAnnotationsLoading] = useState(true);
+  const [annotationsError, setAnnotationsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const replayRequestRef = useRef(0);
+  const annotationsRequestRef = useRef(0);
 
-  const loadReplay = useCallback(async () => {
+  const loadAnnotations = useCallback(async () => {
     if (!managerId || !id) {
       return;
     }
-    setLoading(true);
-    setError(null);
+    const requestId = ++annotationsRequestRef.current;
+    setAnnotationsLoading(true);
+    setAnnotationsError(null);
     try {
-      const data = await fetchReplay(managerId, id);
-      setReplay(data);
+      const [result] = await Promise.allSettled([fetchSessionAnnotations(managerId, id)]);
+      if (annotationsRequestRef.current !== requestId) {
+        return;
+      }
+      if (result.status === "fulfilled") {
+        setAnnotations(result.value.annotations);
+        return;
+      }
+      if (isAuthError(result.reason)) {
+        clearStoredAuth();
+        navigate("/login", { replace: true });
+        return;
+      }
+      setAnnotations([]);
+      setAnnotationsError(result.reason instanceof Error ? result.reason.message : "Could not generate coaching notes.");
     } catch (err) {
       if (isAuthError(err)) {
         clearStoredAuth();
         navigate("/login", { replace: true });
         return;
       }
-      setError(err instanceof Error ? err.message : "Failed to load replay");
+      setAnnotations([]);
+      setAnnotationsError(err instanceof Error ? err.message : "Could not generate coaching notes.");
     } finally {
-      setLoading(false);
+      if (annotationsRequestRef.current === requestId) {
+        setAnnotationsLoading(false);
+      }
     }
   }, [id, managerId, navigate]);
+
+  const loadReplay = useCallback(async () => {
+    if (!managerId || !id) {
+      return;
+    }
+    const requestId = ++replayRequestRef.current;
+    setLoading(true);
+    setError(null);
+    void loadAnnotations();
+    try {
+      const [result] = await Promise.allSettled([fetchReplay(managerId, id)]);
+      if (replayRequestRef.current !== requestId) {
+        return;
+      }
+      if (result.status === "fulfilled") {
+        setReplay(result.value);
+        return;
+      }
+      if (isAuthError(result.reason)) {
+        clearStoredAuth();
+        navigate("/login", { replace: true });
+        return;
+      }
+      setError(result.reason instanceof Error ? result.reason.message : "Failed to load replay");
+    } finally {
+      if (replayRequestRef.current === requestId) {
+        setLoading(false);
+      }
+    }
+  }, [id, loadAnnotations, managerId, navigate]);
 
   useEffect(() => {
     void loadReplay();
@@ -94,6 +146,9 @@ export function ManagerReplayPage() {
           onActionDone={loadReplay}
           focusTurnId={focusTurnId}
           focusCategory={focusCategory}
+          annotations={annotations}
+          annotationsLoading={annotationsLoading}
+          annotationsError={annotationsError}
         />
       ) : null}
 

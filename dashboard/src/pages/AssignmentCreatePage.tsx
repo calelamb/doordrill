@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { Check, ChevronRight, Search, AlertCircle, Loader2, X } from "lucide-react";
 
@@ -10,10 +10,19 @@ import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { createManagerAssignment, fetchManagerTeam, fetchScenarios } from "../lib/api";
 import type { ManagerTeamMember, ScenarioSummary } from "../lib/types";
 
+type AssignmentPrefillState = {
+    prefillScenarioSearch?: string;
+    prefillScenarioId?: string;
+    prefillDifficulty?: number;
+    prefillRepIds?: string[];
+} | null;
+
 export function AssignmentCreatePage() {
     const navigate = useNavigate();
+    const location = useLocation();
     const auth = getValidStoredAuth();
     const managerId = auth?.user.id ?? "";
+    const prefillState = location.state as AssignmentPrefillState;
 
     const [step, setStep] = useState<1 | 2 | 3>(1);
     const [scenarioId, setScenarioId] = useState<string | null>(null);
@@ -58,6 +67,44 @@ export function AssignmentCreatePage() {
     useEffect(() => {
         void loadData();
     }, [loadData]);
+
+    useEffect(() => {
+        if (!prefillState) {
+            return;
+        }
+        if (prefillState.prefillScenarioSearch) {
+            setScenarioSearch(prefillState.prefillScenarioSearch);
+        }
+        if (prefillState.prefillRepIds?.length) {
+            setSelectedReps(prefillState.prefillRepIds);
+        }
+    }, [prefillState]);
+
+    useEffect(() => {
+        if (!prefillState || !scenarios.length || scenarioId) {
+            return;
+        }
+        const explicitScenario = prefillState.prefillScenarioId
+            ? scenarios.find((scenario) => scenario.id === prefillState.prefillScenarioId)
+            : null;
+        const search = prefillState.prefillScenarioSearch?.trim().toLowerCase() ?? "";
+        const matchedScenario = explicitScenario ?? scenarios.find((scenario) => {
+            const nameMatches = search ? scenario.name.toLowerCase().includes(search) : false;
+            const difficultyMatches = prefillState.prefillDifficulty
+                ? scenario.difficulty === prefillState.prefillDifficulty
+                : true;
+            return nameMatches && difficultyMatches;
+        }) ?? scenarios.find((scenario) => search && scenario.name.toLowerCase() === search);
+
+        if (!matchedScenario) {
+            return;
+        }
+
+        setScenarioId(matchedScenario.id);
+        if (prefillState.prefillRepIds?.length) {
+            setStep(2);
+        }
+    }, [prefillState, scenarioId, scenarios]);
 
     const filteredScenarios = useMemo(
         () => scenarios.filter((s) => s.name.toLowerCase().includes(scenarioSearch.toLowerCase())),

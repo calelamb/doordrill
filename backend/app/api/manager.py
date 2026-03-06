@@ -22,6 +22,14 @@ from app.schemas.adaptive_training import (
 )
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
 from app.schemas.notification import NotificationDeliveryResponse
+from app.schemas.manager_ai import (
+    RepInsightRequest,
+    RepInsightResponse,
+    SessionAnnotationRequest,
+    SessionAnnotationsResponse,
+    TeamCoachingSummaryRequest,
+    TeamCoachingSummaryResponse,
+)
 from app.schemas.scorecard import (
     BulkReviewRequest,
     BulkReviewResponse,
@@ -33,6 +41,11 @@ from app.schemas.scorecard import (
 from app.schemas.session import ManagerFeedResponse, SessionReplayResponse
 from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.manager_action_service import ManagerActionService
+from app.services.manager_ai_coaching_service import (
+    AiCoachingDataUnavailableError,
+    AiCoachingUnavailableError,
+    ManagerAiCoachingService,
+)
 from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.services.management_analytics_runtime_service import ManagementAnalyticsRuntimeService
 from app.services.manager_feed_service import ManagerFeedService
@@ -49,6 +62,7 @@ review_service = ManagerReviewService()
 notification_service = NotificationService()
 management_analytics_service = ManagementAnalyticsRuntimeService()
 analytics_refresh_service = AnalyticsRefreshService()
+manager_ai_service = ManagerAiCoachingService()
 RUBRIC_CATEGORY_KEYS = {
     "opening": "opening",
     "pitch": "pitch",
@@ -126,6 +140,11 @@ def _category_score_value(value) -> float | None:
         if isinstance(raw, (int, float)):
             return float(raw)
     return None
+
+
+def _ensure_actor_matches_manager(actor: Actor, manager_id: str) -> None:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own AI insights")
 
 
 @router.get("/team")
@@ -737,6 +756,89 @@ def get_coaching_analytics(
     )
 
 
+@router.post("/ai/rep-insight", response_model=RepInsightResponse)
+def get_ai_rep_insight(
+    payload: RepInsightRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> RepInsightResponse:
+    _ensure_actor_matches_manager(actor, payload.manager_id)
+
+    manager = _get_user_or_404(db, payload.manager_id, "manager")
+    rep = _get_user_or_404(db, payload.rep_id, "rep")
+    _ensure_same_org(actor, manager.org_id)
+    if manager.org_id != rep.org_id:
+        raise HTTPException(status_code=403, detail="cross-organization access denied")
+
+    try:
+        return manager_ai_service.generate_rep_insight(
+            db,
+            rep=rep,
+            period_days=payload.period_days,
+        )
+    except AiCoachingDataUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AiCoachingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/ai/session-annotations", response_model=SessionAnnotationsResponse)
+def get_ai_session_annotations(
+    payload: SessionAnnotationRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> SessionAnnotationsResponse:
+    _ensure_actor_matches_manager(actor, payload.manager_id)
+
+    manager = _get_user_or_404(db, payload.manager_id, "manager")
+    session = db.scalar(select(DrillSession).where(DrillSession.id == payload.session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    rep = _get_user_or_404(db, session.rep_id, "rep")
+    _ensure_same_org(actor, manager.org_id)
+    if manager.org_id != rep.org_id:
+        raise HTTPException(status_code=403, detail="cross-organization access denied")
+
+    try:
+        return manager_ai_service.generate_session_annotations(db, session_id=payload.session_id)
+    except AiCoachingDataUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AiCoachingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/ai/team-coaching-summary", response_model=TeamCoachingSummaryResponse)
+def get_ai_team_coaching_summary(
+    payload: TeamCoachingSummaryRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> TeamCoachingSummaryResponse:
+    _ensure_actor_matches_manager(actor, payload.manager_id)
+
+    manager = _get_user_or_404(db, payload.manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+
+    current_end = datetime.now(timezone.utc).replace(microsecond=0)
+    current_start = (current_end - timedelta(days=payload.period_days)).replace(microsecond=0)
+    coaching_analytics = management_analytics_service.get_coaching_analytics(
+        db,
+        manager_id=payload.manager_id,
+        date_from=current_start,
+        date_to=current_end,
+        period="custom",
+    )
+
+    try:
+        return manager_ai_service.generate_team_coaching_summary(
+            manager=manager,
+            period_days=payload.period_days,
+            coaching_analytics=coaching_analytics,
+        )
+    except AiCoachingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/analytics/reps/{rep_id}")
 def get_rep_analytics(
     rep_id: str,
@@ -974,6 +1076,11 @@ def get_session_replay(
         .where(SessionEvent.session_id == session_id, SessionEvent.event_type == "server.session.state")
         .order_by(SessionEvent.event_ts.asc())
     ).all()
+    committed_events = db.scalars(
+        select(SessionEvent)
+        .where(SessionEvent.session_id == session_id, SessionEvent.event_type == "server.turn.committed")
+        .order_by(SessionEvent.event_ts.asc())
+    ).all()
 
     transcript_turns = [
         {
@@ -1029,6 +1136,41 @@ def get_session_replay(
             }
         )
 
+    micro_behavior_timeline = []
+    realism_scores: list[float] = []
+    for event in committed_events:
+        micro_behavior = event.payload.get("micro_behavior")
+        if not isinstance(micro_behavior, dict):
+            continue
+        realism_score = micro_behavior.get("realism_score")
+        if isinstance(realism_score, (int, float)):
+            realism_scores.append(float(realism_score))
+        micro_behavior_timeline.append(
+            {
+                "event_id": event.event_id,
+                "recorded_at": event.event_ts.isoformat(),
+                "rep_turn_id": event.payload.get("rep_turn_id"),
+                "ai_turn_id": event.payload.get("ai_turn_id"),
+                "stage": event.payload.get("stage"),
+                "emotion": event.payload.get("emotion_after") or event.payload.get("emotion"),
+                "tone": micro_behavior.get("tone"),
+                "sentence_length": micro_behavior.get("sentence_length"),
+                "behaviors": micro_behavior.get("behaviors", []),
+                "interruption_type": micro_behavior.get("interruption_type"),
+                "pause_profile": micro_behavior.get("pause_profile", {}),
+                "realism_score": realism_score,
+                "filler": bool(event.payload.get("filler", False)),
+            }
+        )
+
+    conversational_realism = {
+        "turn_count": len(realism_scores),
+        "average_score": round(sum(realism_scores) / len(realism_scores), 1) if realism_scores else None,
+        "latest_score": realism_scores[-1] if realism_scores else None,
+        "min_score": min(realism_scores) if realism_scores else None,
+        "max_score": max(realism_scores) if realism_scores else None,
+    }
+
     return SessionReplayResponse(
         session_id=session.id,
         status=session.status.value,
@@ -1059,8 +1201,10 @@ def get_session_replay(
         ],
         transcript_turns=transcript_turns,
         objection_timeline=objection_timeline,
+        micro_behavior_timeline=micro_behavior_timeline,
         interruption_timeline=interruption_timeline,
         stage_timeline=stage_timeline,
+        conversational_realism=conversational_realism,
         transport_metrics={
             "audio_duration_ms": total_audio_duration_ms,
             "audio_frame_count": total_audio_frames,

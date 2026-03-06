@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowRight, TrendingDown, TrendingUp } from "lucide-react";
+import { ArrowRight, Check, Copy, RefreshCcw, Sparkles, TrendingDown, TrendingUp } from "lucide-react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -18,7 +18,7 @@ import { EmptyState } from "../components/shared/EmptyState";
 import { ScoreChip } from "../components/shared/ScoreChip";
 import { SkillChip } from "../components/shared/SkillChip";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
-import { fetchManagerFeed, fetchRepProgress } from "../lib/api";
+import { fetchManagerFeed, fetchRepInsight, fetchRepProgress } from "../lib/api";
 import {
   CATEGORY_META,
   PASSING_SCORE,
@@ -30,7 +30,7 @@ import {
 } from "../lib/analytics";
 import { cardVariants, pageVariants } from "../lib/motion";
 import { resolvePeriodWindow } from "../lib/periods";
-import type { FeedItem, RepProgress } from "../lib/types";
+import type { FeedItem, RepInsightResponse, RepProgress } from "../lib/types";
 
 const PERIOD_OPTIONS = [
   { key: "7", label: "7D" },
@@ -51,6 +51,52 @@ function formatDuration(durationSeconds?: number | null): string {
   const minutes = Math.floor(durationSeconds / 60);
   const seconds = durationSeconds % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatRelativeTime(timestamp?: string | null): string {
+  if (!timestamp) {
+    return "just now";
+  }
+  const deltaMs = Date.now() - new Date(timestamp).getTime();
+  if (!Number.isFinite(deltaMs) || deltaMs < 60_000) {
+    return "just now";
+  }
+  const deltaMinutes = Math.round(deltaMs / 60_000);
+  if (deltaMinutes < 60) {
+    return `${deltaMinutes}m ago`;
+  }
+  const deltaHours = Math.round(deltaMinutes / 60);
+  if (deltaHours < 24) {
+    return `${deltaHours}h ago`;
+  }
+  const deltaDays = Math.round(deltaHours / 24);
+  return `${deltaDays}d ago`;
+}
+
+function parseDrillRecommendation(recommendation: string): { scenarioSearch: string; difficulty?: number } {
+  const quoted = recommendation.match(/["']([^"']+)["']/)?.[1]?.trim();
+  const difficultyMatch = recommendation.match(/difficulty\s*(\d+)/i);
+  const difficulty = difficultyMatch ? Number(difficultyMatch[1]) : undefined;
+  const scenarioSearch = quoted ?? recommendation.replace(/assign:?/i, "").replace(/difficulty\s*\d+/i, "").trim();
+  return {
+    scenarioSearch: scenarioSearch || recommendation,
+    difficulty: Number.isFinite(difficulty) ? difficulty : undefined,
+  };
+}
+
+function InsightSkeleton() {
+  return (
+    <div className="space-y-4">
+      <div className="h-4 w-40 animate-pulse rounded-full bg-white/45" />
+      <div className="h-8 w-3/4 animate-pulse rounded-full bg-white/40" />
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className="h-24 animate-pulse rounded-2xl bg-white/35" />
+        <div className="h-24 animate-pulse rounded-2xl bg-white/35" />
+      </div>
+      <div className="h-16 animate-pulse rounded-2xl bg-white/35" />
+      <div className="h-28 animate-pulse rounded-2xl bg-white/35" />
+    </div>
+  );
 }
 
 function RepProgressSkeleton() {
@@ -103,52 +149,117 @@ export function RepProgressPage() {
   const [period, setPeriod] = useState<PeriodKey>("30");
   const [progress, setProgress] = useState<RepProgress | null>(null);
   const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [insight, setInsight] = useState<RepInsightResponse | null>(null);
+  const [insightLoading, setInsightLoading] = useState(true);
+  const [insightError, setInsightError] = useState<string | null>(null);
+  const [copiedScript, setCopiedScript] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const coreRequestRef = useRef(0);
+  const insightRequestRef = useRef(0);
 
   const periodWindow = useMemo(() => resolvePeriodWindow(period), [period]);
   const focusCategory = normalizeCategoryKey(searchParams.get("category"));
+
+  const loadInsight = useCallback(async () => {
+    if (!managerId) {
+      return;
+    }
+    const requestId = ++insightRequestRef.current;
+    setInsightLoading(true);
+    setInsightError(null);
+    try {
+      const [result] = await Promise.allSettled([
+        fetchRepInsight(managerId, repId, periodWindow.current.spanDays),
+      ]);
+      if (insightRequestRef.current !== requestId) {
+        return;
+      }
+      if (result.status === "fulfilled") {
+        setInsight(result.value);
+        setInsightError(null);
+        return;
+      }
+      if (isAuthError(result.reason)) {
+        clearStoredAuth();
+        navigate("/login", { replace: true });
+        return;
+      }
+      setInsight(null);
+      setInsightError(result.reason instanceof Error ? result.reason.message : "Could not generate analysis. Try refreshing.");
+    } finally {
+      if (insightRequestRef.current === requestId) {
+        setInsightLoading(false);
+      }
+    }
+  }, [managerId, navigate, periodWindow.current.spanDays, repId]);
 
   const loadData = useCallback(async () => {
     if (!managerId) {
       return;
     }
 
+    const requestId = ++coreRequestRef.current;
     setLoading(true);
     setError(null);
+    void loadInsight();
 
-    try {
-      const [progressData, feedData] = await Promise.all([
-        fetchRepProgress(managerId, repId, {
-          days: periodWindow.current.spanDays,
-          dateFrom: periodWindow.current.startInput,
-          dateTo: periodWindow.current.endInput,
-          limit: 60,
-        }),
-        fetchManagerFeed(managerId, {
-          repId,
-          dateFrom: periodWindow.previous.startInput,
-          dateTo: periodWindow.current.endInput,
-          limit: 500,
-        }),
-      ]);
-      setProgress(progressData);
-      setFeed(feedData.filter((item) => item.rep_id === repId));
-    } catch (loadError) {
-      if (isAuthError(loadError)) {
-        clearStoredAuth();
-        navigate("/login", { replace: true });
-        return;
-      }
-      setError(loadError instanceof Error ? loadError.message : "Failed to fetch rep progress");
-    } finally {
-      setLoading(false);
+    const [progressResult, feedResult] = await Promise.allSettled([
+      fetchRepProgress(managerId, repId, {
+        days: periodWindow.current.spanDays,
+        dateFrom: periodWindow.current.startInput,
+        dateTo: periodWindow.current.endInput,
+        limit: 60,
+      }),
+      fetchManagerFeed(managerId, {
+        repId,
+        dateFrom: periodWindow.previous.startInput,
+        dateTo: periodWindow.current.endInput,
+        limit: 500,
+      }),
+    ]);
+
+    if (coreRequestRef.current !== requestId) {
+      return;
     }
-  }, [managerId, navigate, periodWindow.current.endInput, periodWindow.current.spanDays, periodWindow.current.startInput, periodWindow.previous.startInput, repId]);
+
+    const authFailure = [progressResult, feedResult].find(
+      (result) => result.status === "rejected" && isAuthError(result.reason)
+    );
+    if (authFailure) {
+      clearStoredAuth();
+      navigate("/login", { replace: true });
+      return;
+    }
+
+    if (progressResult.status === "rejected") {
+      setError(progressResult.reason instanceof Error ? progressResult.reason.message : "Failed to fetch rep progress");
+      setLoading(false);
+      return;
+    }
+
+    if (feedResult.status === "rejected") {
+      setError(feedResult.reason instanceof Error ? feedResult.reason.message : "Failed to fetch rep feed");
+      setLoading(false);
+      return;
+    }
+
+    setProgress(progressResult.value);
+    setFeed(feedResult.value.filter((item) => item.rep_id === repId));
+    setLoading(false);
+  }, [loadInsight, managerId, navigate, periodWindow.current.endInput, periodWindow.current.spanDays, periodWindow.current.startInput, periodWindow.previous.startInput, repId]);
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (!copiedScript) {
+      return;
+    }
+    const timer = window.setTimeout(() => setCopiedScript(false), 1400);
+    return () => window.clearTimeout(timer);
+  }, [copiedScript]);
 
   const repName = feed[0]?.rep_name ?? progress?.rep_name ?? repId;
 
@@ -289,6 +400,23 @@ export function RepProgressPage() {
       };
     });
   }, [feed, progress]);
+
+  const drillPrefill = useMemo(
+    () => (insight ? parseDrillRecommendation(insight.drill_recommendation) : null),
+    [insight]
+  );
+
+  const handleCopyScript = useCallback(async () => {
+    if (!insight?.coaching_script || !navigator.clipboard?.writeText) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(insight.coaching_script);
+      setCopiedScript(true);
+    } catch {
+      setCopiedScript(false);
+    }
+  }, [insight]);
 
   if (loading) {
     return <RepProgressSkeleton />;
@@ -514,6 +642,123 @@ export function RepProgressPage() {
             <EmptyState variant="empty" message="No categories are averaging below benchmark this period." />
           )}
         </motion.div>
+      </motion.section>
+
+      <motion.section
+        variants={cardVariants}
+        className="rounded-2xl border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+      >
+        <div className="flex flex-col gap-4 border-b border-white/20 pb-5 md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-accent/10 text-accent">
+              <Sparkles className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold tracking-tight text-ink">AI Coach Analysis</h2>
+              <p className="mt-1 text-sm text-muted">
+                {insight ? `Generated ${formatRelativeTime(insight.generated_at)}` : "Targeted rep coaching guidance"}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            aria-label="Refresh AI coach analysis"
+            onClick={() => void loadInsight()}
+            disabled={insightLoading}
+            className="inline-flex items-center gap-2 self-start rounded-xl border border-white/35 bg-white/60 px-3 py-2 text-sm font-medium text-ink transition hover:bg-white/80 disabled:opacity-60"
+          >
+            <RefreshCcw className={`h-4 w-4 ${insightLoading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
+
+        <div className="mt-6">
+          {insightLoading ? <InsightSkeleton /> : null}
+
+          {!insightLoading && insightError ? (
+            <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-5 py-6">
+              <p className="text-sm font-medium text-error">Could not generate analysis. Try refreshing.</p>
+              <button
+                type="button"
+                aria-label="Retry AI coach analysis"
+                onClick={() => void loadInsight()}
+                className="mt-4 inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-hover"
+              >
+                <RefreshCcw className="h-4 w-4" />
+                Retry
+              </button>
+            </div>
+          ) : null}
+
+          {!insightLoading && !insightError && insight ? (
+            <div className="space-y-6">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Diagnosis</div>
+                <p className="mt-3 text-2xl font-black tracking-tight text-ink">{insight.headline}</p>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-2xl border border-white/25 bg-white/50 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Primary Weakness</div>
+                  <p className="mt-3 text-lg font-semibold text-ink">{insight.primary_weakness}</p>
+                </div>
+                <div className="rounded-2xl border border-white/25 bg-white/50 p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Root Cause</div>
+                  <p className="mt-3 text-sm leading-6 text-ink">{insight.root_cause}</p>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/25 bg-white/50 p-4">
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Next Drill</div>
+                    <p className="mt-3 text-sm font-medium leading-6 text-ink">{insight.drill_recommendation}</p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Assign recommended drill"
+                    onClick={() =>
+                      navigate("/manager/assignments/new", {
+                        state: {
+                          prefillScenarioSearch: drillPrefill?.scenarioSearch ?? insight.drill_recommendation,
+                          prefillDifficulty: drillPrefill?.difficulty,
+                          prefillRepIds: [repId],
+                        },
+                      })
+                    }
+                    className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-hover"
+                  >
+                    Assign Drill
+                    <ArrowRight className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/25 bg-white/50 p-4">
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Coaching Script</div>
+                    <p className="mt-3 text-sm leading-6 text-ink">{insight.coaching_script}</p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="Copy coaching script to clipboard"
+                    onClick={() => void handleCopyScript()}
+                    className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/35 bg-white/70 px-4 py-2 text-sm font-semibold text-ink transition hover:bg-white/90"
+                  >
+                    {copiedScript ? <Check className="h-4 w-4 text-accent" /> : <Copy className="h-4 w-4" />}
+                    {copiedScript ? "Copied" : "Copy to clipboard"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/25 bg-white/50 p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Expected Outcome</div>
+                <p className="mt-3 text-sm font-medium leading-6 text-ink">{insight.expected_improvement}</p>
+              </div>
+            </div>
+          ) : null}
+        </div>
       </motion.section>
 
       <motion.section

@@ -1,0 +1,314 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.api import manager as manager_api
+from app.db.session import SessionLocal
+from app.models.assignment import Assignment
+from app.models.scorecard import Scorecard
+from app.models.session import Session as DrillSession
+from app.models.session import SessionTurn
+from app.models.types import AssignmentStatus, SessionStatus, TurnSpeaker
+from app.services.manager_ai_coaching_service import AiCoachingUnavailableError
+
+
+@pytest.fixture(autouse=True)
+def clear_ai_caches() -> None:
+    manager_api.manager_ai_service.rep_insight_cache.clear()
+    manager_api.manager_ai_service.session_annotations_cache.clear()
+
+
+def _manager_headers(seed_org: dict[str, str]) -> dict[str, str]:
+    return {"x-user-id": seed_org["manager_id"], "x-user-role": "manager"}
+
+
+def _create_scored_session(
+    seed_org: dict[str, str],
+    *,
+    day_offset: int,
+    overall_score: float,
+    weakness_tags: list[str],
+    ai_summary: str,
+) -> dict[str, str]:
+    db = SessionLocal()
+    started_at = datetime.now(timezone.utc) - timedelta(days=day_offset)
+
+    assignment = Assignment(
+        scenario_id=seed_org["scenario_id"],
+        rep_id=seed_org["rep_id"],
+        assigned_by=seed_org["manager_id"],
+        status=AssignmentStatus.COMPLETED,
+        retry_policy={"max_attempts": 2},
+    )
+    db.add(assignment)
+    db.flush()
+
+    session = DrillSession(
+        assignment_id=assignment.id,
+        rep_id=seed_org["rep_id"],
+        scenario_id=seed_org["scenario_id"],
+        started_at=started_at,
+        ended_at=started_at + timedelta(minutes=4),
+        duration_seconds=240,
+        status=SessionStatus.GRADED,
+    )
+    db.add(session)
+    db.flush()
+
+    rep_turn = SessionTurn(
+        session_id=session.id,
+        turn_index=1,
+        speaker=TurnSpeaker.REP,
+        stage="opening",
+        text="Hi, I can help cut your pest bill without locking you into a long contract.",
+        started_at=started_at,
+        ended_at=started_at + timedelta(seconds=12),
+        objection_tags=[],
+    )
+    ai_turn = SessionTurn(
+        session_id=session.id,
+        turn_index=2,
+        speaker=TurnSpeaker.AI,
+        stage="objection_handling",
+        text="I already have someone and I do not want to spend more money.",
+        started_at=started_at + timedelta(seconds=14),
+        ended_at=started_at + timedelta(seconds=26),
+        objection_tags=["price"],
+    )
+    db.add_all([rep_turn, ai_turn])
+    db.flush()
+
+    scorecard = Scorecard(
+        session_id=session.id,
+        overall_score=overall_score,
+        category_scores={
+            "opening": {"score": 7.2, "rationale": "Good opener", "evidence_turn_ids": [rep_turn.id]},
+            "pitch_delivery": {"score": 6.4, "rationale": "Pitch was soft", "evidence_turn_ids": [rep_turn.id]},
+            "objection_handling": {"score": 5.1, "rationale": "Price objection wobble", "evidence_turn_ids": [rep_turn.id]},
+            "closing_technique": {"score": 6.0, "rationale": "Did not ask for the next step", "evidence_turn_ids": [rep_turn.id]},
+            "professionalism": {"score": 7.6, "rationale": "Calm tone", "evidence_turn_ids": [rep_turn.id]},
+        },
+        highlights=[
+            {"type": "strong", "note": "Started with a concise value prop", "turn_id": rep_turn.id},
+            {"type": "improve", "note": "Validated the price concern too early", "turn_id": rep_turn.id},
+        ],
+        ai_summary=ai_summary,
+        evidence_turn_ids=[rep_turn.id],
+        weakness_tags=weakness_tags,
+    )
+    db.add(scorecard)
+    db.commit()
+
+    payload = {
+        "session_id": session.id,
+        "scorecard_id": scorecard.id,
+        "rep_turn_id": rep_turn.id,
+        "ai_turn_id": ai_turn.id,
+    }
+    db.close()
+    return payload
+
+
+def test_ai_rep_insight_endpoint_caches_by_rep_and_period(client, seed_org, monkeypatch):
+    _create_scored_session(
+        seed_org,
+        day_offset=2,
+        overall_score=5.8,
+        weakness_tags=["objection_handling", "price", "objection_handling"],
+        ai_summary="Handled the opener well but caved when price came up.",
+    )
+    _create_scored_session(
+        seed_org,
+        day_offset=5,
+        overall_score=6.4,
+        weakness_tags=["objection_handling", "closing"],
+        ai_summary="Built light rapport, then lost momentum on the first objection.",
+    )
+    _create_scored_session(
+        seed_org,
+        day_offset=8,
+        overall_score=6.9,
+        weakness_tags=["price", "closing"],
+        ai_summary="More confident pace, but the close still lacked urgency.",
+    )
+
+    call_count = {"value": 0}
+
+    def fake_claude(*, system_prompt: str, user_prompt: str, max_tokens: int):
+        call_count["value"] += 1
+        assert "Ray Rep" in user_prompt
+        return {
+            "headline": "Ray loses leverage on price objections",
+            "primary_weakness": "Objection Handling",
+            "root_cause": "Ray does not pivot with a memorized bridge. That causes him to concede too early.",
+            "drill_recommendation": 'Assign "Skeptical Homeowner" difficulty 3',
+            "coaching_script": "Ray, acknowledge the concern, then pivot to value. Ask a clarifying question before defending price. Practice the bridge until it sounds natural.",
+            "expected_improvement": "+1.0 on objection handling within 4 sessions",
+        }
+
+    monkeypatch.setattr(manager_api.manager_ai_service, "_call_claude_json", fake_claude)
+
+    response = client.post(
+        "/manager/ai/rep-insight",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "rep_id": seed_org["rep_id"], "period_days": 30},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rep_id"] == seed_org["rep_id"]
+    assert body["rep_name"] == "Ray Rep"
+    assert body["headline"] == "Ray loses leverage on price objections"
+    assert body["data_summary"]["session_count"] == 3
+    assert body["data_summary"]["top_weakness_tags"][0] == "objection_handling"
+
+    cached = client.post(
+        "/manager/ai/rep-insight",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "rep_id": seed_org["rep_id"], "period_days": 30},
+    )
+    assert cached.status_code == 200
+    assert cached.json() == body
+    assert call_count["value"] == 1
+
+
+def test_ai_session_annotations_endpoint_caches_and_sorts_by_turn(client, seed_org, monkeypatch):
+    session_data = _create_scored_session(
+        seed_org,
+        day_offset=1,
+        overall_score=5.9,
+        weakness_tags=["objection_handling", "price"],
+        ai_summary="Promising opener, weak pivot on price.",
+    )
+
+    call_count = {"value": 0}
+
+    def fake_claude(*, system_prompt: str, user_prompt: str, max_tokens: int):
+        call_count["value"] += 1
+        assert session_data["rep_turn_id"] in user_prompt
+        return [
+            {
+                "turn_id": session_data["ai_turn_id"],
+                "type": "weakness",
+                "label": "Price objection wobble",
+                "explanation": "The rep allowed the price objection to control the frame. That weakened the rest of the exchange.",
+                "coaching_tip": "Acknowledge briefly, then pivot to long-term value.",
+            },
+            {
+                "turn_id": session_data["rep_turn_id"],
+                "type": "strength",
+                "label": "Crisp opener",
+                "explanation": "The rep led with a clear promise. That bought a few extra seconds of attention.",
+                "coaching_tip": None,
+            },
+        ]
+
+    monkeypatch.setattr(manager_api.manager_ai_service, "_call_claude_json", fake_claude)
+
+    response = client.post(
+        "/manager/ai/session-annotations",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "session_id": session_data["session_id"]},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"] == session_data["session_id"]
+    assert [item["turn_id"] for item in body["annotations"]] == [
+        session_data["rep_turn_id"],
+        session_data["ai_turn_id"],
+    ]
+
+    cached = client.post(
+        "/manager/ai/session-annotations",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "session_id": session_data["session_id"]},
+    )
+    assert cached.status_code == 200
+    assert cached.json() == body
+    assert call_count["value"] == 1
+
+
+def test_ai_team_coaching_summary_endpoint_returns_summary(client, seed_org, monkeypatch):
+    def fake_analytics(*args, **kwargs):
+        return {
+            "summary": {
+                "coaching_note_count": 6,
+                "review_count": 8,
+                "override_rate": 0.25,
+                "average_override_delta": 0.6,
+                "retry_uplift_avg": 1.1,
+                "coached_retry_uplift_avg": 1.7,
+                "intervention_improved_rate": 0.66,
+                "calibration_drift_score": 0.42,
+            },
+            "weakness_tag_uplift": [{"tag": "objection_handling", "delta": 1.2, "sample_size": 4}],
+            "coaching_uplift": [{"rep_name": "Ray Rep", "delta": 1.8, "outcome": "improved", "visible_to_rep": True}],
+            "manager_calibration": [{"reviewer_name": "Mia Manager", "average_override_delta": 0.6, "absolute_average_delta": 0.6}],
+            "recent_notes": [{"rep_name": "Ray Rep", "weakness_tags": ["objection_handling"], "note": "Use the bridge sooner", "delta": 1.2}],
+            "retry_impact": [{"rep_name": "Ray Rep", "delta": 1.4}],
+        }
+
+    monkeypatch.setattr(manager_api.management_analytics_service, "get_coaching_analytics", fake_analytics)
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "_call_claude_json",
+        lambda **kwargs: {
+            "summary": "Objection handling is still the main coaching gap across the team. Visible-to-rep coaching notes are producing the strongest lift for Ray Rep and similar retry cases. This week, tighten calibration discipline while assigning one more objection-focused retry block."
+        },
+    )
+
+    response = client.post(
+        "/manager/ai/team-coaching-summary",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "period_days": 30},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["manager_id"] == seed_org["manager_id"]
+    assert "Objection handling is still the main coaching gap" in body["summary"]
+    assert body["data_summary"]["summary"]["coaching_note_count"] == 6
+
+
+def test_ai_endpoints_return_503_when_claude_is_unavailable(client, seed_org, monkeypatch):
+    session_data = _create_scored_session(
+        seed_org,
+        day_offset=1,
+        overall_score=5.7,
+        weakness_tags=["objection_handling"],
+        ai_summary="Needed a stronger objection pivot.",
+    )
+
+    def raise_unavailable(**kwargs):
+        raise AiCoachingUnavailableError("Claude analysis is temporarily unavailable")
+
+    monkeypatch.setattr(manager_api.manager_ai_service, "_call_claude_json", raise_unavailable)
+    monkeypatch.setattr(
+        manager_api.management_analytics_service,
+        "get_coaching_analytics",
+        lambda *args, **kwargs: {"summary": {}, "weakness_tag_uplift": [], "coaching_uplift": [], "manager_calibration": [], "recent_notes": [], "retry_impact": []},
+    )
+
+    rep_response = client.post(
+        "/manager/ai/rep-insight",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "rep_id": seed_org["rep_id"], "period_days": 30},
+    )
+    assert rep_response.status_code == 503
+    assert "temporarily unavailable" in rep_response.json()["detail"]
+
+    annotations_response = client.post(
+        "/manager/ai/session-annotations",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "session_id": session_data["session_id"]},
+    )
+    assert annotations_response.status_code == 503
+    assert "temporarily unavailable" in annotations_response.json()["detail"]
+
+    summary_response = client.post(
+        "/manager/ai/team-coaching-summary",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "period_days": 30},
+    )
+    assert summary_response.status_code == 503
+    assert "temporarily unavailable" in summary_response.json()["detail"]

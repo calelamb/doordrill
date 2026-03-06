@@ -4,6 +4,8 @@ import {
   Activity,
   AlertCircle,
   AlertTriangle,
+  ChevronDown,
+  ChevronRight,
   Clock,
   FileText,
   MessageSquare,
@@ -15,7 +17,7 @@ import {
 } from "lucide-react";
 
 import { createCoachingNote, createFollowup, submitOverride } from "../lib/api";
-import type { CategoryScoreValue, ReplayResponse, TranscriptTurn } from "../lib/types";
+import type { CategoryScoreValue, ReplayResponse, SessionAnnotation, TranscriptTurn } from "../lib/types";
 import { EmptyState } from "./shared/EmptyState";
 import { ScoreChip } from "./shared/ScoreChip";
 
@@ -25,6 +27,9 @@ type Props = {
   onActionDone: () => Promise<void>;
   focusTurnId?: string | null;
   focusCategory?: string | null;
+  annotations?: SessionAnnotation[];
+  annotationsLoading?: boolean;
+  annotationsError?: string | null;
 };
 
 const CATEGORY_META = [
@@ -90,7 +95,16 @@ function buildTurnTimeline(turns: TranscriptTurn[]): TimelineTurn[] {
   });
 }
 
-export function ReplayPanel({ managerId, replay, onActionDone, focusTurnId, focusCategory }: Props) {
+export function ReplayPanel({
+  managerId,
+  replay,
+  onActionDone,
+  focusTurnId,
+  focusCategory,
+  annotations = [],
+  annotationsLoading = false,
+  annotationsError = null,
+}: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const turnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [overrideScore, setOverrideScore] = useState("");
@@ -104,6 +118,8 @@ export function ReplayPanel({ managerId, replay, onActionDone, focusTurnId, focu
   const [playbackRate, setPlaybackRate] = useState<(typeof PLAYBACK_SPEEDS)[number]>(1);
   const [currentTime, setCurrentTime] = useState(0);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  const [selectedAnnotationTurnId, setSelectedAnnotationTurnId] = useState<string | null>(focusTurnId ?? null);
+  const [annotationsExpanded, setAnnotationsExpanded] = useState(false);
 
   const timelineTurns = useMemo(() => buildTurnTimeline(replay?.transcript_turns ?? []), [replay?.transcript_turns]);
   const totalDuration = useMemo(() => {
@@ -200,6 +216,15 @@ export function ReplayPanel({ managerId, replay, onActionDone, focusTurnId, focu
 
     return moments.slice(0, 10);
   }, [categories, replay?.scorecard?.highlights]);
+  const annotationSummary = useMemo(() => {
+    const strengthCount = annotations.filter((annotation) => annotation.type === "strength").length;
+    const weaknessCount = annotations.filter((annotation) => annotation.type === "weakness").length;
+    return {
+      strengthCount,
+      weaknessCount,
+      total: annotations.length,
+    };
+  }, [annotations]);
 
   useEffect(() => {
     setFollowupScenarioId(replay?.session?.scenario_id ?? "");
@@ -210,6 +235,7 @@ export function ReplayPanel({ managerId, replay, onActionDone, focusTurnId, focu
     setExpandedCategory(focusCategory ?? null);
     setCurrentTime(0);
     setActiveTurnId(focusTurnId ?? timelineTurns[0]?.turn_id ?? null);
+    setSelectedAnnotationTurnId(focusTurnId ?? null);
   }, [focusCategory, focusTurnId, replay?.session?.scenario_id, replay?.session_id, timelineTurns]);
 
   useEffect(() => {
@@ -282,6 +308,7 @@ export function ReplayPanel({ managerId, replay, onActionDone, focusTurnId, focu
     audio.currentTime = turn.startOffset;
     setCurrentTime(turn.startOffset);
     setActiveTurnId(turn.turn_id);
+    setSelectedAnnotationTurnId(turn.turn_id);
   }
 
   function seekFromWaveform(seconds: number) {
@@ -805,6 +832,101 @@ export function ReplayPanel({ managerId, replay, onActionDone, focusTurnId, focu
       </div>
 
       <div className="rounded-2xl border border-white/25 bg-white/35 p-5">
+        <div className="mb-4 rounded-2xl border border-white/25 bg-white/45">
+          <button
+            type="button"
+            aria-label={annotationsExpanded ? "Collapse AI coaching notes" : "Expand AI coaching notes"}
+            onClick={() => setAnnotationsExpanded((current) => !current)}
+            className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+          >
+            <div className="flex items-center gap-3">
+              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-accent/10 text-accent">
+                <MessageSquare className="h-4 w-4" />
+              </div>
+              <div>
+                <div className="text-sm font-semibold tracking-tight text-ink">AI Coaching Notes</div>
+                <div className="mt-1 text-xs text-muted">
+                  {annotationSummary.total
+                    ? `${annotationSummary.total} coaching moments identified - ${annotationSummary.strengthCount} strengths, ${annotationSummary.weaknessCount} weaknesses`
+                    : annotationsLoading
+                      ? "Generating coaching moments..."
+                      : annotationsError
+                        ? "Could not generate coaching notes."
+                        : "No coaching moments were identified for this transcript."}
+                </div>
+              </div>
+            </div>
+            {annotationsExpanded ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}
+          </button>
+
+          {annotationsExpanded ? (
+            <div className="border-t border-white/20 px-4 py-4">
+              {annotationsLoading ? (
+                <div className="space-y-3">
+                  {Array.from({ length: 3 }).map((_, index) => (
+                    <div key={index} className="h-20 animate-pulse rounded-2xl bg-white/35" />
+                  ))}
+                </div>
+              ) : null}
+
+              {!annotationsLoading && annotationsError ? (
+                <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-4 py-4 text-sm text-error">
+                  {annotationsError}
+                </div>
+              ) : null}
+
+              {!annotationsLoading && !annotationsError && annotations.length ? (
+                <div className="space-y-3">
+                  {annotations.map((annotation) => {
+                    const transcriptTurn = timelineTurns.find((turn) => turn.turn_id === annotation.turn_id);
+                    const isSelected = selectedAnnotationTurnId === annotation.turn_id;
+                    const toneClasses =
+                      annotation.type === "strength"
+                        ? "border-l-[3px] border-l-accent bg-accent/[0.06]"
+                        : "border-l-[3px] border-l-red-600 bg-red-600/[0.06]";
+                    return (
+                      <button
+                        key={`${annotation.turn_id}-${annotation.label}`}
+                        type="button"
+                        aria-label={`Jump to turn ${transcriptTurn?.turn_index ?? annotation.turn_id}`}
+                        onClick={() => {
+                          setAnnotationsExpanded(true);
+                          setSelectedAnnotationTurnId(annotation.turn_id);
+                          seekToTurn(annotation.turn_id);
+                        }}
+                        className={`w-full rounded-2xl border border-white/20 px-4 py-4 text-left transition hover:bg-white/65 ${toneClasses} ${isSelected ? "ring-2 ring-accent" : ""}`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[11px] font-semibold uppercase tracking-[0.18em] ${annotation.type === "strength" ? "text-accent" : "text-red-700"}`}>
+                              {annotation.type}
+                            </span>
+                            <span className="text-xs font-semibold text-muted">
+                              Turn {transcriptTurn?.turn_index ?? "--"}
+                            </span>
+                          </div>
+                          <span className="text-xs font-medium text-accent">Jump to turn</span>
+                        </div>
+                        <div className="mt-2 text-base font-semibold text-ink">{annotation.label}</div>
+                        <p className="mt-2 text-sm leading-6 text-ink">{annotation.explanation}</p>
+                        {annotation.type === "weakness" && annotation.coaching_tip ? (
+                          <p className="mt-3 text-sm font-medium leading-6 text-ink">
+                            Try: {annotation.coaching_tip}
+                          </p>
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {!annotationsLoading && !annotationsError && annotations.length === 0 ? (
+                <p className="text-sm text-muted">No AI coaching notes are available for this replay.</p>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
         <div className="flex items-center gap-2 mb-4">
           <MessageSquare className="w-4 h-4 text-muted" />
           <h3 className="text-sm font-semibold tracking-tight text-ink">Transcript</h3>
@@ -813,6 +935,7 @@ export function ReplayPanel({ managerId, replay, onActionDone, focusTurnId, focu
           {timelineTurns.map((turn) => {
             const isRep = turn.speaker === "rep";
             const active = activeTurnId === turn.turn_id;
+            const selectedAnnotation = selectedAnnotationTurnId === turn.turn_id;
             const strong = highlightMap.strong.has(turn.turn_id);
             const improve = highlightMap.improve.has(turn.turn_id);
             return (
@@ -821,13 +944,16 @@ export function ReplayPanel({ managerId, replay, onActionDone, focusTurnId, focu
                   ref={(node) => {
                     turnRefs.current[turn.turn_id] = node;
                   }}
-                  onClick={() => seekToTurn(turn.turn_id)}
+                  onClick={() => {
+                    setSelectedAnnotationTurnId(turn.turn_id);
+                    seekToTurn(turn.turn_id);
+                  }}
                   className={`w-full rounded-2xl border px-4 py-4 text-left transition ${active
                     ? "border-accent/40 bg-accent-soft/35 shadow-md shadow-accent/10"
                     : isRep
                       ? "border-accent/12 bg-white/55 hover:bg-white/70"
                       : "border-amber-300/20 bg-amber-50/60 hover:bg-amber-50/75"
-                    }`}
+                    } ${selectedAnnotation ? "ring-2 ring-accent" : ""}`}
                 >
                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">

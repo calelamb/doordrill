@@ -14,12 +14,15 @@ import type {
   ManagerAssignment,
   ManagerTeamMember,
   ReplayResponse,
+  RepInsightResponse,
   RepAssignment,
   RepProgress,
   RepSessionDetail,
   ScenarioSummary,
   ScenarioIntelligenceResponse,
+  SessionAnnotationsResponse,
   SessionDetail,
+  TeamCoachingSummaryResponse,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -269,6 +272,49 @@ export async function fetchReplay(managerId: string, sessionId: string): Promise
     session: detail.session,
     assignment: detail.assignment
   };
+}
+
+export async function fetchRepInsight(
+  managerId: string,
+  repId: string,
+  periodDays = 30
+): Promise<RepInsightResponse> {
+  return requestJson<RepInsightResponse>(
+    "/manager/ai/rep-insight",
+    {
+      method: "POST",
+      body: JSON.stringify({ manager_id: managerId, rep_id: repId, period_days: periodDays }),
+    },
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchSessionAnnotations(
+  managerId: string,
+  sessionId: string
+): Promise<SessionAnnotationsResponse> {
+  return requestJson<SessionAnnotationsResponse>(
+    "/manager/ai/session-annotations",
+    {
+      method: "POST",
+      body: JSON.stringify({ manager_id: managerId, session_id: sessionId }),
+    },
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchTeamCoachingSummary(
+  managerId: string,
+  periodDays = 30
+): Promise<TeamCoachingSummaryResponse> {
+  return requestJson<TeamCoachingSummaryResponse>(
+    "/manager/ai/team-coaching-summary",
+    {
+      method: "POST",
+      body: JSON.stringify({ manager_id: managerId, period_days: periodDays }),
+    },
+    { userId: managerId, role: "manager" }
+  );
 }
 
 export async function submitOverride(

@@ -120,6 +120,41 @@ export type ReplayResponse = {
   latest_coaching_note?: ManagerCoachingNote | null;
 };
 
+export type RepInsightResponse = {
+  rep_id: string;
+  rep_name: string;
+  generated_at: string;
+  headline: string;
+  primary_weakness: string;
+  root_cause: string;
+  drill_recommendation: string;
+  coaching_script: string;
+  expected_improvement: string;
+  data_summary: Record<string, unknown>;
+};
+
+export type SessionAnnotation = {
+  turn_id: string;
+  type: "strength" | "weakness";
+  label: string;
+  explanation: string;
+  coaching_tip?: string | null;
+};
+
+export type SessionAnnotationsResponse = {
+  session_id: string;
+  generated_at: string;
+  annotations: SessionAnnotation[];
+};
+
+export type TeamCoachingSummaryResponse = {
+  manager_id: string;
+  period_days: number;
+  generated_at: string;
+  summary: string;
+  data_summary: Record<string, unknown>;
+};
+
 export type ManagerAnalytics = {
   manager_id: string;
   period?: string;

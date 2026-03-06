@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
-import { BookOpenText, MessageSquareQuote, Scale, TrendingUp } from "lucide-react";
+import { BookOpenText, MessageSquareQuote, RefreshCcw, Scale, Sparkles, TrendingUp } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -15,9 +15,9 @@ import {
 import { ChartSkeleton } from "../components/shared/ChartSkeleton";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
-import { fetchManagerCoachingAnalytics } from "../lib/api";
+import { fetchManagerCoachingAnalytics, fetchTeamCoachingSummary } from "../lib/api";
 import { cardVariants, pageVariants } from "../lib/motion";
-import type { CoachingAnalyticsResponse } from "../lib/types";
+import type { CoachingAnalyticsResponse, TeamCoachingSummaryResponse } from "../lib/types";
 
 const PERIOD_OPTIONS = [
   { key: "7", label: "7D" },
@@ -29,6 +29,25 @@ type PeriodKey = (typeof PERIOD_OPTIONS)[number]["key"];
 
 function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`;
+}
+
+function formatRelativeTime(timestamp?: string | null) {
+  if (!timestamp) {
+    return "just now";
+  }
+  const deltaMs = Date.now() - new Date(timestamp).getTime();
+  if (!Number.isFinite(deltaMs) || deltaMs < 60_000) {
+    return "just now";
+  }
+  const deltaMinutes = Math.round(deltaMs / 60_000);
+  if (deltaMinutes < 60) {
+    return `${deltaMinutes}m ago`;
+  }
+  const deltaHours = Math.round(deltaMinutes / 60);
+  if (deltaHours < 24) {
+    return `${deltaHours}h ago`;
+  }
+  return `${Math.round(deltaHours / 24)}d ago`;
 }
 
 function CoachingLabSkeleton() {
@@ -70,8 +89,13 @@ export function CoachingLabPage() {
 
   const [period, setPeriod] = useState<PeriodKey>("30");
   const [data, setData] = useState<CoachingAnalyticsResponse | null>(null);
+  const [summary, setSummary] = useState<TeamCoachingSummaryResponse | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const analyticsRequestRef = useRef(0);
+  const summaryRequestRef = useRef(0);
 
   function openReplay(sessionId?: string, focusTurnId?: string | null) {
     if (!sessionId) {
@@ -82,13 +106,59 @@ export function CoachingLabPage() {
     navigate(`/manager/sessions/${sessionId}/replay${params.toString() ? `?${params.toString()}` : ""}`);
   }
 
+  const loadSummary = useCallback(async () => {
+    if (!managerId) return;
+    const requestId = ++summaryRequestRef.current;
+    setSummaryLoading(true);
+    setSummaryError(null);
+    try {
+      const [result] = await Promise.allSettled([
+        fetchTeamCoachingSummary(managerId, Number(period)),
+      ]);
+      if (summaryRequestRef.current !== requestId) {
+        return;
+      }
+      if (result.status === "fulfilled") {
+        setSummary(result.value);
+        return;
+      }
+      if (isAuthError(result.reason)) {
+        clearStoredAuth();
+        navigate("/login", { replace: true });
+        return;
+      }
+      setSummary(null);
+      setSummaryError(result.reason instanceof Error ? result.reason.message : "Failed to generate team coaching summary");
+    } finally {
+      if (summaryRequestRef.current === requestId) {
+        setSummaryLoading(false);
+      }
+    }
+  }, [managerId, navigate, period]);
+
   const loadData = useCallback(async () => {
     if (!managerId) return;
+    const requestId = ++analyticsRequestRef.current;
     setLoading(true);
     setError(null);
+    void loadSummary();
     try {
-      const response = await fetchManagerCoachingAnalytics(managerId, { period });
-      setData(response);
+      const [result] = await Promise.allSettled([
+        fetchManagerCoachingAnalytics(managerId, { period }),
+      ]);
+      if (analyticsRequestRef.current !== requestId) {
+        return;
+      }
+      if (result.status === "fulfilled") {
+        setData(result.value);
+        return;
+      }
+      if (isAuthError(result.reason)) {
+        clearStoredAuth();
+        navigate("/login", { replace: true });
+        return;
+      }
+      setError(result.reason instanceof Error ? result.reason.message : "Failed to load coaching analytics");
     } catch (err) {
       if (isAuthError(err)) {
         clearStoredAuth();
@@ -97,9 +167,11 @@ export function CoachingLabPage() {
       }
       setError(err instanceof Error ? err.message : "Failed to load coaching analytics");
     } finally {
-      setLoading(false);
+      if (analyticsRequestRef.current === requestId) {
+        setLoading(false);
+      }
     }
-  }, [managerId, navigate, period]);
+  }, [loadSummary, managerId, navigate, period]);
 
   useEffect(() => {
     void loadData();
@@ -164,6 +236,55 @@ export function CoachingLabPage() {
           ))}
         </div>
       </motion.header>
+
+      <motion.section
+        variants={cardVariants}
+        className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+      >
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-accent/10 text-accent">
+              <Sparkles className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold tracking-tight text-ink">AI Team Summary</h2>
+              <p className="mt-1 text-sm text-muted">
+                {summary ? `Generated ${formatRelativeTime(summary.generated_at)}` : "Cross-rep coaching pattern analysis"}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            aria-label="Regenerate team coaching summary"
+            onClick={() => void loadSummary()}
+            disabled={summaryLoading}
+            className="inline-flex items-center gap-2 self-start rounded-xl border border-white/35 bg-white/60 px-3 py-2 text-sm font-medium text-ink transition hover:bg-white/80 disabled:opacity-60"
+          >
+            <RefreshCcw className={`h-4 w-4 ${summaryLoading ? "animate-spin" : ""}`} />
+            Regenerate
+          </button>
+        </div>
+
+        <div className="mt-5">
+          {summaryLoading ? (
+            <div className="space-y-3">
+              <div className="h-4 w-full animate-pulse rounded-full bg-white/35" />
+              <div className="h-4 w-11/12 animate-pulse rounded-full bg-white/35" />
+              <div className="h-4 w-4/5 animate-pulse rounded-full bg-white/35" />
+            </div>
+          ) : null}
+
+          {!summaryLoading && summaryError ? (
+            <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-4 py-4 text-sm text-error">
+              {summaryError}
+            </div>
+          ) : null}
+
+          {!summaryLoading && !summaryError && summary ? (
+            <p className="text-base leading-7 text-ink">{summary.summary}</p>
+          ) : null}
+        </div>
+      </motion.section>
 
       <motion.section variants={cardVariants} className="grid gap-4 md:grid-cols-4">
         {[
