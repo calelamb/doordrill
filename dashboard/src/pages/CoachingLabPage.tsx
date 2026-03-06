@@ -12,9 +12,11 @@ import {
   YAxis,
 } from "recharts";
 
+import { ChartSkeleton } from "../components/shared/ChartSkeleton";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchManagerCoachingAnalytics } from "../lib/api";
+import { cardVariants, pageVariants } from "../lib/motion";
 import type { CoachingAnalyticsResponse } from "../lib/types";
 
 const PERIOD_OPTIONS = [
@@ -27,6 +29,38 @@ type PeriodKey = (typeof PERIOD_OPTIONS)[number]["key"];
 
 function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`;
+}
+
+function CoachingLabSkeleton() {
+  return (
+    <motion.main
+      className="mx-auto max-w-7xl space-y-6 px-6 py-6"
+      initial="hidden"
+      animate="visible"
+      variants={pageVariants}
+    >
+      <motion.div variants={cardVariants} className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div className="space-y-2">
+          <ChartSkeleton heightClass="h-10" className="max-w-[220px]" />
+          <ChartSkeleton heightClass="h-4" className="max-w-[360px]" />
+        </div>
+        <ChartSkeleton heightClass="h-12" className="w-full max-w-[220px]" />
+      </motion.div>
+
+      <motion.section variants={cardVariants} className="grid gap-4 md:grid-cols-4">
+        {Array.from({ length: 8 }).map((_, index) => (
+          <ChartSkeleton key={index} heightClass="h-28" className="rounded-[28px]" />
+        ))}
+      </motion.section>
+
+      {Array.from({ length: 4 }).map((_, index) => (
+        <motion.section key={index} variants={cardVariants} className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+          <ChartSkeleton heightClass="h-[360px]" className="rounded-[32px]" />
+          <ChartSkeleton heightClass="h-[360px]" className="rounded-[32px]" />
+        </motion.section>
+      ))}
+    </motion.main>
+  );
 }
 
 export function CoachingLabPage() {
@@ -102,18 +136,18 @@ export function CoachingLabPage() {
     [data?.intervention_timeline]
   );
 
-  if (loading) return <EmptyState variant="loading" message="Loading coaching lab..." />;
+  if (loading) return <CoachingLabSkeleton />;
   if (error) return <EmptyState variant="error" message={error} onRetry={() => void loadData()} />;
   if (!data) return <EmptyState variant="empty" message="No coaching data available yet." />;
 
   return (
     <motion.main
-      className="mx-auto max-w-7xl px-6 py-6 space-y-6"
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: "easeOut" }}
+      className="mx-auto max-w-7xl space-y-6 px-6 py-6"
+      initial="hidden"
+      animate="visible"
+      variants={pageVariants}
     >
-      <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+      <motion.header variants={cardVariants} className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <h1 className="text-3xl font-black tracking-tight text-ink">Coaching Lab</h1>
           <p className="mt-1 text-sm text-muted">Measure coaching uplift, review behavior, and calibration drift.</p>
@@ -129,9 +163,9 @@ export function CoachingLabPage() {
             </button>
           ))}
         </div>
-      </header>
+      </motion.header>
 
-      <section className="grid gap-4 md:grid-cols-4">
+      <motion.section variants={cardVariants} className="grid gap-4 md:grid-cols-4">
         {[
           { label: "Coaching Notes", value: String(data.summary.coaching_note_count), icon: BookOpenText },
           { label: "Reviews", value: String(data.summary.review_count), icon: MessageSquareQuote },
@@ -162,7 +196,11 @@ export function CoachingLabPage() {
             icon: Scale,
           },
         ].map((card) => (
-          <div key={card.label} className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <motion.div
+            key={card.label}
+            variants={cardVariants}
+            className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl"
+          >
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">{card.label}</div>
@@ -172,12 +210,15 @@ export function CoachingLabPage() {
                 <card.icon className="h-5 w-5" />
               </div>
             </div>
-          </div>
+          </motion.div>
         ))}
-      </section>
+      </motion.section>
 
-      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <h2 className="text-lg font-bold tracking-tight text-ink">Coaching Uplift by Rep</h2>
           <div className="mt-4 h-[300px] w-full">
             {upliftChart.length ? (
@@ -194,9 +235,12 @@ export function CoachingLabPage() {
               <EmptyState variant="empty" message="No before/after coaching samples yet." />
             )}
           </div>
-        </div>
+        </motion.div>
 
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <h2 className="text-lg font-bold tracking-tight text-ink">Weakness Tag Uplift</h2>
           <div className="mt-4 h-[300px] w-full">
             {tagChart.length ? (
@@ -213,11 +257,14 @@ export function CoachingLabPage() {
               <EmptyState variant="empty" message="No tag-level uplift yet." />
             )}
           </div>
-        </div>
-      </section>
+        </motion.div>
+      </motion.section>
 
-      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <h2 className="text-lg font-bold tracking-tight text-ink">Retry Impact</h2>
           <div className="mt-4 h-[280px] w-full">
             {retryChart.length ? (
@@ -249,9 +296,12 @@ export function CoachingLabPage() {
               </button>
             ))}
           </div>
-        </div>
+        </motion.div>
 
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <h2 className="text-lg font-bold tracking-tight text-ink">Calibration Drift Timeline</h2>
           <div className="mt-4 h-[280px] w-full">
             {driftTimeline.length ? (
@@ -275,11 +325,14 @@ export function CoachingLabPage() {
               </span>
             ))}
           </div>
-        </div>
-      </section>
+        </motion.div>
+      </motion.section>
 
-      <section className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <h2 className="text-lg font-bold tracking-tight text-ink">Calibration Drift</h2>
           <div className="mt-4 h-[300px] w-full">
             {calibrationChart.length ? (
@@ -296,9 +349,12 @@ export function CoachingLabPage() {
               <EmptyState variant="empty" message="No override calibration data yet." />
             )}
           </div>
-        </div>
+        </motion.div>
 
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <h2 className="text-lg font-bold tracking-tight text-ink">Recent Coaching Notes</h2>
           <div className="mt-4 space-y-3">
             {data.recent_notes.length ? (
@@ -331,11 +387,14 @@ export function CoachingLabPage() {
               <EmptyState variant="empty" message="No coaching notes have been added yet." />
             )}
           </div>
-        </div>
-      </section>
+        </motion.div>
+      </motion.section>
 
-      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <h2 className="text-lg font-bold tracking-tight text-ink">Intervention Timeline</h2>
           <div className="mt-4 h-[280px] w-full">
             {interventionTimeline.length ? (
@@ -353,9 +412,12 @@ export function CoachingLabPage() {
               <EmptyState variant="empty" message="No intervention timeline yet." />
             )}
           </div>
-        </div>
+        </motion.div>
 
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <h2 className="text-lg font-bold tracking-tight text-ink">Scenario Drift Watchlist</h2>
           <div className="mt-4 space-y-3">
             {(data.score_drift_by_scenario ?? []).length ? (
@@ -387,8 +449,8 @@ export function CoachingLabPage() {
               <EmptyState variant="empty" message="No scenario drift signals yet." />
             )}
           </div>
-        </div>
-      </section>
+        </motion.div>
+      </motion.section>
     </motion.main>
   );
 }

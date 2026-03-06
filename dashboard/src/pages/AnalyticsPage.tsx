@@ -2,12 +2,27 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
-import { AlertTriangle, ArrowUpRight, BellRing, Clock3, Database, Gauge, Layers3, Radar, TrendingDown, TrendingUp, Users } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowUpRight,
+  BellRing,
+  Clock3,
+  Database,
+  Gauge,
+  Layers3,
+  TrendingDown,
+  TrendingUp,
+  Users,
+} from "lucide-react";
 import type { EChartsOption } from "echarts";
 
 import { EChartSurface } from "../components/EChartSurface";
+import { RepRiskQuadrant } from "../components/RepRiskQuadrant";
+import { TeamSkillHeatmap } from "../components/TeamSkillHeatmap";
 import { DataTable } from "../components/shared/DataTable";
 import { EmptyState } from "../components/shared/EmptyState";
+import { ChartSkeleton } from "../components/shared/ChartSkeleton";
+import { ScoreChip } from "../components/shared/ScoreChip";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import {
   fetchAnalyticsMetricDefinitions,
@@ -16,6 +31,9 @@ import {
   fetchManagerBenchmarks,
   fetchManagerCommandCenter,
 } from "../lib/api";
+import { PASSING_SCORE } from "../lib/analytics";
+import { cardVariants, pageVariants } from "../lib/motion";
+import { resolvePeriodWindow, type DashboardPeriodKey } from "../lib/periods";
 import type {
   AlertItem,
   AnalyticsMetricDefinition,
@@ -30,24 +48,92 @@ const PERIOD_OPTIONS = [
   { key: "30", label: "30 days" },
   { key: "90", label: "90 days" },
   { key: "custom", label: "Custom" },
-] as const;
+] as const satisfies ReadonlyArray<{ key: DashboardPeriodKey; label: string }>;
 
-type PeriodKey = (typeof PERIOD_OPTIONS)[number]["key"];
+type CompletionRateRow = NonNullable<ManagerAnalytics["completion_rate_by_rep"]>[number];
+type ScenarioPassRow = NonNullable<ManagerAnalytics["scenario_pass_rates"]>[number];
 
-function formatPercent(value: number | null | undefined) {
+type AxisSeriesParam = {
+  dataIndex?: number;
+};
+
+type HeatmapTooltipParam = {
+  data?: [number, number, number];
+};
+
+function formatPercent(value: number | null | undefined): string {
   if (typeof value !== "number") return "--";
   return `${Math.round(value * 100)}%`;
 }
 
-function formatDelta(value: number | null | undefined) {
+function formatDelta(value: number | null | undefined): string {
   if (typeof value !== "number") return "--";
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)}`;
 }
 
-function severityTone(alert: AlertItem) {
+function formatTrendLabel(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function severityTone(alert: AlertItem): string {
   if (alert.severity === "high") return "border-error/15 bg-error/[0.06] text-error";
   if (alert.severity === "medium") return "border-amber-400/20 bg-amber-100/40 text-amber-900";
   return "border-accent/15 bg-accent-soft/35 text-accent";
+}
+
+function bucketColor(min: number, max: number): string {
+  if (max <= 6.0) {
+    return "#e7afa9";
+  }
+  if (min >= 7.5) {
+    return "#b8d5be";
+  }
+  return "#f2d49b";
+}
+
+function AnalyticsPageSkeleton() {
+  return (
+    <motion.main
+      className="mx-auto max-w-7xl space-y-6 px-6 py-6"
+      initial="hidden"
+      animate="visible"
+      variants={pageVariants}
+    >
+      <motion.div variants={cardVariants} className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div className="space-y-3">
+          <ChartSkeleton heightClass="h-6" className="max-w-[180px]" />
+          <ChartSkeleton heightClass="h-10" className="max-w-[280px]" />
+          <ChartSkeleton heightClass="h-4" className="max-w-[520px]" />
+        </div>
+        <ChartSkeleton heightClass="h-14" className="w-full max-w-[320px]" />
+      </motion.div>
+
+      <motion.section variants={cardVariants} className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {Array.from({ length: 5 }).map((_, index) => (
+          <ChartSkeleton key={index} heightClass="h-32" className="rounded-[28px]" />
+        ))}
+      </motion.section>
+
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[1.35fr_0.65fr]">
+        <ChartSkeleton heightClass="h-[380px]" className="rounded-[32px]" />
+        <ChartSkeleton heightClass="h-[380px]" className="rounded-[32px]" />
+      </motion.section>
+
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+        <ChartSkeleton heightClass="h-[420px]" className="rounded-[32px]" />
+        <ChartSkeleton heightClass="h-[420px]" className="rounded-[32px]" />
+      </motion.section>
+
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <ChartSkeleton heightClass="h-[420px]" className="rounded-[32px]" />
+        <ChartSkeleton heightClass="h-[420px]" className="rounded-[32px]" />
+      </motion.section>
+    </motion.main>
+  );
 }
 
 export function AnalyticsPage() {
@@ -55,16 +141,22 @@ export function AnalyticsPage() {
   const auth = getValidStoredAuth();
   const managerId = auth?.user.id ?? "";
 
-  const [period, setPeriod] = useState<PeriodKey>("30");
+  const [period, setPeriod] = useState<DashboardPeriodKey>("30");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
   const [data, setData] = useState<CommandCenterResponse | null>(null);
+  const [previousData, setPreviousData] = useState<CommandCenterResponse | null>(null);
   const [teamAnalytics, setTeamAnalytics] = useState<ManagerAnalytics | null>(null);
   const [benchmarks, setBenchmarks] = useState<BenchmarksResponse | null>(null);
   const [operations, setOperations] = useState<ManagerAnalyticsOperations | null>(null);
   const [metricDefinitions, setMetricDefinitions] = useState<AnalyticsMetricDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const periodWindow = useMemo(
+    () => resolvePeriodWindow(period, customStart || undefined, customEnd || undefined),
+    [customEnd, customStart, period]
+  );
 
   function openReplay(sessionId?: string | null, turnId?: string | null, category?: string | null) {
     if (!sessionId) {
@@ -78,205 +170,314 @@ export function AnalyticsPage() {
 
   const loadData = useCallback(async () => {
     if (!managerId) return;
+
     setLoading(true);
     setError(null);
+
     try {
-      const options = {
-        period,
-        dateFrom: period === "custom" ? customStart : undefined,
-        dateTo: period === "custom" ? customEnd : undefined,
+      const currentOptions = {
+        period: "custom",
+        dateFrom: periodWindow.current.startInput,
+        dateTo: periodWindow.current.endInput,
       };
-      const [commandCenter, benchmarkData, teamAnalyticsData, operationsData, definitionsData] = await Promise.all([
-        fetchManagerCommandCenter(managerId, options),
-        fetchManagerBenchmarks(managerId, options),
-        fetchManagerAnalytics(managerId, options),
+      const previousOptions = {
+        period: "custom",
+        dateFrom: periodWindow.previous.startInput,
+        dateTo: periodWindow.previous.endInput,
+      };
+
+      const [
+        commandCenter,
+        previousCommandCenter,
+        benchmarkData,
+        teamAnalyticsData,
+        operationsData,
+        definitionsData,
+      ] = await Promise.all([
+        fetchManagerCommandCenter(managerId, currentOptions),
+        fetchManagerCommandCenter(managerId, previousOptions),
+        fetchManagerBenchmarks(managerId, currentOptions),
+        fetchManagerAnalytics(managerId, currentOptions),
         fetchManagerAnalyticsOperations(managerId),
         fetchAnalyticsMetricDefinitions(managerId),
       ]);
+
       setData(commandCenter);
+      setPreviousData(previousCommandCenter);
       setBenchmarks(benchmarkData);
       setTeamAnalytics(teamAnalyticsData);
       setOperations(operationsData);
       setMetricDefinitions(definitionsData);
-    } catch (err) {
-      if (isAuthError(err)) {
+    } catch (loadError) {
+      if (isAuthError(loadError)) {
         clearStoredAuth();
         navigate("/login", { replace: true });
         return;
       }
-      setError(err instanceof Error ? err.message : "Failed to load command center");
+      setError(loadError instanceof Error ? loadError.message : "Failed to load command center");
     } finally {
       setLoading(false);
     }
-  }, [customEnd, customStart, managerId, navigate, period]);
+  }, [managerId, navigate, periodWindow.current.endInput, periodWindow.current.startInput, periodWindow.previous.endInput, periodWindow.previous.startInput]);
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
 
-  const histogram = useMemo(
-    () =>
-      (data?.score_distribution_histogram ?? []).map((bucket) => ({
-        ...bucket,
-        fill: bucket.max <= 6 ? "#f8c7bf" : bucket.max <= 8 ? "#f6dfa5" : "#cde7d1",
-      })),
-    [data?.score_distribution_histogram]
-  );
+  const trendComparison = useMemo(() => {
+    const previousTrend = previousData?.score_trend ?? [];
+    return (data?.score_trend ?? []).map((point, index) => {
+      const previousPoint = previousTrend[index] ?? null;
+      const currentScore = point.average_score ?? null;
+      const previousScore = previousPoint?.average_score ?? null;
+      const delta =
+        typeof currentScore === "number" && typeof previousScore === "number"
+          ? Number((currentScore - previousScore).toFixed(2))
+          : null;
 
-  const trend = useMemo(
-    () => (data?.score_trend ?? []).map((point) => ({ ...point, score: point.average_score ?? 0 })),
-    [data?.score_trend]
-  );
+      return {
+        label: formatTrendLabel(point.date),
+        date: point.date,
+        sessionCount: point.session_count,
+        score: currentScore,
+        previousScore,
+        delta,
+      };
+    });
+  }, [data?.score_trend, previousData?.score_trend]);
 
-  const scoreTrendOption = useMemo<EChartsOption>(() => ({
-    backgroundColor: "transparent",
-    animationDuration: 480,
-    tooltip: {
-      trigger: "axis",
-      backgroundColor: "rgba(252,248,242,0.96)",
-      borderColor: "rgba(45,90,61,0.12)",
-      textStyle: { color: "#1d2a20" },
-    },
-    grid: { top: 24, right: 18, bottom: 28, left: 28 },
-    xAxis: {
-      type: "category",
-      data: trend.map((point) => point.date),
-      axisLine: { lineStyle: { color: "rgba(29,42,32,0.12)" } },
-      axisLabel: { color: "#667066", fontSize: 11 },
-      axisTick: { show: false },
-      boundaryGap: false,
-    },
-    yAxis: {
-      type: "value",
-      min: 0,
-      max: 10,
-      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
-      axisLabel: { color: "#667066", fontSize: 11 },
-    },
-    series: [
-      {
-        type: "line",
-        smooth: true,
-        data: trend.map((point) => point.score),
-        symbolSize: 8,
-        lineStyle: { width: 3, color: "#2d5a3d" },
-        areaStyle: { color: "rgba(45,90,61,0.14)" },
-        itemStyle: { color: "#2d5a3d" },
-        markLine: {
-          symbol: "none",
-          lineStyle: { type: "dashed", color: "#c6951f" },
-          data: [
-            { yAxis: 7, label: { formatter: "Pass", color: "#8b6710" } },
-            ...(typeof benchmarks?.score_benchmarks.upper_quartile === "number"
-              ? [{ yAxis: benchmarks.score_benchmarks.upper_quartile, label: { formatter: "UQ", color: "#2d5a3d" } }]
-              : []),
-          ],
+  const histogram = useMemo(() => {
+    const buckets = data?.score_distribution_histogram ?? [];
+    const total = buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+    return buckets.map((bucket) => ({
+      ...bucket,
+      midpoint: Number(((bucket.min + Math.min(bucket.max, 10)) / 2).toFixed(2)),
+      percentage: total > 0 ? bucket.count / total : 0,
+      fill: bucketColor(bucket.min, bucket.max),
+    }));
+  }, [data?.score_distribution_histogram]);
+
+  const distributionCurve = useMemo(() => {
+    if (!histogram.length) {
+      return [];
+    }
+
+    const total = histogram.reduce((sum, bucket) => sum + bucket.count, 0);
+    if (!total) {
+      return histogram.map(() => 0);
+    }
+
+    const mean =
+      histogram.reduce((sum, bucket) => sum + bucket.midpoint * bucket.count, 0) / total;
+    const variance =
+      histogram.reduce((sum, bucket) => sum + ((bucket.midpoint - mean) ** 2) * bucket.count, 0) / total;
+    const sigma = Math.max(0.5, Math.sqrt(variance));
+    const bucketWidth = Math.max(0.5, histogram[0]?.max - histogram[0]?.min);
+
+    return histogram.map((bucket) => {
+      const exponent = -(((bucket.midpoint - mean) ** 2) / (2 * sigma ** 2));
+      const density = Math.exp(exponent) / (sigma * Math.sqrt(2 * Math.PI));
+      return Number((density * total * bucketWidth).toFixed(2));
+    });
+  }, [histogram]);
+
+  const repPerformanceBuckets = useMemo(() => {
+    const buckets = { atRisk: 0, onTarget: 0, exceeding: 0 };
+    for (const rep of data?.rep_risk_matrix ?? []) {
+      if (rep.average_score < 6.0) {
+        buckets.atRisk += 1;
+      } else if (rep.average_score <= 7.5) {
+        buckets.onTarget += 1;
+      } else {
+        buckets.exceeding += 1;
+      }
+    }
+    return buckets;
+  }, [data?.rep_risk_matrix]);
+
+  const scoreTrendOption = useMemo<EChartsOption>(() => {
+    const lowerQuartile = benchmarks?.score_benchmarks.lower_quartile ?? null;
+    const upperQuartile = benchmarks?.score_benchmarks.upper_quartile ?? null;
+
+    return {
+      backgroundColor: "transparent",
+      animationDuration: 1200,
+      animationEasing: "cubicOut",
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "cross", lineStyle: { color: "rgba(45,90,61,0.2)" } },
+        backgroundColor: "rgba(252,248,242,0.96)",
+        borderColor: "rgba(45,90,61,0.12)",
+        textStyle: { color: "#1d2a20" },
+        formatter: (params: unknown) => {
+          const seriesParams = Array.isArray(params) ? (params as AxisSeriesParam[]) : [];
+          const index = seriesParams[0]?.dataIndex ?? 0;
+          const point = trendComparison[index];
+          if (!point) {
+            return "";
+          }
+          return [
+            `<strong>${new Date(point.date).toLocaleDateString(undefined, {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+            })}</strong>`,
+            `${point.sessionCount} sessions`,
+            `Average score: ${typeof point.score === "number" ? point.score.toFixed(1) : "--"}`,
+            `Delta vs previous: ${formatDelta(point.delta)}`,
+          ].join("<br/>");
         },
       },
-    ],
-  }), [benchmarks?.score_benchmarks.upper_quartile, trend]);
-
-  const riskMatrixOption = useMemo<EChartsOption>(() => ({
-    backgroundColor: "transparent",
-    animationDuration: 420,
-    tooltip: {
-      trigger: "item",
-      backgroundColor: "rgba(252,248,242,0.96)",
-      borderColor: "rgba(45,90,61,0.12)",
-      formatter: (params: any) => {
-        const rep = params?.data as {
-          rep_name: string;
-          average_score: number;
-          score_delta: number;
-          volatility: number;
-        } | undefined;
-        if (!rep) return "";
-        return `${rep.rep_name}<br/>Avg ${rep.average_score.toFixed(1)}<br/>Delta ${formatDelta(rep.score_delta)}<br/>Volatility ${rep.volatility.toFixed(1)}`;
+      grid: { top: 26, right: 18, bottom: 28, left: 28 },
+      xAxis: {
+        type: "category",
+        data: trendComparison.map((point) => point.label),
+        axisLine: { lineStyle: { color: "rgba(29,42,32,0.12)" } },
+        axisLabel: { color: "#667066", fontSize: 11 },
+        axisTick: { show: false },
+        boundaryGap: false,
       },
-    },
-    grid: { top: 20, right: 16, bottom: 24, left: 32 },
-    xAxis: {
-      type: "value",
-      name: "Delta",
-      nameTextStyle: { color: "#667066", fontSize: 11 },
-      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
-      axisLabel: { color: "#667066", fontSize: 11 },
-    },
-    yAxis: {
-      type: "value",
-      min: 0,
-      max: 10,
-      name: "Average",
-      nameTextStyle: { color: "#667066", fontSize: 11 },
-      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
-      axisLabel: { color: "#667066", fontSize: 11 },
-    },
-    series: [
-      {
-        type: "scatter",
-        data: (data?.rep_risk_matrix ?? []).map((rep) => ({
-          value: [rep.score_delta, rep.average_score, rep.risk_score],
-          ...rep,
-        })),
-        symbolSize: (_value: unknown, params: any) =>
-          12 + Math.max(0, Number(params?.data?.risk_score ?? 0) * 3),
-        itemStyle: {
-          color: (params: any) => {
-            if (params?.data?.risk_level === "high") return "#b5331e";
-            if (params?.data?.risk_level === "medium") return "#c6951f";
-            return "#2d5a3d";
+      yAxis: {
+        type: "value",
+        min: 0,
+        max: 10,
+        splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
+        axisLabel: { color: "#667066", fontSize: 11 },
+      },
+      series: [
+        {
+          name: "Previous period",
+          type: "line",
+          smooth: true,
+          showSymbol: false,
+          data: trendComparison.map((point) => point.previousScore),
+          lineStyle: { width: 2, color: "rgba(90,110,90,0.55)", type: "dashed" },
+          itemStyle: { color: "rgba(90,110,90,0.55)" },
+        },
+        {
+          name: "Lower quartile",
+          type: "line",
+          smooth: true,
+          showSymbol: false,
+          silent: true,
+          data: trendComparison.map(() => lowerQuartile),
+          lineStyle: { width: 1, color: "rgba(45,90,61,0.16)" },
+          itemStyle: { color: "rgba(45,90,61,0.16)" },
+        },
+        {
+          name: "Upper quartile",
+          type: "line",
+          smooth: true,
+          showSymbol: false,
+          silent: true,
+          data: trendComparison.map(() => upperQuartile),
+          lineStyle: { width: 1, color: "rgba(45,90,61,0.16)" },
+          itemStyle: { color: "rgba(45,90,61,0.16)" },
+        },
+        {
+          name: "Team trend",
+          type: "line",
+          smooth: true,
+          data: trendComparison.map((point) => point.score),
+          symbolSize: 8,
+          lineStyle: { width: 3, color: "#2d5a3d" },
+          areaStyle: {
+            color: {
+              type: "linear",
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: "rgba(45,90,61,0.4)" },
+                { offset: 1, color: "rgba(45,90,61,0)" },
+              ],
+            },
           },
-          shadowBlur: 18,
-          shadowColor: "rgba(20,20,20,0.12)",
+          itemStyle: { color: "#2d5a3d" },
+          markArea:
+            typeof lowerQuartile === "number" && typeof upperQuartile === "number"
+              ? {
+                  silent: true,
+                  itemStyle: { color: "rgba(45,90,61,0.08)" },
+                  data: [[{ yAxis: lowerQuartile }, { yAxis: upperQuartile }]],
+                }
+              : undefined,
+          markLine: {
+            symbol: "none",
+            lineStyle: { type: "dashed", color: "#c6951f" },
+            data: [{ yAxis: PASSING_SCORE, label: { formatter: "Pass", color: "#8b6710" } }],
+          },
         },
-        markLine: {
-          symbol: "none",
-          lineStyle: { type: "dashed", color: "rgba(26,46,26,0.24)" },
-          data: [{ xAxis: 0 }, { yAxis: 7 }],
-        },
-      },
-    ],
-  }), [data?.rep_risk_matrix]);
+      ],
+    };
+  }, [benchmarks?.score_benchmarks.lower_quartile, benchmarks?.score_benchmarks.upper_quartile, trendComparison]);
 
-  const distributionOption = useMemo<EChartsOption>(() => ({
-    backgroundColor: "transparent",
-    animationDuration: 400,
-    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
-    grid: { top: 20, right: 16, bottom: 24, left: 24 },
-    xAxis: {
-      type: "category",
-      data: histogram.map((entry) => entry.label),
-      axisLabel: { color: "#667066", fontSize: 11 },
-      axisTick: { show: false },
-      axisLine: { lineStyle: { color: "rgba(29,42,32,0.12)" } },
-    },
-    yAxis: {
-      type: "value",
-      axisLabel: { color: "#667066", fontSize: 11 },
-      splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
-    },
-    series: [
-      {
-        type: "bar",
-        data: histogram.map((entry) => ({
-          value: entry.count,
-          itemStyle: { color: entry.fill, borderRadius: [14, 14, 0, 0] },
-        })),
-        barWidth: "58%",
+  const distributionOption = useMemo<EChartsOption>(() => {
+    return {
+      backgroundColor: "transparent",
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "shadow" },
+        formatter: (params: unknown) => {
+          const items = Array.isArray(params) ? (params as Array<{ dataIndex?: number }>) : [];
+          const index = items[0]?.dataIndex ?? 0;
+          const bucket = histogram[index];
+          if (!bucket) {
+            return "";
+          }
+          return `${bucket.count} sessions scored ${bucket.min.toFixed(1)}-${Math.min(bucket.max, 10).toFixed(1)} — ${Math.round(bucket.percentage * 100)}% of total`;
+        },
       },
-    ],
-  }), [histogram]);
+      grid: { top: 20, right: 16, bottom: 24, left: 24 },
+      xAxis: {
+        type: "category",
+        data: histogram.map((entry) => entry.label),
+        axisLabel: { color: "#667066", fontSize: 11 },
+        axisTick: { show: false },
+        axisLine: { lineStyle: { color: "rgba(29,42,32,0.12)" } },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { color: "#667066", fontSize: 11 },
+        splitLine: { lineStyle: { color: "rgba(45,90,61,0.08)", type: "dashed" } },
+      },
+      series: [
+        {
+          name: "Score buckets",
+          type: "bar",
+          data: histogram.map((entry) => ({
+            value: entry.count,
+            itemStyle: { color: entry.fill, borderRadius: [14, 14, 0, 0] },
+          })),
+          barWidth: "58%",
+          animationDuration: 700,
+          animationDelay: (index: number) => index * 80,
+        },
+        {
+          name: "Ideal distribution",
+          type: "line",
+          data: distributionCurve,
+          smooth: true,
+          symbol: "none",
+          lineStyle: { width: 2, color: "rgba(90,110,90,0.7)", type: "dashed" },
+        },
+      ],
+    };
+  }, [distributionCurve, histogram]);
 
   const scenarioHeatmapOption = useMemo<EChartsOption>(() => {
     const scenarioRows = data?.scenario_pass_matrix?.slice(0, 10) ?? [];
     const scenarioNames = scenarioRows.map((scenario) => scenario.scenario_name);
+
     return {
       backgroundColor: "transparent",
       animationDuration: 420,
       tooltip: {
         position: "top",
-        formatter: (params: any) => {
-          const [x, y, value] = (params?.data ?? []) as [number, number, number];
+        formatter: (params: unknown) => {
+          const cell = (params as HeatmapTooltipParam).data ?? [0, 0, 0];
+          const [x, y, value] = cell;
           const metric = ["Pass Rate", "Avg Score", "Difficulty"][y] ?? "Metric";
           const label = scenarioNames[x] ?? "Scenario";
           const formatted = y === 0 ? `${Math.round(value * 10)}%` : value.toFixed(1);
@@ -308,26 +509,28 @@ export function AnalyticsPage() {
       series: [
         {
           type: "heatmap",
-          data: scenarioRows.flatMap((scenario, index) => ([
+          data: scenarioRows.flatMap((scenario, index) => [
             [index, 0, scenario.pass_rate * 10],
             [index, 1, scenario.average_score ?? 0],
             [index, 2, scenario.difficulty * 2],
-          ])),
+          ]),
           label: {
             show: true,
             color: "#fff8f0",
-            formatter: (params: any) => {
-              const [, metricIndex, value] = (params?.data ?? []) as [number, number, number];
+            formatter: (params: unknown) => {
+              const cell = (params as HeatmapTooltipParam).data ?? [0, 0, 0];
+              const metricIndex = cell[1];
+              const value = cell[2];
               return metricIndex === 0 ? `${Math.round(value * 10)}%` : value.toFixed(1);
             },
           },
         },
       ],
-    } as EChartsOption;
+    };
   }, [data?.scenario_pass_matrix]);
 
-  const repCompletionColumns = useMemo<Array<ColumnDef<NonNullable<ManagerAnalytics["completion_rate_by_rep"]>[number]>>>(() => {
-    const columnHelper = createColumnHelper<NonNullable<ManagerAnalytics["completion_rate_by_rep"]>[number]>();
+  const repCompletionColumns = useMemo<Array<ColumnDef<CompletionRateRow>>>(() => {
+    const columnHelper = createColumnHelper<CompletionRateRow>();
     return [
       columnHelper.accessor("rep_name", {
         header: "Rep",
@@ -353,11 +556,11 @@ export function AnalyticsPage() {
         header: "Completion",
         cell: (info) => formatPercent(info.getValue()),
       }),
-    ] as ColumnDef<NonNullable<ManagerAnalytics["completion_rate_by_rep"]>[number]>[];
+    ] as Array<ColumnDef<CompletionRateRow>>;
   }, [navigate]);
 
-  const scenarioPassColumns = useMemo<Array<ColumnDef<NonNullable<ManagerAnalytics["scenario_pass_rates"]>[number]>>>(() => {
-    const columnHelper = createColumnHelper<NonNullable<ManagerAnalytics["scenario_pass_rates"]>[number]>();
+  const scenarioPassColumns = useMemo<Array<ColumnDef<ScenarioPassRow>>>(() => {
+    const columnHelper = createColumnHelper<ScenarioPassRow>();
     return [
       columnHelper.accessor("scenario_name", {
         header: "Scenario",
@@ -374,7 +577,7 @@ export function AnalyticsPage() {
         header: "Samples",
         cell: (info) => String(info.getValue()),
       }),
-    ] as ColumnDef<NonNullable<ManagerAnalytics["scenario_pass_rates"]>[number]>[];
+    ] as Array<ColumnDef<ScenarioPassRow>>;
   }, []);
 
   const metricDefinitionColumns = useMemo<Array<ColumnDef<AnalyticsMetricDefinition>>>(() => {
@@ -399,23 +602,34 @@ export function AnalyticsPage() {
       columnHelper.accessor("owner", {
         header: "Owner",
       }),
-    ] as ColumnDef<AnalyticsMetricDefinition>[];
+    ] as Array<ColumnDef<AnalyticsMetricDefinition>>;
   }, []);
 
-  if (loading) return <EmptyState variant="loading" message="Loading command center..." />;
-  if (error) return <EmptyState variant="error" message={error} onRetry={() => void loadData()} />;
-  if (!data) return <EmptyState variant="empty" message="No command center data available." />;
+  if (loading) {
+    return <AnalyticsPageSkeleton />;
+  }
+
+  if (error) {
+    return <EmptyState variant="error" message={error} onRetry={() => void loadData()} />;
+  }
+
+  if (!data) {
+    return <EmptyState variant="empty" message="No command center data available." />;
+  }
 
   const summary = data.summary;
+  const positiveMomentum =
+    typeof summary.team_average_delta_vs_previous_period === "number" &&
+    summary.team_average_delta_vs_previous_period >= 0;
 
   return (
     <motion.main
-      className="mx-auto max-w-7xl px-6 py-6 space-y-6"
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: "easeOut" }}
+      className="mx-auto max-w-7xl space-y-6 px-6 py-6"
+      initial="hidden"
+      animate="visible"
+      variants={pageVariants}
     >
-      <header className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+      <motion.header variants={cardVariants} className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <div className="inline-flex items-center gap-2 rounded-full border border-white/35 bg-white/55 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-muted">
             <Gauge className="h-3.5 w-3.5 text-accent" />
@@ -448,6 +662,8 @@ export function AnalyticsPage() {
               return (
                 <button
                   key={option.key}
+                  type="button"
+                  aria-label={`Show analytics for ${option.label}`}
                   onClick={() => setPeriod(option.key)}
                   className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${active ? "bg-accent text-white shadow-lg shadow-accent/20" : "text-muted hover:bg-white/70 hover:text-ink"}`}
                 >
@@ -459,12 +675,14 @@ export function AnalyticsPage() {
           {period === "custom" ? (
             <div className="flex gap-2">
               <input
+                aria-label="Custom period start date"
                 type="date"
                 value={customStart}
                 onChange={(event) => setCustomStart(event.target.value)}
                 className="rounded-xl border border-white/35 bg-white/60 px-3 py-2 text-sm text-ink outline-none focus:ring-2 focus:ring-accent/20"
               />
               <input
+                aria-label="Custom period end date"
                 type="date"
                 value={customEnd}
                 onChange={(event) => setCustomEnd(event.target.value)}
@@ -473,9 +691,9 @@ export function AnalyticsPage() {
             </div>
           ) : null}
         </div>
-      </header>
+      </motion.header>
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <motion.section variants={cardVariants} className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         {[
           {
             label: "Team Average",
@@ -487,12 +705,36 @@ export function AnalyticsPage() {
                 ? TrendingUp
                 : TrendingDown,
           },
-          { label: "Completion", value: formatPercent(summary.completion_rate), meta: `${summary.sessions_count} sessions`, icon: ArrowUpRight },
-          { label: "Review Coverage", value: formatPercent(summary.review_coverage_rate), meta: `${summary.scored_session_count} scored`, icon: BellRing },
-          { label: "Reps At Risk", value: String(summary.reps_at_risk), meta: `${summary.active_rep_count} active reps`, icon: AlertTriangle },
-          { label: "Overdue Drills", value: String(summary.overdue_assignments), meta: "Needs manager action", icon: Users },
+          {
+            label: "Completion",
+            value: formatPercent(summary.completion_rate),
+            meta: `${summary.sessions_count} sessions`,
+            icon: ArrowUpRight,
+          },
+          {
+            label: "Review Coverage",
+            value: formatPercent(summary.review_coverage_rate),
+            meta: `${summary.scored_session_count} scored`,
+            icon: BellRing,
+          },
+          {
+            label: "Reps At Risk",
+            value: String(summary.reps_at_risk),
+            meta: `${summary.active_rep_count} active reps`,
+            icon: AlertTriangle,
+          },
+          {
+            label: "Overdue Drills",
+            value: String(summary.overdue_assignments),
+            meta: "Needs manager action",
+            icon: Users,
+          },
         ].map((card) => (
-          <div key={card.label} className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl">
+          <motion.div
+            key={card.label}
+            variants={cardVariants}
+            className="rounded-[28px] border border-white/30 bg-white/40 p-5 shadow-xl shadow-black/5 backdrop-blur-2xl"
+          >
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">{card.label}</div>
@@ -503,29 +745,47 @@ export function AnalyticsPage() {
                 <card.icon className="h-5 w-5" />
               </div>
             </div>
-          </div>
+          </motion.div>
         ))}
-      </section>
+      </motion.section>
 
-      <section className="grid gap-6 xl:grid-cols-[1.35fr_0.65fr]">
-        <div className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_left,rgba(45,90,61,0.18),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[1.35fr_0.65fr]">
+        <motion.div
+          variants={cardVariants}
+          className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_left,rgba(45,90,61,0.18),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <div className="mb-5 flex items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold tracking-tight text-ink">Score Momentum</h2>
               <p className="mt-1 text-sm text-muted">Daily average team performance for the selected period.</p>
             </div>
-            <div className="rounded-full border border-white/35 bg-white/60 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-muted">
-              Median {benchmarks?.score_benchmarks.median?.toFixed(1) ?? "--"}
+            <div className="flex items-center gap-3">
+              <div
+                className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] ${positiveMomentum ? "border-accent/20 bg-accent-soft/60 text-accent" : "border-red-200 bg-red-50/70 text-red-700"}`}
+              >
+                {positiveMomentum ? (
+                  <TrendingUp className="h-3.5 w-3.5" />
+                ) : (
+                  <TrendingDown className="h-3.5 w-3.5" />
+                )}
+                {formatDelta(summary.team_average_delta_vs_previous_period)}
+              </div>
+              <div className="rounded-full border border-white/35 bg-white/60 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-muted">
+                Median {benchmarks?.score_benchmarks.median?.toFixed(1) ?? "--"}
+              </div>
             </div>
           </div>
-          {trend.length ? (
+          {trendComparison.length ? (
             <EChartSurface option={scoreTrendOption} height={340} />
           ) : (
             <EmptyState variant="empty" message="No score trend available yet." />
           )}
-        </div>
+        </motion.div>
 
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <div className="mb-5 flex items-center gap-2">
             <BellRing className="h-4 w-4 text-accent" />
             <h2 className="text-lg font-bold tracking-tight text-ink">Manager Alerts</h2>
@@ -535,6 +795,8 @@ export function AnalyticsPage() {
               data.alerts_preview.map((alert) => (
                 <button
                   key={alert.id}
+                  type="button"
+                  aria-label={`Open alert ${alert.title}`}
                   onClick={() => {
                     if (alert.session_id) openReplay(alert.session_id, alert.focus_turn_id ?? null);
                     else if (alert.rep_id) navigate(`/manager/reps/${alert.rep_id}/progress`);
@@ -556,51 +818,33 @@ export function AnalyticsPage() {
               <EmptyState variant="empty" message="No active alerts in this period." />
             )}
           </div>
-        </div>
-      </section>
+        </motion.div>
+      </motion.section>
 
-      <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-        <div className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_right,rgba(198,149,31,0.16),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+        <motion.div
+          variants={cardVariants}
+          className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_right,rgba(198,149,31,0.16),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <div className="mb-5 flex items-center gap-2">
-            <Radar className="h-4 w-4 text-accent" />
-            <h2 className="text-lg font-bold tracking-tight text-ink">Rep Risk Matrix</h2>
+            <Users className="h-4 w-4 text-accent" />
+            <h2 className="text-lg font-bold tracking-tight text-ink">Rep Risk Quadrant</h2>
           </div>
-          {data.rep_risk_matrix.length ? (
-            <>
-              <EChartSurface option={riskMatrixOption} height={300} />
-              <div className="mt-4 space-y-2">
-                {data.rep_risk_matrix.slice(0, 5).map((rep) => (
-                  <button
-                    key={rep.rep_id}
-                    onClick={() => {
-                      if (rep.session_id) openReplay(rep.session_id, rep.focus_turn_id ?? null);
-                      else navigate(`/manager/reps/${rep.rep_id}/progress`);
-                    }}
-                    className="flex w-full items-center justify-between rounded-2xl border border-white/25 bg-white/45 px-4 py-3 text-left transition hover:bg-white/65"
-                  >
-                    <div>
-                      <div className="text-sm font-semibold text-ink">{rep.rep_name}</div>
-                      <div className="mt-1 text-xs text-muted">Avg {rep.average_score.toFixed(1)} · Δ {formatDelta(rep.score_delta)} · volatility {rep.volatility.toFixed(1)}</div>
-                    </div>
-                    <span className="rounded-full bg-white/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-ink">
-                      {rep.risk_level}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </>
-          ) : (
-            <EmptyState variant="empty" message="No rep risk signals yet." />
-          )}
-        </div>
+          <RepRiskQuadrant reps={data.rep_risk_matrix} />
+        </motion.div>
 
-        <div className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_left,rgba(181,51,30,0.12),transparent_35%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <motion.div
+          variants={cardVariants}
+          className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_left,rgba(181,51,30,0.12),transparent_35%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <div className="mb-5 flex items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold tracking-tight text-ink">Score Distribution</h2>
               <p className="mt-1 text-sm text-muted">Where sessions are clustering across the scoring range.</p>
             </div>
             <button
+              type="button"
+              aria-label="Open session explorer"
               onClick={() => navigate("/manager/explorer")}
               className="rounded-full border border-white/35 bg-white/60 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-ink transition hover:bg-white/75"
             >
@@ -608,21 +852,42 @@ export function AnalyticsPage() {
             </button>
           </div>
           {histogram.length ? (
-            <EChartSurface option={distributionOption} height={340} />
+            <>
+              <EChartSurface option={distributionOption} height={300} />
+              <div className="mt-4 flex flex-wrap gap-3">
+                <div className="inline-flex items-center gap-2 rounded-full border border-white/35 bg-white/60 px-3 py-2 text-sm text-ink">
+                  <ScoreChip score={5.8} size="sm" />
+                  {repPerformanceBuckets.atRisk} reps at risk (&lt; 6.0)
+                </div>
+                <div className="inline-flex items-center gap-2 rounded-full border border-white/35 bg-white/60 px-3 py-2 text-sm text-ink">
+                  <ScoreChip score={7.0} size="sm" />
+                  {repPerformanceBuckets.onTarget} reps on target (6.0-7.5)
+                </div>
+                <div className="inline-flex items-center gap-2 rounded-full border border-white/35 bg-white/60 px-3 py-2 text-sm text-ink">
+                  <ScoreChip score={8.4} size="sm" />
+                  {repPerformanceBuckets.exceeding} reps exceeding (&gt; 7.5)
+                </div>
+              </div>
+            </>
           ) : (
             <EmptyState variant="empty" message="No scored sessions to plot yet." />
           )}
-        </div>
-      </section>
+        </motion.div>
+      </motion.section>
 
-      <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-        <div className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_center,rgba(45,90,61,0.12),transparent_40%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+        <motion.div
+          variants={cardVariants}
+          className="relative overflow-hidden rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_center,rgba(45,90,61,0.12),transparent_40%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold tracking-tight text-ink">Scenario Pressure Map</h2>
               <p className="mt-1 text-sm text-muted">Difficulty, pass rate, and average score side by side.</p>
             </div>
             <button
+              type="button"
+              aria-label="Open scenario intelligence page"
               onClick={() => navigate("/manager/scenarios")}
               className="rounded-full border border-white/35 bg-white/60 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-ink transition hover:bg-white/75"
             >
@@ -638,7 +903,9 @@ export function AnalyticsPage() {
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <div className="text-sm font-semibold text-ink">{scenario.scenario_name}</div>
-                    <div className="mt-1 text-xs text-muted">Difficulty {scenario.difficulty} · {scenario.session_count} sessions</div>
+                    <div className="mt-1 text-xs text-muted">
+                      Difficulty {scenario.difficulty} · {scenario.session_count} sessions
+                    </div>
                   </div>
                   <div className="grid gap-3 text-right sm:grid-cols-3 sm:text-left md:text-right">
                     <div>
@@ -656,10 +923,15 @@ export function AnalyticsPage() {
                   </div>
                 </div>
                 <div className="mt-3 h-2 rounded-full bg-accent-soft">
-                  <div className="h-full rounded-full bg-accent" style={{ width: `${Math.max(6, scenario.pass_rate * 100)}%` }} />
+                  <div
+                    className="h-full rounded-full bg-accent"
+                    style={{ width: `${Math.max(6, scenario.pass_rate * 100)}%` }}
+                  />
                 </div>
                 {scenario.sample_session_id ? (
                   <button
+                    type="button"
+                    aria-label={`Open evidence for ${scenario.scenario_name}`}
                     onClick={() => openReplay(scenario.sample_session_id ?? null, scenario.focus_turn_id ?? null)}
                     className="mt-3 rounded-full border border-white/35 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-ink transition hover:bg-white/85"
                   >
@@ -669,33 +941,23 @@ export function AnalyticsPage() {
               </div>
             ))}
           </div>
-        </div>
+        </motion.div>
 
-        <div className="space-y-6">
+        <motion.div variants={cardVariants} className="space-y-6">
           <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
-            <h2 className="text-lg font-bold tracking-tight text-ink">Weakest Categories</h2>
-            <div className="mt-4 space-y-3">
-              {data.weakest_categories.length ? (
-                data.weakest_categories.map((item) => (
-                  <button
-                    key={item.category}
-                    onClick={() => openReplay(item.session_id ?? null, item.focus_turn_id ?? null, item.category)}
-                    disabled={!item.session_id}
-                    className="w-full text-left disabled:cursor-default"
-                  >
-                    <div className="mb-1 flex items-center justify-between text-sm">
-                      <span className="font-semibold capitalize text-ink">{item.category.replace(/_/g, " ")}</span>
-                      <span className="text-muted">{item.average_score.toFixed(1)}</span>
-                    </div>
-                    <div className="h-2 rounded-full bg-accent-soft">
-                      <div className="h-full rounded-full bg-[linear-gradient(90deg,#b5331e_0%,#c6951f_52%,#2d5a3d_100%)]" style={{ width: `${Math.max(4, item.average_score * 10)}%` }} />
-                    </div>
-                  </button>
-                ))
-              ) : (
-                <EmptyState variant="empty" message="No category averages yet." />
-              )}
+            <div className="mb-4">
+              <h2 className="text-lg font-bold tracking-tight text-ink">Team Skill Heatmap</h2>
+              <p className="mt-1 text-sm text-muted">
+                Drill into rep-by-category performance and jump straight into a focused progress view.
+              </p>
             </div>
+            <TeamSkillHeatmap
+              managerId={managerId}
+              reps={data.rep_risk_matrix}
+              days={periodWindow.current.spanDays}
+              dateFrom={periodWindow.current.startInput}
+              dateTo={periodWindow.current.endInput}
+            />
           </div>
 
           <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
@@ -708,16 +970,21 @@ export function AnalyticsPage() {
               ].map((item) => (
                 <div key={item.label} className="rounded-2xl border border-white/25 bg-white/45 p-4 text-center">
                   <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">{item.label}</div>
-                  <div className="mt-2 text-2xl font-black tracking-tight text-ink">{typeof item.value === "number" ? item.value.toFixed(1) : "--"}</div>
+                  <div className="mt-2 text-2xl font-black tracking-tight text-ink">
+                    {typeof item.value === "number" ? item.value.toFixed(1) : "--"}
+                  </div>
                 </div>
               ))}
             </div>
           </div>
-        </div>
-      </section>
+        </motion.div>
+      </motion.section>
 
-      <section className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <div className="mb-4 flex items-center gap-2">
             <Users className="h-4 w-4 text-accent" />
             <h2 className="text-lg font-bold tracking-tight text-ink">Completion By Rep</h2>
@@ -727,9 +994,12 @@ export function AnalyticsPage() {
             data={teamAnalytics?.completion_rate_by_rep ?? []}
             emptyMessage="No assignment completion data in this window."
           />
-        </div>
+        </motion.div>
 
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <div className="mb-4 flex items-center gap-2">
             <Layers3 className="h-4 w-4 text-accent" />
             <h2 className="text-lg font-bold tracking-tight text-ink">Scenario Pass Leaderboard</h2>
@@ -739,11 +1009,14 @@ export function AnalyticsPage() {
             data={teamAnalytics?.scenario_pass_rates ?? []}
             emptyMessage="No scenario pass-rate samples in this window."
           />
-        </div>
-      </section>
+        </motion.div>
+      </motion.section>
 
-      <section className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-        <div className="rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_left,rgba(45,90,61,0.14),transparent_36%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+      <motion.section variants={cardVariants} className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-[radial-gradient(circle_at_top_left,rgba(45,90,61,0.14),transparent_36%),linear-gradient(180deg,rgba(255,255,255,0.62),rgba(250,246,241,0.52))] p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <div className="mb-5 flex items-center gap-2">
             <Database className="h-4 w-4 text-accent" />
             <h2 className="text-lg font-bold tracking-tight text-ink">Analytics Runtime</h2>
@@ -784,7 +1057,8 @@ export function AnalyticsPage() {
                 {operations?.cache.backend ?? "--"} · TTL {operations?.runtime.cache_ttl_seconds ?? 0}s
               </div>
               <div className="mt-1 text-xs text-muted">
-                hits {operations?.cache.hits ?? 0} · misses {operations?.cache.misses ?? 0} · writes {operations?.cache.writes ?? 0}
+                hits {operations?.cache.hits ?? 0} · misses {operations?.cache.misses ?? 0} · writes{" "}
+                {operations?.cache.writes ?? 0}
               </div>
             </div>
             <div className="rounded-2xl border border-white/25 bg-white/45 p-4">
@@ -793,7 +1067,8 @@ export function AnalyticsPage() {
                 warn {operations?.runtime.warn_ms ?? 0}ms · critical {operations?.runtime.critical_ms ?? 0}ms
               </div>
               <div className="mt-1 text-xs text-muted">
-                partitions {operations?.partitions.count ?? 0} · active manager reps {operations?.warehouse.manager_rep_count ?? 0}
+                partitions {operations?.partitions.count ?? 0} · active manager reps{" "}
+                {operations?.warehouse.manager_rep_count ?? 0}
               </div>
             </div>
           </div>
@@ -803,7 +1078,9 @@ export function AnalyticsPage() {
               <div key={run.id} className="rounded-2xl border border-white/25 bg-white/45 p-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-semibold text-ink">{run.scope_type} · {run.status}</div>
+                    <div className="text-sm font-semibold text-ink">
+                      {run.scope_type} · {run.status}
+                    </div>
                     <div className="mt-1 text-xs text-muted">
                       {run.started_at ? new Date(run.started_at).toLocaleString() : "--"}
                     </div>
@@ -816,9 +1093,12 @@ export function AnalyticsPage() {
               </div>
             ))}
           </div>
-        </div>
+        </motion.div>
 
-        <div className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl">
+        <motion.div
+          variants={cardVariants}
+          className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+        >
           <div className="mb-4 flex items-center gap-2">
             <Gauge className="h-4 w-4 text-accent" />
             <h2 className="text-lg font-bold tracking-tight text-ink">Metric Registry</h2>
@@ -828,8 +1108,8 @@ export function AnalyticsPage() {
             data={metricDefinitions}
             emptyMessage="No active metric definitions registered."
           />
-        </div>
-      </section>
+        </motion.div>
+      </motion.section>
     </motion.main>
   );
 }

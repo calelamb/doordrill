@@ -192,10 +192,30 @@ export async function fetchScenarios(): Promise<ScenarioSummary[]> {
   return requestJson<ScenarioSummary[]>("/scenarios", {}, { userId: auth.user.id, role: auth.user.role as "manager" | "admin" | "rep" });
 }
 
-export async function fetchManagerFeed(managerId: string): Promise<FeedItem[]> {
+export async function fetchManagerFeed(
+  managerId: string,
+  options: {
+    repId?: string;
+    scenarioId?: string;
+    reviewed?: boolean;
+    dateFrom?: string;
+    dateTo?: string;
+    limit?: number;
+  } = {}
+): Promise<FeedItem[]> {
+  const params = new URLSearchParams({
+    manager_id: managerId,
+    limit: String(options.limit ?? 100),
+  });
+  if (options.repId) params.set("rep_id", options.repId);
+  if (options.scenarioId) params.set("scenario_id", options.scenarioId);
+  if (typeof options.reviewed === "boolean") params.set("reviewed", String(options.reviewed));
+  if (options.dateFrom) params.set("date_from", new Date(`${options.dateFrom}T00:00:00`).toISOString());
+  if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
+
   const [feedBody, sessions, team, scenarios] = await Promise.all([
     requestJson<{ items: FeedItem[] }>(
-      `/manager/feed?manager_id=${encodeURIComponent(managerId)}`,
+      `/manager/feed?${params.toString()}`,
       {},
       { userId: managerId, role: "manager" }
     ),
@@ -446,9 +466,26 @@ export async function fetchAnalyticsMetricDefinitions(managerId: string): Promis
   return response.items ?? [];
 }
 
-export async function fetchRepProgress(managerId: string, repId: string): Promise<RepProgress> {
+export async function fetchRepProgress(
+  managerId: string,
+  repId: string,
+  options: {
+    days?: number;
+    limit?: number;
+    dateFrom?: string;
+    dateTo?: string;
+  } = {}
+): Promise<RepProgress> {
+  const params = new URLSearchParams({
+    manager_id: managerId,
+    days: String(options.days ?? 30),
+    limit: String(options.limit ?? 30),
+  });
+  if (options.dateFrom) params.set("date_from", new Date(`${options.dateFrom}T00:00:00`).toISOString());
+  if (options.dateTo) params.set("date_to", new Date(`${options.dateTo}T23:59:59`).toISOString());
+
   return requestJson<RepProgress>(
-    `/manager/analytics/reps/${encodeURIComponent(repId)}?manager_id=${encodeURIComponent(managerId)}`,
+    `/manager/analytics/reps/${encodeURIComponent(repId)}?${params.toString()}`,
     {},
     { userId: managerId, role: "manager" }
   );

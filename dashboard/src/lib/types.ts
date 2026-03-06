@@ -161,6 +161,8 @@ export type RepProgress = {
   rep_id: string;
   rep_name?: string;
   days?: number;
+  date_from?: string;
+  date_to?: string;
   session_count: number;
   scored_session_count: number;
   average_score: number | null;

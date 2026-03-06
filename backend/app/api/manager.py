@@ -503,6 +503,8 @@ def get_rep_progress(
     manager_id: str = Query(...),
     days: int = Query(default=30, ge=1, le=365),
     limit: int = Query(default=30, ge=1, le=100),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
     actor: Actor = Depends(require_manager),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -515,7 +517,17 @@ def get_rep_progress(
     if manager.org_id != rep.org_id:
         raise HTTPException(status_code=403, detail="cross-organization access denied")
 
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    current_end = date_to or datetime.now(timezone.utc)
+    if current_end.tzinfo is None:
+        current_end = current_end.replace(tzinfo=timezone.utc)
+    current_end = current_end.replace(microsecond=0)
+
+    if date_from is not None:
+        current_start = date_from if date_from.tzinfo else date_from.replace(tzinfo=timezone.utc)
+    else:
+        current_start = current_end - timedelta(days=days)
+    current_start = current_start.replace(microsecond=0)
+
     stmt = (
         select(
             DrillSession.id.label("session_id"),
@@ -528,9 +540,10 @@ def get_rep_progress(
         )
         .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
         .join(Scenario, Scenario.id == DrillSession.scenario_id)
+        .where(DrillSession.started_at >= current_start)
+        .where(DrillSession.started_at <= current_end)
         .where(DrillSession.rep_id == rep_id)
         .order_by(DrillSession.started_at.desc())
-        .limit(max(limit, 100))
     )
     rows = db.execute(stmt).mappings().all()
     scores = [float(row["overall_score"]) for row in rows if row["overall_score"] is not None]
@@ -539,11 +552,6 @@ def get_rep_progress(
 
     category_samples: dict[str, list[float]] = defaultdict(list)
     for row in rows:
-        started_at = row["started_at"]
-        if started_at is not None and started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=timezone.utc)
-        if started_at is None or started_at < since:
-            continue
         category_scores = row["category_scores"] or {}
         for raw_key, normalized in RUBRIC_CATEGORY_KEYS.items():
             if raw_key not in category_scores:
@@ -563,6 +571,8 @@ def get_rep_progress(
         "rep_id": rep_id,
         "rep_name": rep.name,
         "days": days,
+        "date_from": current_start.isoformat(),
+        "date_to": current_end.isoformat(),
         "session_count": len(rows),
         "scored_session_count": len(scores),
         "average_score": avg_score,
