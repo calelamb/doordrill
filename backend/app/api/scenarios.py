@@ -6,9 +6,11 @@ from app.core.auth import Actor, require_manager, require_rep_or_manager
 from app.db.session import get_db
 from app.models.scenario import Scenario
 from app.models.user import User
-from app.schemas.scenario import ScenarioCreateRequest, ScenarioResponse, ScenarioUpdateRequest
+from app.schemas.scenario import ObjectionTypeResponse, ScenarioCreateRequest, ScenarioResponse, ScenarioUpdateRequest
+from app.services.objection_taxonomy_service import ObjectionTaxonomyService
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
+taxonomy_service = ObjectionTaxonomyService()
 
 
 def _get_user_or_404(db: Session, user_id: str) -> User:
@@ -34,6 +36,17 @@ def list_scenarios(
         _ensure_same_org(actor, target_org)
         return db.scalars(select(Scenario).where(Scenario.org_id == target_org).order_by(Scenario.created_at.desc())).all()
     return db.scalars(select(Scenario).order_by(Scenario.created_at.desc())).all()
+
+
+@router.get("/objection-types", response_model=list[ObjectionTypeResponse])
+def list_objection_types(
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+    industry: str | None = Query(default=None),
+) -> list[ObjectionTypeResponse]:
+    if taxonomy_service.ensure_seed_data(db):
+        db.commit()
+    return taxonomy_service.list_types(db, org_id=actor.org_id, industry=industry)
 
 
 @router.get("/{scenario_id}", response_model=ScenarioResponse)

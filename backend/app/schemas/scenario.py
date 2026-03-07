@@ -37,3 +37,19 @@ class ScenarioResponse(BaseModel):
     created_by_id: str | None
 
     model_config = {"from_attributes": True}
+
+
+class ObjectionTypeResponse(BaseModel):
+    id: str
+    org_id: str | None
+    tag: str
+    display_name: str
+    category: str
+    difficulty_weight: float
+    industry: str | None
+    typical_phrases: list[str]
+    resolution_techniques: list[str]
+    version: str
+    active: bool
+
+    model_config = {"from_attributes": True}

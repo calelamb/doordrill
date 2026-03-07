@@ -12,6 +12,7 @@ from app.models.postprocess_run import PostprocessRun
 from app.services.grading_service import GradingService
 from app.services.notification_service import NotificationService
 from app.services.transcript_cleanup_service import TranscriptCleanupService
+from app.services.turn_enrichment_service import TurnEnrichmentService
 from app.tasks.celery_app import get_celery_app
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ class SessionPostprocessService:
         self.cleanup_service = TranscriptCleanupService()
         self.grading_service = GradingService()
         self.notification_service = NotificationService()
+        self.turn_enrichment_service = TurnEnrichmentService()
 
     def _ensure_run_row(self, db: Session, *, session_id: str, task_type: str) -> PostprocessRun:
         row = db.scalar(
@@ -77,7 +79,8 @@ class SessionPostprocessService:
                 payload = {"artifact_id": result.id}
             elif task_type == "grade":
                 result = await self.grading_service.grade_session(db, session_id=session_id)
-                payload = {"scorecard_id": result.id}
+                enrichment = self.turn_enrichment_service.enrich_session(db, session_id)
+                payload = {"scorecard_id": result.id, "turn_enrichment": enrichment}
             else:
                 result = await self.notification_service.notify_manager_session_completed(db, session_id)
                 payload = {"notification": result}

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -82,6 +82,24 @@ class SessionTurn(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     objection_tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    emotion_before: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    emotion_after: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    emotion_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    resistance_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    objection_pressure: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active_objections: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=list)
+    queued_objections: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=list)
+    mb_tone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    mb_sentence_length: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    mb_behaviors: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=list)
+    mb_interruption_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    mb_realism_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mb_opening_pause_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mb_total_pause_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    behavioral_signals: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=list)
+    was_graded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    evidence_for_categories: Mapped[list[str] | None] = mapped_column(JSON, nullable=True, default=list)
+    is_high_quality: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     session: Mapped[Session] = relationship(back_populates="turns")
 
