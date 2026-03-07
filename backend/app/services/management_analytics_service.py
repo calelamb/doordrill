@@ -17,9 +17,11 @@ from app.models.analytics import (
     AnalyticsFactSession,
 )
 from app.models.assignment import Assignment
+from app.models.grading import GradingRun
 from app.models.manager_action import ManagerActionLog
 from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
+from app.models.session import Session as DrillSession
 from app.models.session import SessionTurn
 from app.models.types import AssignmentStatus
 from app.models.user import User
@@ -33,6 +35,7 @@ RUBRIC_CATEGORY_KEYS = {
     "closing_technique": "closing",
     "professionalism": "professionalism",
 }
+DISAGREEMENT_THRESHOLD = 2.0
 
 
 @dataclass
@@ -631,6 +634,63 @@ class ManagementAnalyticsService:
         alerts.sort(key=lambda item: (_severity_rank(item["severity"]), item["occurred_at"]), reverse=True)
         return alerts[:24]
 
+    def _grading_disagreement_alerts(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        date_from: datetime,
+        date_to: datetime,
+    ) -> list[dict[str, Any]]:
+        rows = db.scalars(
+            select(AnalyticsFactManagerCalibration)
+            .where(
+                AnalyticsFactManagerCalibration.manager_id == manager_id,
+                AnalyticsFactManagerCalibration.reviewed_at >= date_from,
+                AnalyticsFactManagerCalibration.reviewed_at <= date_to,
+            )
+            .order_by(AnalyticsFactManagerCalibration.reviewed_at.desc())
+        ).all()
+
+        alerts: list[dict[str, Any]] = []
+        for row in rows:
+            delta = abs(float(row.delta_score or 0.0))
+            if row.override_score is None or row.ai_score is None or delta < DISAGREEMENT_THRESHOLD:
+                continue
+            source_session = db.get(DrillSession, row.session_id)
+            rep = db.get(User, source_session.rep_id) if source_session else None
+            scenario = db.get(Scenario, source_session.scenario_id) if source_session else None
+            latest_run = db.scalar(
+                select(GradingRun)
+                .where(GradingRun.session_id == row.session_id)
+                .order_by(GradingRun.completed_at.desc(), GradingRun.created_at.desc())
+            )
+            alerts.append(
+                {
+                    "id": f"grading-disagreement-{row.review_id}",
+                    "severity": "high" if delta >= 3.5 else "medium",
+                    "kind": "grading_disagreement",
+                    "title": f"{(rep.name if rep else 'Rep')} has a grading disagreement",
+                    "description": f"AI score {row.ai_score:.1f} vs override {row.override_score:.1f} ({delta:.1f} point delta).",
+                    "occurred_at": row.reviewed_at.isoformat() if row.reviewed_at else datetime.now(timezone.utc).isoformat(),
+                    "rep_id": rep.id if rep else None,
+                    "rep_name": rep.name if rep else None,
+                    "session_id": row.session_id,
+                    "scenario_id": scenario.id if scenario else None,
+                    "focus_turn_id": None,
+                    "baseline_value": row.ai_score,
+                    "observed_value": row.override_score,
+                    "delta": round(delta, 2),
+                    "metadata": {
+                        "review_id": row.review_id,
+                        "reviewer_id": row.reviewer_id,
+                        "prompt_version_id": latest_run.prompt_version_id if latest_run else None,
+                        "scorecard_id": row.scorecard_id,
+                    },
+                }
+            )
+        return alerts
+
     def get_command_center(
         self,
         db: Session,
@@ -755,7 +815,17 @@ class ManagementAnalyticsService:
             or 0
         )
         alerts = self._build_alerts(sessions, rep_risk_matrix, scenario_rows, overdue_assignments=int(overdue_assignments))
+        alerts.extend(
+            self._grading_disagreement_alerts(
+                db,
+                manager_id=manager_id,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        )
         alerts = self._apply_acknowledged_alerts(db, manager_id=manager_id, alerts=alerts)
+        alerts.sort(key=lambda item: (_severity_rank(item["severity"]), item["occurred_at"]), reverse=True)
+        alerts = alerts[:24]
 
         trend = []
         for key in sorted(trend_buckets):

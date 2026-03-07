@@ -7,6 +7,7 @@ from app.models.scenario import Scenario
 from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.services.conversation_orchestrator import PromptBuilder
 from app.services.grading_service import GradingPromptBuilder
+from app.services.objection_taxonomy_service import ObjectionTaxonomyService
 
 PHASE_ONE_STAGES = [
     "door_knock",
@@ -173,6 +174,12 @@ def _seed_prompt_versions(db) -> None:
         version="grading_v1",
         content=GradingPromptBuilder.template_blueprint(),
     )
+    _upsert_prompt_version(
+        db,
+        prompt_type="grading_v2",
+        version="1.0.0",
+        content=GradingPromptBuilder.template_blueprint(),
+    )
 
 
 def _seed_phase_one_scenarios(db) -> None:
@@ -211,6 +218,7 @@ def init_db() -> None:
     db = SessionLocal()
     try:
         AnalyticsRefreshService().ensure_metric_definitions(db)
+        ObjectionTaxonomyService().ensure_seed_data(db)
         _seed_prompt_versions(db)
         _seed_phase_one_scenarios(db)
         db.commit()

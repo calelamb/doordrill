@@ -9,6 +9,7 @@ from app.models.base import Base, TimestampMixin
 from app.models.types import ReviewReason
 
 if TYPE_CHECKING:
+    from app.models.grading import GradingRun
     from app.models.session import Session
     from app.models.user import User
 
@@ -23,6 +24,7 @@ class Scorecard(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
     overall_score: Mapped[float] = mapped_column(nullable=False)
+    scorecard_schema_version: Mapped[str] = mapped_column(String(16), nullable=False, default="v1", server_default="v1")
     category_scores: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     highlights: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     ai_summary: Mapped[str] = mapped_column(Text, nullable=False)
@@ -31,6 +33,7 @@ class Scorecard(Base, TimestampMixin):
 
     session: Mapped["Session"] = relationship(back_populates="scorecard")
     reviews: Mapped[list["ManagerReview"]] = relationship(back_populates="scorecard", cascade="all, delete-orphan")
+    grading_runs: Mapped[list["GradingRun"]] = relationship(back_populates="scorecard")
     coaching_notes: Mapped[list["ManagerCoachingNote"]] = relationship(
         back_populates="scorecard",
         cascade="all, delete-orphan",

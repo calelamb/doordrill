@@ -164,6 +164,7 @@ def get_session_with_feedback(
             {
                 "id": scorecard.id,
                 "overall_score": scorecard.overall_score,
+                "scorecard_schema_version": scorecard.scorecard_schema_version,
                 "category_scores": scorecard.category_scores,
                 "highlights": scorecard.highlights,
                 "ai_summary": scorecard.ai_summary,

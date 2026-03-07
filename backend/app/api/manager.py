@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_manager, resolve_ws_actor_with_query
 from app.db.session import get_db
-from app.models.analytics import AnalyticsFactAlert
+from app.models.analytics import AnalyticsFactAlert, AnalyticsFactManagerCalibration
 from app.models.assignment import Assignment
+from app.models.grading import GradingRun
 from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
@@ -27,7 +28,7 @@ from app.schemas.adaptive_training import (
     AdaptiveTrainingPlanResponse,
 )
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
-from app.schemas.manager_analytics import RepRiskDetailResponse
+from app.schemas.manager_analytics import CalibrationAnalyticsResponse, RepRiskDetailResponse
 from app.schemas.notification import NotificationDeliveryResponse
 from app.schemas.manager_ai import (
     ManagerChatRequest,
@@ -55,7 +56,7 @@ from app.schemas.session import (
     SessionReplayResponse,
 )
 from app.services.adaptive_training_service import AdaptiveTrainingService
-from app.services.manager_action_service import ManagerActionService
+from app.services.manager_action_service import DISAGREEMENT_THRESHOLD, ManagerActionService
 from app.services.manager_ai_coaching_service import (
     AiCoachingDataUnavailableError,
     AiCoachingUnavailableError,
@@ -1127,6 +1128,73 @@ def get_coaching_analytics(
     )
 
 
+@router.get("/analytics/calibration", response_model=CalibrationAnalyticsResponse)
+def get_calibration_analytics(
+    manager_id: str = Query(...),
+    period: str = Query(default="30"),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> CalibrationAnalyticsResponse:
+    if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
+        raise HTTPException(status_code=403, detail="manager can only access their own analytics")
+
+    manager = _get_user_or_404(db, manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    current_start, current_end, _, _ = _resolve_period_bounds(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    rows = db.scalars(
+        select(AnalyticsFactManagerCalibration)
+        .where(AnalyticsFactManagerCalibration.manager_id == manager_id)
+        .order_by(AnalyticsFactManagerCalibration.reviewed_at.desc())
+    ).all()
+    items = []
+    for row in rows:
+        reviewed_at = row.reviewed_at
+        if reviewed_at is None:
+            continue
+        if reviewed_at.tzinfo is None:
+            reviewed_at = reviewed_at.replace(tzinfo=timezone.utc)
+        if row.override_score is None or row.ai_score is None or abs(float(row.delta_score or 0.0)) < DISAGREEMENT_THRESHOLD:
+            continue
+        source_session = db.scalar(select(DrillSession).where(DrillSession.id == row.session_id))
+        rep = _get_user_or_404(db, source_session.rep_id, "rep") if source_session is not None else None
+        grading_run = db.scalar(
+            select(GradingRun)
+            .where(GradingRun.session_id == row.session_id)
+            .order_by(GradingRun.completed_at.desc(), GradingRun.created_at.desc())
+        )
+        items.append(
+            {
+                "id": f"grading-disagreement-{row.review_id}",
+                "review_id": row.review_id,
+                "scorecard_id": row.scorecard_id,
+                "session_id": row.session_id,
+                "rep_id": source_session.rep_id if source_session else None,
+                "rep_name": rep.name if rep else None,
+                "prompt_version_id": grading_run.prompt_version_id if grading_run else None,
+                "ai_score": row.ai_score,
+                "override_score": row.override_score,
+                "delta": row.delta_score,
+                "severity": "high" if abs(float(row.delta_score or 0.0)) >= 3.5 else "medium",
+                "occurred_at": reviewed_at.isoformat(),
+            }
+        )
+
+    return CalibrationAnalyticsResponse(
+        manager_id=manager_id,
+        period=period,
+        date_from=current_start.isoformat(),
+        date_to=current_end.isoformat(),
+        disagreement_threshold=DISAGREEMENT_THRESHOLD,
+        items=items,
+    )
+
+
 @router.get("/analytics/rep-risk-detail", response_model=RepRiskDetailResponse)
 def get_rep_risk_detail(
     manager_id: str = Query(...),
@@ -1729,6 +1797,7 @@ def get_manager_session_detail(
             {
                 "id": scorecard.id,
                 "overall_score": scorecard.overall_score,
+                "scorecard_schema_version": scorecard.scorecard_schema_version,
                 "category_scores": scorecard.category_scores,
                 "highlights": scorecard.highlights,
                 "ai_summary": scorecard.ai_summary,
@@ -1919,6 +1988,7 @@ def get_session_replay(
             {
                 "id": scorecard.id,
                 "overall_score": scorecard.overall_score,
+                "scorecard_schema_version": scorecard.scorecard_schema_version,
                 "category_scores": scorecard.category_scores,
                 "highlights": scorecard.highlights,
                 "ai_summary": scorecard.ai_summary,
@@ -1962,29 +2032,14 @@ def override_scorecard(
     if payload.reason_code not in {reason.value for reason in ReviewReason}:
         raise HTTPException(status_code=400, detail="invalid reason_code")
 
-    review = ManagerReview(
-        scorecard_id=scorecard_id,
-        reviewer_id=payload.reviewer_id,
-        reviewed_at=datetime.now(timezone.utc),
+    review = action_service.submit_review(
+        db,
+        reviewer=reviewer,
+        scorecard=scorecard,
+        source_session=source_session,
         reason_code=ReviewReason(payload.reason_code),
         override_score=payload.override_score,
         notes=payload.notes,
-    )
-    db.add(review)
-    db.flush()
-
-    action_service.log(
-        db,
-        manager_id=reviewer.id,
-        action_type="scorecard.reviewed",
-        target_type="scorecard",
-        target_id=scorecard.id,
-        summary="Manager reviewed or overrode scorecard",
-        payload={
-            "reason_code": payload.reason_code,
-            "override_score": payload.override_score,
-            "has_notes": bool(payload.notes),
-        },
     )
 
     analytics_refresh_service.refresh_session(db, session_id=source_session.id)

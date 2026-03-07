@@ -1,9 +1,13 @@
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, Index, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.grading import GradingRun
 
 
 def _uuid() -> str:
@@ -22,3 +26,5 @@ class PromptVersion(Base, TimestampMixin):
     version: Mapped[str] = mapped_column(String(64), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    grading_runs: Mapped[list["GradingRun"]] = relationship(back_populates="prompt_version")

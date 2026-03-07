@@ -10,6 +10,16 @@ class ScorecardCategoryGrade(BaseModel):
     evidence_turn_ids: list[str] = Field(default_factory=list)
 
 
+class CategoryScoreV2(BaseModel):
+    score: float = Field(ge=0, le=10)
+    confidence: float = Field(ge=0, le=1)
+    rationale_summary: str = Field(min_length=1, max_length=80)
+    rationale_detail: str = Field(min_length=1, max_length=400)
+    evidence_turn_ids: list[str] = Field(default_factory=list)
+    behavioral_signals: list[str] = Field(default_factory=list)
+    improvement_target: str | None = Field(default=None, max_length=60)
+
+
 class ScorecardHighlight(BaseModel):
     type: Literal["strong", "improve"]
     note: str = Field(min_length=1, max_length=240)
@@ -23,6 +33,16 @@ class StructuredScorecardPayload(BaseModel):
     ai_summary: str = Field(min_length=1, max_length=400)
     evidence_turn_ids: list[str] = Field(default_factory=list)
     weakness_tags: list[str] = Field(default_factory=list)
+
+
+class StructuredScorecardPayloadV2(BaseModel):
+    category_scores: dict[str, CategoryScoreV2]
+    overall_score: float = Field(ge=0, le=10)
+    highlights: list[ScorecardHighlight] = Field(min_length=2, max_length=4)
+    ai_summary: str = Field(min_length=1, max_length=400)
+    weakness_tags: list[str] = Field(default_factory=list)
+    evidence_quality: Literal["strong", "moderate", "weak"]
+    session_complexity: int = Field(ge=1, le=5)
 
 
 class ScorecardOverrideRequest(BaseModel):
@@ -62,6 +82,7 @@ class ScorecardResponse(BaseModel):
     id: str
     session_id: str
     overall_score: float
+    scorecard_schema_version: str = "v1"
     category_scores: dict
     highlights: list[dict]
     ai_summary: str

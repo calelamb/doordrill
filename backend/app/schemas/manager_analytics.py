@@ -32,3 +32,27 @@ class RepRiskDetailResponse(BaseModel):
     reps: list[RepRiskDetail] = Field(default_factory=list)
     team_avg_score: float | None = None
     team_category_averages: dict[str, float] = Field(default_factory=dict)
+
+
+class CalibrationEvent(BaseModel):
+    id: str
+    review_id: str | None = None
+    scorecard_id: str | None = None
+    session_id: str | None = None
+    rep_id: str | None = None
+    rep_name: str | None = None
+    prompt_version_id: str | None = None
+    ai_score: float | None = None
+    override_score: float | None = None
+    delta: float | None = None
+    severity: str
+    occurred_at: str | None = None
+
+
+class CalibrationAnalyticsResponse(BaseModel):
+    manager_id: str
+    period: str
+    date_from: str
+    date_to: str
+    disagreement_threshold: float
+    items: list[CalibrationEvent] = Field(default_factory=list)

@@ -434,6 +434,8 @@ class AdaptiveTrainingService:
         }
 
     def _bounded_score(self, value: Any, *, fallback: float) -> float:
+        if isinstance(value, dict):
+            value = value.get("score")
         try:
             return self._clamp_10(float(value))
         except (TypeError, ValueError):
