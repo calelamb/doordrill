@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
-import { BookOpenText, MessageSquareQuote, RefreshCcw, Scale, Sparkles, TrendingUp } from "lucide-react";
+import { AlertTriangle, BookOpenText, ChevronDown, ChevronUp, MessageSquareQuote, RefreshCcw, Scale, Sparkles, TrendingUp } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -15,9 +15,9 @@ import {
 import { ChartSkeleton } from "../components/shared/ChartSkeleton";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
-import { fetchManagerCoachingAnalytics, fetchTeamCoachingSummary } from "../lib/api";
+import { fetchManagerCoachingAnalytics, fetchTeamCoachingSummary, fetchWeeklyTeamBriefing } from "../lib/api";
 import { cardVariants, pageVariants } from "../lib/motion";
-import type { CoachingAnalyticsResponse, TeamCoachingSummaryResponse } from "../lib/types";
+import type { CoachingAnalyticsResponse, TeamCoachingSummaryResponse, WeeklyTeamBriefingResponse } from "../lib/types";
 
 const PERIOD_OPTIONS = [
   { key: "7", label: "7D" },
@@ -82,6 +82,26 @@ function CoachingLabSkeleton() {
   );
 }
 
+function WeeklyBriefingSkeleton() {
+  return (
+    <div className="space-y-4">
+      <ChartSkeleton heightClass="h-5" className="max-w-[220px]" />
+      <ChartSkeleton heightClass="h-16" className="rounded-[28px]" />
+      <div className="grid gap-4 md:grid-cols-[1.2fr_0.8fr]">
+        <ChartSkeleton heightClass="h-40" className="rounded-[28px]" />
+        <ChartSkeleton heightClass="h-40" className="rounded-[28px]" />
+      </div>
+    </div>
+  );
+}
+
+function isEmptyDataError(message: string | null) {
+  if (!message) {
+    return false;
+  }
+  return message.toLowerCase().includes("no scored sessions") || message.toLowerCase().includes("no reps");
+}
+
 export function CoachingLabPage() {
   const navigate = useNavigate();
   const auth = getValidStoredAuth();
@@ -92,10 +112,15 @@ export function CoachingLabPage() {
   const [summary, setSummary] = useState<TeamCoachingSummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [weeklyBriefing, setWeeklyBriefing] = useState<WeeklyTeamBriefingResponse | null>(null);
+  const [weeklyBriefingLoading, setWeeklyBriefingLoading] = useState(true);
+  const [weeklyBriefingError, setWeeklyBriefingError] = useState<string | null>(null);
+  const [weeklyBriefingExpanded, setWeeklyBriefingExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const analyticsRequestRef = useRef(0);
   const summaryRequestRef = useRef(0);
+  const weeklyBriefingRequestRef = useRef(0);
 
   function openReplay(sessionId?: string, focusTurnId?: string | null) {
     if (!sessionId) {
@@ -136,12 +161,42 @@ export function CoachingLabPage() {
     }
   }, [managerId, navigate, period]);
 
+  const loadWeeklyBriefing = useCallback(async () => {
+    if (!managerId) return;
+    const requestId = ++weeklyBriefingRequestRef.current;
+    setWeeklyBriefingLoading(true);
+    setWeeklyBriefingError(null);
+    try {
+      const response = await fetchWeeklyTeamBriefing(managerId);
+      if (weeklyBriefingRequestRef.current !== requestId) {
+        return;
+      }
+      setWeeklyBriefing(response);
+    } catch (loadError) {
+      if (isAuthError(loadError)) {
+        clearStoredAuth();
+        navigate("/login", { replace: true });
+        return;
+      }
+      if (weeklyBriefingRequestRef.current !== requestId) {
+        return;
+      }
+      setWeeklyBriefing(null);
+      setWeeklyBriefingError(loadError instanceof Error ? loadError.message : "Failed to load weekly briefing");
+    } finally {
+      if (weeklyBriefingRequestRef.current === requestId) {
+        setWeeklyBriefingLoading(false);
+      }
+    }
+  }, [managerId, navigate]);
+
   const loadData = useCallback(async () => {
     if (!managerId) return;
     const requestId = ++analyticsRequestRef.current;
     setLoading(true);
     setError(null);
     void loadSummary();
+    void loadWeeklyBriefing();
     try {
       const [result] = await Promise.allSettled([
         fetchManagerCoachingAnalytics(managerId, { period }),
@@ -171,7 +226,7 @@ export function CoachingLabPage() {
         setLoading(false);
       }
     }
-  }, [loadSummary, managerId, navigate, period]);
+  }, [loadSummary, loadWeeklyBriefing, managerId, navigate, period]);
 
   useEffect(() => {
     void loadData();
@@ -236,6 +291,167 @@ export function CoachingLabPage() {
           ))}
         </div>
       </motion.header>
+
+      <motion.section
+        variants={cardVariants}
+        className="rounded-[36px] border border-white/30 bg-white/45 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+      >
+        <div className="flex flex-col gap-4 border-b border-white/20 pb-5 lg:flex-row lg:items-start lg:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-accent/10 text-accent">
+              <Sparkles className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Weekly Briefing</div>
+              <h2 className="mt-2 text-2xl font-black tracking-tight text-ink">Monday-morning team readout</h2>
+              <p className="mt-2 text-sm text-muted">
+                Team pulse, standout rep, huddle angle, and action items from the last 7 days.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="Toggle huddle topic details"
+              onClick={() => setWeeklyBriefingExpanded((current) => !current)}
+              className="inline-flex items-center gap-2 rounded-xl border border-white/35 bg-white/60 px-3 py-2 text-sm font-medium text-ink transition hover:bg-white/80"
+            >
+              Huddle topic
+              {weeklyBriefingExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            </button>
+            <button
+              type="button"
+              aria-label="Refresh weekly team briefing"
+              onClick={() => void loadWeeklyBriefing()}
+              disabled={weeklyBriefingLoading}
+              className="inline-flex items-center gap-2 rounded-xl border border-white/35 bg-white/60 px-3 py-2 text-sm font-medium text-ink transition hover:bg-white/80 disabled:opacity-60"
+            >
+              <RefreshCcw className={`h-4 w-4 ${weeklyBriefingLoading ? "animate-spin" : ""}`} />
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-6">
+          {weeklyBriefingLoading ? <WeeklyBriefingSkeleton /> : null}
+
+          {!weeklyBriefingLoading && weeklyBriefingError && isEmptyDataError(weeklyBriefingError) ? (
+            <EmptyState variant="empty" message="No weekly team briefing is available yet." />
+          ) : null}
+
+          {!weeklyBriefingLoading && weeklyBriefingError && !isEmptyDataError(weeklyBriefingError) ? (
+            <div className="rounded-[28px] border border-error/15 bg-error/[0.06] px-5 py-5 text-sm text-error">
+              {weeklyBriefingError}
+            </div>
+          ) : null}
+
+          {!weeklyBriefingLoading && !weeklyBriefingError && weeklyBriefing ? (
+            <div className="space-y-5">
+              <div className="rounded-[28px] border border-white/30 bg-white/60 p-5">
+                <p className="text-lg font-semibold leading-8 text-ink">{weeklyBriefing.team_pulse}</p>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+                <div className="space-y-4 rounded-[28px] border border-white/30 bg-white/55 p-5">
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Standout Rep</div>
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                      <span className="rounded-full bg-accent px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-white">
+                        {weeklyBriefing.standout_rep.name}
+                      </span>
+                      <p className="text-sm leading-6 text-ink">{weeklyBriefing.standout_rep.why}</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Needs Attention</div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {weeklyBriefing.needs_attention.length ? (
+                        weeklyBriefing.needs_attention.map((item) => (
+                          <div
+                            key={item.name}
+                            className="rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-900"
+                          >
+                            <div className="flex items-center gap-2 font-semibold">
+                              <AlertTriangle className="h-4 w-4" />
+                              {item.name}
+                            </div>
+                            <p className="mt-2 leading-6">{item.concern}</p>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-2xl border border-white/30 bg-white/60 px-4 py-3 text-sm text-muted">
+                          No reps are currently flagged for immediate attention.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-4 rounded-[28px] border border-white/30 bg-white/55 p-5">
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Shared Weakness</div>
+                    <div className="mt-3 flex items-center justify-between gap-3">
+                      <h3 className="text-lg font-bold tracking-tight text-ink">{weeklyBriefing.shared_weakness.skill}</h3>
+                      <span className="rounded-full border border-white/35 bg-white/75 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-ink">
+                        {weeklyBriefing.shared_weakness.team_average.toFixed(1)}/10
+                      </span>
+                    </div>
+                    <div className="mt-4 h-3 overflow-hidden rounded-full bg-white/70">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-amber-500 to-accent"
+                        style={{ width: `${Math.max(8, Math.min(100, (weeklyBriefing.shared_weakness.team_average / 10) * 100))}%` }}
+                      />
+                    </div>
+                    <p className="mt-3 text-sm leading-6 text-ink">{weeklyBriefing.shared_weakness.note}</p>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/30 bg-white/70 p-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Action Items</div>
+                    <div className="mt-3 space-y-3">
+                      {weeklyBriefing.manager_action_items.map((item) => (
+                        <label key={item} className="flex items-start gap-3 text-sm text-ink">
+                          <input type="checkbox" aria-label={item} className="mt-1 h-4 w-4 rounded border-white/40 accent-accent" />
+                          <span className="leading-6">{item}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="overflow-hidden rounded-[28px] border border-white/30 bg-white/55">
+                <button
+                  type="button"
+                  aria-label="Toggle weekly huddle topic"
+                  onClick={() => setWeeklyBriefingExpanded((current) => !current)}
+                  className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left"
+                >
+                  <div>
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Huddle Topic</div>
+                    <h3 className="mt-2 text-lg font-bold tracking-tight text-ink">{weeklyBriefing.huddle_topic.topic}</h3>
+                  </div>
+                  {weeklyBriefingExpanded ? <ChevronUp className="h-5 w-5 text-muted" /> : <ChevronDown className="h-5 w-5 text-muted" />}
+                </button>
+
+                {weeklyBriefingExpanded ? (
+                  <div className="border-t border-white/25 px-5 py-4">
+                    <ul className="space-y-3">
+                      {weeklyBriefing.huddle_topic.suggested_talking_points.map((point) => (
+                        <li key={point} className="flex items-start gap-3 text-sm leading-6 text-ink">
+                          <span className="mt-2 h-2 w-2 rounded-full bg-accent" />
+                          <span>{point}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </motion.section>
 
       <motion.section
         variants={cardVariants}

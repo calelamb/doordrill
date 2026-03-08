@@ -12,6 +12,7 @@ import {
   ReferenceLine,
 } from "recharts";
 
+import { OneOnOnePrepCard } from "../components/OneOnOnePrepCard";
 import { RepRadarChart } from "../components/RepRadarChart";
 import { ChartSkeleton } from "../components/shared/ChartSkeleton";
 import { EmptyState } from "../components/shared/EmptyState";
@@ -102,6 +103,12 @@ function volatilityLabel(value: number): string {
   return "high";
 }
 
+function formatAdaptiveSkillLabel(skill: string): string {
+  return skill
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 function InsightSkeleton() {
   return (
     <div className="space-y-4">
@@ -176,6 +183,7 @@ export function RepProgressPage() {
   const [insightLoading, setInsightLoading] = useState(true);
   const [insightError, setInsightError] = useState<string | null>(null);
   const [copiedScript, setCopiedScript] = useState(false);
+  const [prepOpen, setPrepOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const coreRequestRef = useRef(0);
@@ -442,6 +450,64 @@ export function RepProgressPage() {
     [insight]
   );
 
+  const adaptiveTrajectoryNodes = useMemo(() => {
+    if (!insight?.adaptive_skill_profile?.length) {
+      return [];
+    }
+    return [...insight.adaptive_skill_profile]
+      .sort((left, right) => left.score - right.score)
+      .slice(0, 3);
+  }, [insight]);
+
+  const adaptiveTrajectoryData = useMemo(() => {
+    if (!insight || !adaptiveTrajectoryNodes.length) {
+      return [];
+    }
+    const projectionLabel =
+      typeof insight.readiness_trajectory?.sessions_to_readiness === "number"
+        ? insight.readiness_trajectory.sessions_to_readiness === 0
+          ? "Ready now"
+          : `+${insight.readiness_trajectory.sessions_to_readiness} sessions`
+        : "Projection";
+    const projectedScores = insight.readiness_trajectory?.trajectory_per_skill ?? {};
+    return [
+      adaptiveTrajectoryNodes.reduce<Record<string, string | number>>(
+        (record, node) => {
+          record.phase = "Now";
+          record[node.skill] = node.score;
+          return record;
+        },
+        {}
+      ),
+      adaptiveTrajectoryNodes.reduce<Record<string, string | number>>(
+        (record, node) => {
+          record.phase = projectionLabel;
+          record[node.skill] = projectedScores[node.skill] ?? node.score;
+          return record;
+        },
+        {}
+      ),
+    ];
+  }, [adaptiveTrajectoryNodes, insight]);
+
+  const overrideSignalSummary = useMemo(() => {
+    if (!insight?.override_signal) {
+      return null;
+    }
+    const normalizedCategory = insight.override_signal.most_overridden_category
+      ? normalizeCategoryKey(insight.override_signal.most_overridden_category)
+      : null;
+    return {
+      overrideCount: insight.override_signal.override_count ?? 0,
+      meanDelta: insight.override_signal.mean_delta ?? 0,
+      mostOverriddenCategory: normalizedCategory
+        ? getCategoryLabel(normalizedCategory as AnalyticsCategoryKey)
+        : insight.override_signal.most_overridden_category
+          ? formatAdaptiveSkillLabel(insight.override_signal.most_overridden_category)
+          : null,
+    };
+  }, [insight]);
+
   const handleCopyScript = useCallback(async () => {
     if (!insight?.coaching_script || !navigator.clipboard?.writeText) {
       return;
@@ -506,14 +572,24 @@ export function RepProgressPage() {
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            aria-label="Assign a new drill"
-            onClick={() => navigate("/manager/assignments/new")}
-            className="rounded-xl bg-accent px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-accent/25 transition-colors hover:bg-accent-hover"
-          >
-            Assign Drill
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              aria-label="Open one on one prep"
+              onClick={() => setPrepOpen(true)}
+              className="rounded-xl border border-white/35 bg-white/70 px-5 py-2.5 text-sm font-semibold text-ink transition hover:bg-white"
+            >
+              Prep 1:1
+            </button>
+            <button
+              type="button"
+              aria-label="Assign a new drill"
+              onClick={() => navigate("/manager/assignments/new")}
+              className="rounded-xl bg-accent px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-accent/25 transition-colors hover:bg-accent-hover"
+            >
+              Assign Drill
+            </button>
+          </div>
         </div>
       </motion.header>
 
@@ -581,6 +657,119 @@ export function RepProgressPage() {
           <span>Trend: {trajectorySlope !== null ? `${trajectorySlope >= 0 ? "+" : ""}${trajectorySlope.toFixed(2)}/session` : "--"}</span>
           <span>Volatility: {riskDetail ? volatilityLabel(riskDetail.score_volatility) : "--"}</span>
           <span>Projection window: 10 sessions</span>
+        </div>
+      </motion.section>
+
+      <motion.section
+        variants={cardVariants}
+        className="rounded-[32px] border border-white/30 bg-white/40 p-6 shadow-xl shadow-black/5 backdrop-blur-2xl"
+      >
+        <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Adaptive Readiness</div>
+            <h2 className="mt-2 text-xl font-black tracking-tight text-ink">Projected skill path to readiness</h2>
+            <p className="mt-2 text-sm text-muted">
+              Weakest adaptive skills now versus the projected readiness checkpoint from the AI coaching service.
+            </p>
+
+            <div className="mt-6">
+              {insightLoading ? (
+                <ChartSkeleton heightClass="h-[260px]" className="rounded-[28px]" />
+              ) : insightError ? (
+                <EmptyState variant="error" message={insightError} onRetry={() => void loadInsight()} />
+              ) : !insight || !adaptiveTrajectoryData.length ? (
+                <EmptyState variant="empty" message="Adaptive readiness projection is not available yet." />
+              ) : (
+                <div className="h-[260px] w-full rounded-[28px] border border-white/25 bg-white/55 p-4">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={adaptiveTrajectoryData} margin={{ top: 10, right: 20, left: -18, bottom: 0 }}>
+                      <XAxis dataKey="phase" tick={{ fontSize: 12, fill: "var(--color-muted)" }} axisLine={false} tickLine={false} />
+                      <YAxis domain={[0, 10]} tickCount={6} tick={{ fontSize: 12, fill: "var(--color-muted)" }} axisLine={false} tickLine={false} />
+                      <RechartsTooltip
+                        contentStyle={{
+                          backgroundColor: "rgba(255,255,255,0.94)",
+                          backdropFilter: "blur(10px)",
+                          borderRadius: "12px",
+                          border: "1px solid rgba(255,255,255,0.3)",
+                        }}
+                        itemStyle={{ color: "var(--color-ink)", fontWeight: 600 }}
+                        labelStyle={{ color: "var(--color-muted)", fontSize: 12, marginBottom: 4 }}
+                      />
+                      <ReferenceLine y={7} stroke="#b77a13" strokeDasharray="4 4" opacity={0.65} />
+                      {adaptiveTrajectoryNodes.map((node, index) => (
+                        <Line
+                          key={node.skill}
+                          type="monotone"
+                          dataKey={node.skill}
+                          name={formatAdaptiveSkillLabel(node.skill)}
+                          stroke={["#2d5a3d", "#b77a13", "#365314"][index % 3]}
+                          strokeWidth={3}
+                          dot={{ r: 4 }}
+                          activeDot={{ r: 5 }}
+                        />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="rounded-[28px] border border-white/25 bg-white/55 p-5">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Readiness ETA</div>
+              <div className="mt-3 text-2xl font-black tracking-tight text-ink">
+                {typeof insight?.readiness_trajectory?.sessions_to_readiness === "number"
+                  ? insight.readiness_trajectory.sessions_to_readiness === 0
+                    ? "Ready now"
+                    : `${insight.readiness_trajectory.sessions_to_readiness} sessions`
+                  : "Not projected"}
+              </div>
+              <p className="mt-2 text-sm leading-6 text-muted">
+                {typeof insight?.readiness_trajectory?.sessions_to_readiness === "number"
+                  ? "Projected sessions until the weakest skills reach the readiness threshold."
+                  : "Current growth rates are too flat to give a defensible readiness ETA."}
+              </p>
+            </div>
+
+            <div className="rounded-[28px] border border-white/25 bg-white/55 p-5">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Weakest Skills</div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {adaptiveTrajectoryNodes.length ? (
+                  adaptiveTrajectoryNodes.map((node) => (
+                    <div key={node.skill} className="rounded-full border border-white/35 bg-white/75 px-3 py-1.5 text-sm font-medium text-ink">
+                      {formatAdaptiveSkillLabel(node.skill)} {node.score.toFixed(1)}
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-sm text-muted">No adaptive skill profile available.</div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-[28px] border border-white/25 bg-white/55 p-5">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Override Signal</div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-white/35 bg-white/75 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">Adjustments</div>
+                  <div className="mt-2 text-2xl font-black tracking-tight text-ink">{overrideSignalSummary?.overrideCount ?? 0}</div>
+                </div>
+                <div className="rounded-2xl border border-white/35 bg-white/75 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">Mean Δ</div>
+                  <div className="mt-2 text-2xl font-black tracking-tight text-ink">
+                    {typeof overrideSignalSummary?.meanDelta === "number"
+                      ? `${overrideSignalSummary.meanDelta >= 0 ? "+" : ""}${overrideSignalSummary.meanDelta.toFixed(1)}`
+                      : "--"}
+                  </div>
+                </div>
+              </div>
+              <p className="mt-4 text-sm leading-6 text-ink">
+                {overrideSignalSummary?.overrideCount
+                  ? `Managers have adjusted AI scores ${overrideSignalSummary.overrideCount} times for this rep, with an average delta of ${overrideSignalSummary.meanDelta >= 0 ? "+" : ""}${overrideSignalSummary.meanDelta.toFixed(1)}${overrideSignalSummary.mostOverriddenCategory ? ` and the most corrected area being ${overrideSignalSummary.mostOverriddenCategory}.` : "."}`
+                  : "No manager override pattern has been recorded for this rep yet."}
+              </p>
+            </div>
+          </div>
         </div>
       </motion.section>
 
@@ -898,6 +1087,14 @@ export function RepProgressPage() {
           <EmptyState variant="empty" message="No session history available." />
         )}
       </motion.section>
+
+      <OneOnOnePrepCard
+        open={prepOpen}
+        onClose={() => setPrepOpen(false)}
+        managerId={managerId}
+        repId={repId}
+        repName={repName}
+      />
     </motion.main>
   );
 }

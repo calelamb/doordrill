@@ -16,6 +16,7 @@ import type {
   ManagerAnalytics,
   ManagerAssignment,
   ManagerTeamMember,
+  OneOnOnePrepResponse,
   ReplayResponse,
   RepInsightResponse,
   RepAssignment,
@@ -27,6 +28,7 @@ import type {
   SessionAnnotationsResponse,
   SessionDetail,
   TeamCoachingSummaryResponse,
+  WeeklyTeamBriefingResponse,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -309,6 +311,21 @@ export async function fetchRepInsight(
   );
 }
 
+export async function fetchOneOnOnePrep(
+  managerId: string,
+  repId: string,
+  periodDays = 14
+): Promise<OneOnOnePrepResponse> {
+  return requestJson<OneOnOnePrepResponse>(
+    `/manager/reps/${encodeURIComponent(repId)}/one-on-one-prep`,
+    {
+      method: "POST",
+      body: JSON.stringify({ manager_id: managerId, period_days: periodDays }),
+    },
+    { userId: managerId, role: "manager" }
+  );
+}
+
 export async function fetchSessionAnnotations(
   managerId: string,
   sessionId: string
@@ -332,6 +349,17 @@ export async function fetchTeamCoachingSummary(
     {
       method: "POST",
       body: JSON.stringify({ manager_id: managerId, period_days: periodDays }),
+    },
+    { userId: managerId, role: "manager" }
+  );
+}
+
+export async function fetchWeeklyTeamBriefing(managerId: string): Promise<WeeklyTeamBriefingResponse> {
+  return requestJson<WeeklyTeamBriefingResponse>(
+    "/manager/team/weekly-briefing",
+    {
+      method: "POST",
+      body: JSON.stringify({ manager_id: managerId }),
     },
     { userId: managerId, role: "manager" }
   );

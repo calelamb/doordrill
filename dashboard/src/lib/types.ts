@@ -172,6 +172,51 @@ export type RepInsightResponse = {
   drill_recommendation: string;
   coaching_script: string;
   expected_improvement: string;
+  readiness_trajectory: {
+    sessions_to_readiness: number | null;
+    trajectory_per_skill: Record<string, number>;
+  };
+  override_signal: {
+    override_count: number;
+    mean_delta: number;
+    most_overridden_category?: string | null;
+  };
+  adaptive_skill_profile: Array<{
+    skill: string;
+    score: number;
+    trend: number;
+    confidence: number;
+    contributing_metrics?: string[];
+  }>;
+  data_summary: Record<string, unknown>;
+};
+
+export type OneOnOnePrepResponse = {
+  manager_id: string;
+  rep_id: string;
+  rep_name: string;
+  period_days: number;
+  generated_at: string;
+  discussion_topics: Array<{
+    topic: string;
+    evidence: string;
+    suggested_opener: string;
+  }>;
+  strength_to_acknowledge: {
+    skill: string;
+    what_to_say: string;
+  };
+  pattern_to_challenge: {
+    skill: string;
+    pattern: string;
+    what_to_say: string;
+  };
+  suggested_next_scenario: {
+    scenario_type: string;
+    difficulty: number;
+    rationale: string;
+  };
+  readiness_summary: string;
   data_summary: Record<string, unknown>;
 };
 
@@ -223,6 +268,31 @@ export type TeamCoachingSummaryResponse = {
   period_days: number;
   generated_at: string;
   summary: string;
+  data_summary: Record<string, unknown>;
+};
+
+export type WeeklyTeamBriefingResponse = {
+  manager_id: string;
+  generated_at: string;
+  team_pulse: string;
+  standout_rep: {
+    name: string;
+    why: string;
+  };
+  needs_attention: Array<{
+    name: string;
+    concern: string;
+  }>;
+  shared_weakness: {
+    skill: string;
+    team_average: number;
+    note: string;
+  };
+  huddle_topic: {
+    topic: string;
+    suggested_talking_points: string[];
+  };
+  manager_action_items: string[];
   data_summary: Record<string, unknown>;
 };
 
