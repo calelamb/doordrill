@@ -1184,6 +1184,7 @@ def get_calibration_analytics(
                 "occurred_at": reviewed_at.isoformat(),
             }
         )
+    items.sort(key=lambda item: abs(float(item.get("delta") or 0.0)), reverse=True)
 
     return CalibrationAnalyticsResponse(
         manager_id=manager_id,

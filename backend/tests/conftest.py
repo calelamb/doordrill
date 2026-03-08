@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import MetaData
+from sqlalchemy import inspect
 
 from app.main import app
 from app.db.session import SessionLocal, engine
@@ -15,10 +15,14 @@ from app.models.types import UserRole
 
 @pytest.fixture(autouse=True)
 def reset_db() -> None:
-    reflected = MetaData()
-    reflected.reflect(bind=engine)
-    if reflected.tables:
-        reflected.drop_all(bind=engine)
+    with engine.begin() as connection:
+        inspector = inspect(connection)
+        table_names = inspector.get_table_names()
+        if table_names:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            for table_name in table_names:
+                connection.exec_driver_sql(f'DROP TABLE IF EXISTS "{table_name}"')
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
     Base.metadata.create_all(bind=engine)
 
 

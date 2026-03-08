@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.manager import router as manager_router
 from app.api.rep import router as rep_router
@@ -49,6 +50,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+app.include_router(admin_router)
 app.include_router(manager_router)
 app.include_router(rep_router)
 app.include_router(auth_router)

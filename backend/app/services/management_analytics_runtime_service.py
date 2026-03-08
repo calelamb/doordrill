@@ -23,6 +23,7 @@ from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.types import AssignmentStatus
 from app.models.user import User
+from app.models.warehouse import FactRepDaily, FactSession
 from app.services.management_analytics_service import ManagementAnalyticsService
 from app.services.management_cache_service import ManagementCacheService
 
@@ -69,6 +70,263 @@ class ManagementAnalyticsRuntimeService:
             ttl_seconds=self.settings.management_analytics_cache_ttl_seconds,
             max_entries=self.settings.management_analytics_cache_max_entries,
         )
+
+    def _use_warehouse(self, db: Session, *, manager_id: str) -> bool:
+        fact_count = db.scalar(select(func.count(FactSession.fact_session_id)).where(FactSession.manager_id == manager_id)) or 0
+        return int(fact_count) > 0
+
+    def _warehouse_session_rows(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        date_from: datetime,
+        date_to: datetime,
+    ) -> list[dict[str, Any]]:
+        rows = db.execute(
+            select(
+                FactSession.session_id.label("session_id"),
+                FactSession.manager_id.label("manager_id"),
+                FactSession.rep_id.label("rep_id"),
+                User.name.label("rep_name"),
+                FactSession.scenario_id.label("scenario_id"),
+                Scenario.name.label("scenario_name"),
+                FactSession.session_date.label("session_date"),
+                FactSession.started_at.label("started_at"),
+                FactSession.overall_score.label("overall_score"),
+                FactSession.score_objection_handling.label("score_objection_handling"),
+                FactSession.score_closing_technique.label("score_closing_technique"),
+                FactSession.has_manager_review.label("has_manager_review"),
+                FactSession.override_score.label("override_score"),
+                FactSession.override_delta.label("override_delta"),
+                FactSession.has_coaching_note.label("has_coaching_note"),
+                FactSession.barge_in_count.label("barge_in_count"),
+                FactSession.weakness_tag_1.label("weakness_tag_1"),
+                FactSession.weakness_tag_2.label("weakness_tag_2"),
+                FactSession.weakness_tag_3.label("weakness_tag_3"),
+            )
+            .join(User, User.id == FactSession.rep_id)
+            .join(Scenario, Scenario.id == FactSession.scenario_id)
+            .where(
+                FactSession.manager_id == manager_id,
+                FactSession.session_date >= date_from.date(),
+                FactSession.session_date <= date_to.date(),
+            )
+            .order_by(FactSession.session_date.asc(), FactSession.started_at.asc(), FactSession.session_id.asc())
+        ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def _warehouse_rep_daily_rows(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        date_from: datetime,
+        date_to: datetime,
+    ) -> list[dict[str, Any]]:
+        rows = db.execute(
+            select(
+                FactRepDaily.rep_id.label("rep_id"),
+                User.name.label("rep_name"),
+                FactRepDaily.session_date.label("session_date"),
+                FactRepDaily.session_count.label("session_count"),
+                FactRepDaily.scored_count.label("scored_count"),
+                FactRepDaily.avg_score.label("avg_score"),
+                FactRepDaily.avg_objection_handling.label("avg_objection_handling"),
+                FactRepDaily.avg_closing_technique.label("avg_closing_technique"),
+                FactRepDaily.total_duration_seconds.label("total_duration_seconds"),
+                FactRepDaily.barge_in_count.label("barge_in_count"),
+                FactRepDaily.override_count.label("override_count"),
+                FactRepDaily.coaching_note_count.label("coaching_note_count"),
+            )
+            .join(User, User.id == FactRepDaily.rep_id)
+            .where(
+                FactRepDaily.manager_id == manager_id,
+                FactRepDaily.session_date >= date_from.date(),
+                FactRepDaily.session_date <= date_to.date(),
+            )
+            .order_by(User.name.asc(), FactRepDaily.session_date.asc())
+        ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def _warehouse_score_trend(self, session_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        buckets: dict[str, dict[str, Any]] = {}
+        for row in session_rows:
+            session_date = row["session_date"]
+            if session_date is None:
+                continue
+            day_key = session_date.isoformat()
+            bucket = buckets.setdefault(day_key, {"date": day_key, "session_count": 0, "scored_count": 0, "score_sum": 0.0})
+            bucket["session_count"] += 1
+            if row["overall_score"] is not None:
+                bucket["scored_count"] += 1
+                bucket["score_sum"] += float(row["overall_score"])
+        return [
+            {
+                "date": key,
+                "session_count": bucket["session_count"],
+                "average_score": round(bucket["score_sum"] / bucket["scored_count"], 2) if bucket["scored_count"] else None,
+            }
+            for key, bucket in sorted(buckets.items())
+        ]
+
+    def _warehouse_scenario_pass_rows(self, session_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in session_rows:
+            scenario_id = row["scenario_id"]
+            if scenario_id is None:
+                continue
+            group = grouped.setdefault(
+                scenario_id,
+                {
+                    "scenario_id": scenario_id,
+                    "scenario_name": row["scenario_name"],
+                    "session_count": 0,
+                    "scored_session_count": 0,
+                    "pass_count": 0,
+                    "score_sum": 0.0,
+                },
+            )
+            group["session_count"] += 1
+            if row["overall_score"] is not None:
+                score = float(row["overall_score"])
+                group["scored_session_count"] += 1
+                group["score_sum"] += score
+                if score >= 7.0:
+                    group["pass_count"] += 1
+
+        rows = []
+        for group in grouped.values():
+            scored = int(group["scored_session_count"])
+            rows.append(
+                {
+                    "scenario_id": group["scenario_id"],
+                    "scenario_name": group["scenario_name"],
+                    "session_count": int(group["session_count"]),
+                    "scored_session_count": scored,
+                    "pass_count": int(group["pass_count"]),
+                    "average_score": round(group["score_sum"] / scored, 2) if scored else None,
+                    "pass_rate": round(group["pass_count"] / scored, 3) if scored else 0.0,
+                }
+            )
+        rows.sort(key=lambda item: (item["pass_rate"], item["average_score"] or 0.0, item["scenario_name"] or ""))
+        return rows
+
+    def _warehouse_histogram(self, session_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return _score_histogram([float(row["overall_score"]) for row in session_rows if row["overall_score"] is not None])
+
+    def _warehouse_skill_heatmap(self, rep_daily_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rep_daily_rows:
+            rep_id = row["rep_id"]
+            group = grouped.setdefault(
+                rep_id,
+                {
+                    "rep_id": rep_id,
+                    "rep_name": row["rep_name"],
+                    "session_count": 0,
+                    "scored_count": 0,
+                    "score_weighted_sum": 0.0,
+                    "objection_weighted_sum": 0.0,
+                    "closing_weighted_sum": 0.0,
+                    "duration_seconds": 0,
+                    "barge_in_count": 0,
+                    "override_count": 0,
+                    "coaching_note_count": 0,
+                },
+            )
+            session_count = int(row["session_count"] or 0)
+            scored_count = int(row["scored_count"] or 0)
+            group["session_count"] += session_count
+            group["scored_count"] += scored_count
+            if row["avg_score"] is not None:
+                group["score_weighted_sum"] += float(row["avg_score"]) * max(scored_count, session_count, 1)
+            if row["avg_objection_handling"] is not None:
+                group["objection_weighted_sum"] += float(row["avg_objection_handling"]) * max(scored_count, session_count, 1)
+            if row["avg_closing_technique"] is not None:
+                group["closing_weighted_sum"] += float(row["avg_closing_technique"]) * max(scored_count, session_count, 1)
+            group["duration_seconds"] += int(row["total_duration_seconds"] or 0)
+            group["barge_in_count"] += int(row["barge_in_count"] or 0)
+            group["override_count"] += int(row["override_count"] or 0)
+            group["coaching_note_count"] += int(row["coaching_note_count"] or 0)
+
+        items = []
+        for group in grouped.values():
+            score_weight = max(group["scored_count"], group["session_count"], 1)
+            items.append(
+                {
+                    "rep_id": group["rep_id"],
+                    "rep_name": group["rep_name"],
+                    "session_count": group["session_count"],
+                    "scored_count": group["scored_count"],
+                    "average_score": round(group["score_weighted_sum"] / score_weight, 2) if group["score_weighted_sum"] else None,
+                    "average_objection_handling": (
+                        round(group["objection_weighted_sum"] / score_weight, 2) if group["objection_weighted_sum"] else None
+                    ),
+                    "average_closing_technique": (
+                        round(group["closing_weighted_sum"] / score_weight, 2) if group["closing_weighted_sum"] else None
+                    ),
+                    "total_duration_seconds": group["duration_seconds"],
+                    "barge_in_count": group["barge_in_count"],
+                    "override_count": group["override_count"],
+                    "coaching_note_count": group["coaching_note_count"],
+                }
+            )
+        items.sort(key=lambda item: (item["average_score"] is None, item["average_score"] or 0.0, item["rep_name"]))
+        return items
+
+    def _warehouse_command_center_overrides(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        date_from: datetime,
+        date_to: datetime,
+    ) -> dict[str, Any]:
+        session_rows = self._warehouse_session_rows(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
+        scores = [float(row["overall_score"]) for row in session_rows if row["overall_score"] is not None]
+        weakest_scores: dict[str, list[float]] = {}
+        for row in session_rows:
+            for key in ("weakness_tag_1", "weakness_tag_2", "weakness_tag_3"):
+                tag = row.get(key)
+                if not tag or row["overall_score"] is None:
+                    continue
+                weakest_scores.setdefault(tag, []).append(float(row["overall_score"]))
+
+        weakest_categories = [
+            {"category": tag, "average_score": round(sum(values) / len(values), 2), "session_id": None, "focus_turn_id": None}
+            for tag, values in weakest_scores.items()
+            if values
+        ]
+        weakest_categories.sort(key=lambda item: item["average_score"])
+
+        return {
+            "summary": {
+                "team_average_score": round(sum(scores) / len(scores), 2) if scores else None,
+                "active_rep_count": len({row["rep_id"] for row in session_rows}),
+                "sessions_count": len(session_rows),
+                "scored_session_count": len(scores),
+            },
+            "score_trend": self._warehouse_score_trend(session_rows),
+            "score_distribution_histogram": self._warehouse_histogram(session_rows),
+            "scenario_pass_matrix": [
+                {
+                    "scenario_id": row["scenario_id"],
+                    "scenario_name": row["scenario_name"],
+                    "session_count": row["session_count"],
+                    "scored_count": row["scored_session_count"],
+                    "pass_count": row["pass_count"],
+                    "average_score": row["average_score"],
+                    "pass_rate": row["pass_rate"],
+                    "sample_session_id": None,
+                    "focus_turn_id": None,
+                    "latest_session_id": None,
+                    "latest_started_at": None,
+                }
+                for row in self._warehouse_scenario_pass_rows(session_rows)
+            ],
+            "weakest_categories": weakest_categories[:5],
+        }
 
     def _latest_refresh_at(self, db: Session, *, manager_id: str) -> datetime | None:
         manager_dim = db.get(AnalyticsDimManager, manager_id)
@@ -186,6 +444,49 @@ class ManagementAnalyticsRuntimeService:
         previous_end: datetime,
         period: str,
     ) -> dict[str, Any]:
+        def build() -> dict[str, Any]:
+            payload = self.base.get_command_center(
+                db,
+                manager_id=manager_id,
+                date_from=date_from,
+                date_to=date_to,
+                previous_start=previous_start,
+                previous_end=previous_end,
+                period=period,
+            )
+            if not self._use_warehouse(db, manager_id=manager_id):
+                return payload
+
+            warehouse = self._warehouse_command_center_overrides(
+                db,
+                manager_id=manager_id,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            previous_warehouse = self._warehouse_command_center_overrides(
+                db,
+                manager_id=manager_id,
+                date_from=previous_start,
+                date_to=previous_end,
+            )
+            merged = dict(payload)
+            merged_summary = dict(payload.get("summary", {}))
+            merged_summary.update(warehouse["summary"])
+            previous_score = previous_warehouse["summary"].get("team_average_score")
+            current_score = warehouse["summary"].get("team_average_score")
+            merged_summary["team_average_delta_vs_previous_period"] = (
+                round(current_score - float(previous_score), 2)
+                if current_score is not None and previous_score is not None
+                else payload.get("summary", {}).get("team_average_delta_vs_previous_period")
+            )
+            merged["summary"] = merged_summary
+            merged["score_trend"] = warehouse["score_trend"]
+            merged["score_distribution_histogram"] = warehouse["score_distribution_histogram"]
+            merged["scenario_pass_matrix"] = warehouse["scenario_pass_matrix"]
+            if warehouse["weakest_categories"]:
+                merged["weakest_categories"] = warehouse["weakest_categories"]
+            return merged
+
         return self._with_cache(
             db,
             query_name="command_center",
@@ -197,15 +498,7 @@ class ManagementAnalyticsRuntimeService:
                 "previous_end": _cache_dt_iso(previous_end),
                 "period": period,
             },
-            builder=lambda: self.base.get_command_center(
-                db,
-                manager_id=manager_id,
-                date_from=date_from,
-                date_to=date_to,
-                previous_start=previous_start,
-                previous_end=previous_end,
-                period=period,
-            ),
+            builder=build,
         )
 
     def get_scenario_intelligence(
@@ -398,34 +691,60 @@ class ManagementAnalyticsRuntimeService:
                 .order_by(User.name.asc())
             ).mappings().all()
 
-            pass_rate_rows = db.execute(
-                select(
-                    AnalyticsFactSession.scenario_id.label("scenario_id"),
-                    Scenario.name.label("scenario_name"),
-                    func.count(AnalyticsFactSession.session_id).label("scored_session_count"),
-                    func.sum(case((AnalyticsFactSession.pass_flag.is_(True), 1), else_=0)).label("pass_count"),
+            use_warehouse = self._use_warehouse(db, manager_id=manager_id)
+            if use_warehouse:
+                warehouse_session_rows = self._warehouse_session_rows(
+                    db,
+                    manager_id=manager_id,
+                    date_from=current_start,
+                    date_to=current_end,
                 )
-                .join(Scenario, Scenario.id == AnalyticsFactSession.scenario_id)
-                .where(
-                    AnalyticsFactSession.manager_id == manager_id,
-                    AnalyticsFactSession.overall_score.is_not(None),
-                    AnalyticsFactSession.session_date >= current_start.date(),
-                    AnalyticsFactSession.session_date <= current_end.date(),
+                warehouse_rep_daily_rows = self._warehouse_rep_daily_rows(
+                    db,
+                    manager_id=manager_id,
+                    date_from=current_start,
+                    date_to=current_end,
                 )
-                .group_by(AnalyticsFactSession.scenario_id, Scenario.name)
-                .order_by(Scenario.name.asc())
-            ).mappings().all()
+                warehouse_command_center = self._warehouse_command_center_overrides(
+                    db,
+                    manager_id=manager_id,
+                    date_from=current_start,
+                    date_to=current_end,
+                )
+                pass_rate_rows = self._warehouse_scenario_pass_rows(warehouse_session_rows)
+                histogram = self._warehouse_histogram(warehouse_session_rows)
+                team_skill_heatmap = self._warehouse_skill_heatmap(warehouse_rep_daily_rows)
+            else:
+                warehouse_command_center = None
+                pass_rate_rows = db.execute(
+                    select(
+                        AnalyticsFactSession.scenario_id.label("scenario_id"),
+                        Scenario.name.label("scenario_name"),
+                        func.count(AnalyticsFactSession.session_id).label("scored_session_count"),
+                        func.sum(case((AnalyticsFactSession.pass_flag.is_(True), 1), else_=0)).label("pass_count"),
+                    )
+                    .join(Scenario, Scenario.id == AnalyticsFactSession.scenario_id)
+                    .where(
+                        AnalyticsFactSession.manager_id == manager_id,
+                        AnalyticsFactSession.overall_score.is_not(None),
+                        AnalyticsFactSession.session_date >= current_start.date(),
+                        AnalyticsFactSession.session_date <= current_end.date(),
+                    )
+                    .group_by(AnalyticsFactSession.scenario_id, Scenario.name)
+                    .order_by(Scenario.name.asc())
+                ).mappings().all()
+                histogram_scores = db.scalars(
+                    select(AnalyticsFactSession.overall_score).where(
+                        AnalyticsFactSession.manager_id == manager_id,
+                        AnalyticsFactSession.overall_score.is_not(None),
+                        AnalyticsFactSession.session_date >= current_start.date(),
+                        AnalyticsFactSession.session_date <= current_end.date(),
+                    )
+                ).all()
+                histogram = _score_histogram([float(score) for score in histogram_scores if score is not None])
+                team_skill_heatmap = []
 
-            histogram_scores = db.scalars(
-                select(AnalyticsFactSession.overall_score).where(
-                    AnalyticsFactSession.manager_id == manager_id,
-                    AnalyticsFactSession.overall_score.is_not(None),
-                    AnalyticsFactSession.session_date >= current_start.date(),
-                    AnalyticsFactSession.session_date <= current_end.date(),
-                )
-            ).all()
-
-            command_center = self.base.get_command_center(
+            command_center = self.get_command_center(
                 db,
                 manager_id=manager_id,
                 date_from=current_start,
@@ -437,6 +756,16 @@ class ManagementAnalyticsRuntimeService:
 
             current_avg_score = command_center["summary"]["team_average_score"]
             previous_delta = command_center["summary"]["team_average_delta_vs_previous_period"]
+            if use_warehouse and warehouse_command_center is not None:
+                sessions_count = warehouse_command_center["summary"]["sessions_count"]
+                active_rep_count = warehouse_command_center["summary"]["active_rep_count"]
+                average_score = warehouse_command_center["summary"]["team_average_score"]
+                score_trend = warehouse_command_center["score_trend"]
+            else:
+                sessions_count = int(sessions_count)
+                active_rep_count = int(unique_reps)
+                average_score = round(float(avg_score), 2) if avg_score is not None else None
+                score_trend = command_center["score_trend"]
             return {
                 "manager_id": manager_id,
                 "period": period,
@@ -445,8 +774,8 @@ class ManagementAnalyticsRuntimeService:
                 "assignment_count": int(assignment_count),
                 "completed_assignment_count": int(completed_assignments),
                 "sessions_count": int(sessions_count),
-                "active_rep_count": int(unique_reps),
-                "average_score": round(float(avg_score), 2) if avg_score is not None else None,
+                "active_rep_count": int(active_rep_count),
+                "average_score": average_score,
                 "completion_rate": round((completed_assignments / assignment_count), 3) if assignment_count else 0.0,
                 "team_average_score": current_avg_score,
                 "team_average_delta_vs_previous_period": previous_delta,
@@ -476,13 +805,14 @@ class ManagementAnalyticsRuntimeService:
                     }
                     for row in pass_rate_rows
                 ],
-                "score_distribution_histogram": _score_histogram([float(score) for score in histogram_scores if score is not None]),
+                "score_distribution_histogram": histogram,
                 "summary": command_center["summary"],
-                "score_trend": command_center["score_trend"],
+                "score_trend": score_trend,
                 "scenario_pass_matrix": command_center["scenario_pass_matrix"],
                 "rep_risk_matrix": command_center["rep_risk_matrix"],
                 "weakest_categories": command_center["weakest_categories"],
                 "alerts_preview": command_center["alerts_preview"],
+                "team_skill_heatmap": team_skill_heatmap,
             }
 
         return self._with_cache(
@@ -514,7 +844,7 @@ class ManagementAnalyticsRuntimeService:
                 select(func.count(AnalyticsRefreshRun.id)).where(AnalyticsRefreshRun.status == "running")
             ) or 0
             fact_count = db.scalar(
-                select(func.count(AnalyticsFactSession.session_id)).where(AnalyticsFactSession.manager_id == manager_id)
+                select(func.count(FactSession.fact_session_id)).where(FactSession.manager_id == manager_id)
             ) or 0
             materialized_rows = db.execute(
                 select(AnalyticsMaterializedView)
@@ -549,6 +879,7 @@ class ManagementAnalyticsRuntimeService:
                 },
                 "warehouse": {
                     "fact_session_count": int(fact_count),
+                    "enabled": self._use_warehouse(db, manager_id=manager_id),
                     "manager_dim_last_refreshed_at": manager_dim.last_refreshed_at.isoformat() if manager_dim and manager_dim.last_refreshed_at else None,
                     "manager_rep_count": int(manager_dim.rep_count or 0) if manager_dim else 0,
                 },

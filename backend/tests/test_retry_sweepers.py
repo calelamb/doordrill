@@ -78,6 +78,39 @@ async def test_notification_retry_sweeper_ignores_dead_letters_and_filters(clien
     db = SessionLocal()
     try:
         service = NotificationService()
+        assignment = Assignment(
+            scenario_id=seed_org["scenario_id"],
+            rep_id=seed_org["rep_id"],
+            assigned_by=seed_org["manager_id"],
+            status=AssignmentStatus.COMPLETED,
+            retry_policy={},
+        )
+        db.add(assignment)
+        db.flush()
+
+        now = datetime.now(timezone.utc)
+        db.add_all(
+            [
+                DrillSession(
+                    id="session-old",
+                    assignment_id=assignment.id,
+                    rep_id=seed_org["rep_id"],
+                    scenario_id=seed_org["scenario_id"],
+                    started_at=now - timedelta(minutes=15),
+                    status=SessionStatus.PROCESSING,
+                ),
+                DrillSession(
+                    id="session-active",
+                    assignment_id=assignment.id,
+                    rep_id=seed_org["rep_id"],
+                    scenario_id=seed_org["scenario_id"],
+                    started_at=now - timedelta(minutes=10),
+                    status=SessionStatus.PROCESSING,
+                ),
+            ]
+        )
+        db.flush()
+
         old = NotificationDelivery(
             session_id="session-old",
             manager_id=seed_org["manager_id"],

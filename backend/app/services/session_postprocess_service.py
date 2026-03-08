@@ -9,10 +9,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.postprocess_run import PostprocessRun
+from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.grading_service import GradingService
 from app.services.notification_service import NotificationService
 from app.services.transcript_cleanup_service import TranscriptCleanupService
 from app.services.turn_enrichment_service import TurnEnrichmentService
+from app.services.warehouse_etl_service import WarehouseEtlService
 from app.tasks.celery_app import get_celery_app
 
 logger = logging.getLogger(__name__)
@@ -24,8 +26,10 @@ class SessionPostprocessService:
         self.settings = get_settings()
         self.cleanup_service = TranscriptCleanupService()
         self.grading_service = GradingService()
+        self.adaptive_training_service = AdaptiveTrainingService()
         self.notification_service = NotificationService()
         self.turn_enrichment_service = TurnEnrichmentService()
+        self.warehouse_etl_service = WarehouseEtlService()
 
     def _ensure_run_row(self, db: Session, *, session_id: str, task_type: str) -> PostprocessRun:
         row = db.scalar(
@@ -80,7 +84,14 @@ class SessionPostprocessService:
             elif task_type == "grade":
                 result = await self.grading_service.grade_session(db, session_id=session_id)
                 enrichment = self.turn_enrichment_service.enrich_session(db, session_id)
-                payload = {"scorecard_id": result.id, "turn_enrichment": enrichment}
+                adaptive_outcome = self.adaptive_training_service.write_recommendation_outcome(db, session_id=session_id)
+                warehouse_write = self.warehouse_etl_service.write_session(db, session_id)
+                payload = {
+                    "scorecard_id": result.id,
+                    "turn_enrichment": enrichment,
+                    "adaptive_outcome_id": adaptive_outcome.id if adaptive_outcome is not None else None,
+                    "warehouse_write": warehouse_write,
+                }
             else:
                 result = await self.notification_service.notify_manager_session_completed(db, session_id)
                 payload = {"notification": result}

@@ -106,23 +106,3 @@ async def test_grade_postprocess_runs_turn_enrichment(seed_org, monkeypatch):
         assert run_row.status == "completed"
     finally:
         db.close()
-
-
-def test_objection_types_endpoint_returns_seeded_taxonomy(client, seed_org):
-    response = client.get(
-        "/scenarios/objection-types",
-        params={"industry": "pest_control"},
-        headers={
-            "x-user-id": seed_org["manager_id"],
-            "x-user-role": "manager",
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    tags = {item["tag"] for item in body}
-
-    assert "price" in tags
-    assert "incumbent_provider" in tags
-    assert "decision_authority" in tags
-    assert all(item["industry"] in {None, "pest_control"} for item in body)

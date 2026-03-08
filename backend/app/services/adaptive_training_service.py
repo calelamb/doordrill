@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -10,6 +10,7 @@ from app.models.assignment import Assignment
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
+from app.models.training import AdaptiveRecommendationOutcome
 
 SKILL_ORDER = ["opening", "rapport", "pitch_clarity", "objection_handling", "closing"]
 SKILL_GRAPH_EDGES = [
@@ -73,14 +74,20 @@ class AdaptiveTrainingService:
         skill_profile = self._build_skill_profile(snapshots)
         performance_trend = self._compute_performance_trend(snapshots)
         recommended_difficulty = self._recommended_difficulty(skill_profile=skill_profile, performance_trend=performance_trend)
-        target_difficulty_factors = self._target_difficulty_factors(
-            skill_profile=skill_profile,
-            recommended_difficulty=recommended_difficulty,
-        )
         weakest_skills = [
             node["skill"]
             for node in sorted(skill_profile.values(), key=lambda item: (item["score"], item["skill"]))[:2]
         ]
+        recommended_difficulty = self._tune_difficulty_from_outcomes(
+            db,
+            rep_id=rep_id,
+            weakest_skills=weakest_skills,
+            recommended_difficulty=recommended_difficulty,
+        )
+        target_difficulty_factors = self._target_difficulty_factors(
+            skill_profile=skill_profile,
+            recommended_difficulty=recommended_difficulty,
+        )
         recommendations = self._recommend_scenarios(
             scenarios=scenarios,
             skill_profile=skill_profile,
@@ -139,6 +146,9 @@ class AdaptiveTrainingService:
             "source": "adaptive_training_engine",
             "recommended_difficulty": plan["recommended_difficulty"],
             "weakest_skills": plan["weakest_skills"],
+            "recommended_focus_skills": selected["focus_skills"],
+            "baseline_skill_scores": {node["skill"]: node["score"] for node in plan["skill_profile"]},
+            "baseline_overall_score": plan["readiness_score"],
             "target_difficulty_factors": plan["target_difficulty_factors"],
             "selected_scenario_id": selected["scenario_id"],
             "selected_scenario_score": selected["recommendation_score"],
@@ -155,6 +165,96 @@ class AdaptiveTrainingService:
         db.commit()
         db.refresh(assignment)
         return {"assignment": assignment, "adaptive_plan": plan, "selected_scenario": selected}
+
+    def write_recommendation_outcome(self, db: Session, *, session_id: str) -> AdaptiveRecommendationOutcome | None:
+        session = db.scalar(
+            select(DrillSession)
+            .where(DrillSession.id == session_id)
+            .options(
+                selectinload(DrillSession.assignment),
+                selectinload(DrillSession.scorecard),
+                selectinload(DrillSession.turns),
+                selectinload(DrillSession.events),
+            )
+        )
+        if session is None or session.assignment is None or session.scorecard is None:
+            return None
+
+        adaptive_metadata = {}
+        if isinstance(session.assignment.retry_policy, dict):
+            adaptive_metadata = session.assignment.retry_policy.get("adaptive_training") or {}
+        if not isinstance(adaptive_metadata, dict) or not adaptive_metadata:
+            return None
+
+        scenario = db.get(Scenario, session.scenario_id)
+        snapshot = self._build_session_snapshot(session=session, scenario=scenario)
+        all_outcome_skills = {
+            skill: round(float(score), 2)
+            for skill, score in (snapshot.get("skills") or {}).items()
+            if isinstance(score, (int, float))
+        }
+        focus_skills = [
+            str(skill)
+            for skill in adaptive_metadata.get("recommended_focus_skills", [])
+            if isinstance(skill, str) and skill
+        ]
+        baseline_skill_scores = {
+            str(skill): float(score)
+            for skill, score in (adaptive_metadata.get("baseline_skill_scores") or {}).items()
+            if isinstance(skill, str) and isinstance(score, (int, float))
+        }
+        skill_delta = {
+            skill: round(all_outcome_skills[skill] - baseline_skill_scores[skill], 2)
+            for skill in focus_skills
+            if skill in all_outcome_skills and skill in baseline_skill_scores
+        }
+        recommendation_success = (
+            self._mean(skill_delta.values()) >= 0.5
+            if skill_delta
+            else None
+        )
+
+        row = db.scalar(
+            select(AdaptiveRecommendationOutcome).where(
+                AdaptiveRecommendationOutcome.assignment_id == session.assignment_id
+            )
+        )
+        if row is None:
+            row = AdaptiveRecommendationOutcome(
+                assignment_id=session.assignment_id,
+                session_id=session.id,
+                rep_id=session.rep_id,
+                manager_id=session.assignment.assigned_by,
+                recommended_scenario_id=str(adaptive_metadata.get("selected_scenario_id") or session.scenario_id),
+                recommended_difficulty=int(adaptive_metadata.get("recommended_difficulty") or (scenario.difficulty if scenario else 1)),
+                recommended_focus_skills=focus_skills,
+                baseline_skill_scores=baseline_skill_scores,
+                baseline_overall_score=self._safe_float(adaptive_metadata.get("baseline_overall_score")),
+                outcome_skill_scores=all_outcome_skills,
+                outcome_overall_score=self._safe_float(session.scorecard.overall_score),
+                skill_delta=skill_delta,
+                recommendation_success=recommendation_success,
+                outcome_written_at=datetime.now(timezone.utc),
+            )
+            db.add(row)
+            db.flush()
+            return row
+
+        row.session_id = session.id
+        row.rep_id = session.rep_id
+        row.manager_id = session.assignment.assigned_by
+        row.recommended_scenario_id = str(adaptive_metadata.get("selected_scenario_id") or session.scenario_id)
+        row.recommended_difficulty = int(adaptive_metadata.get("recommended_difficulty") or (scenario.difficulty if scenario else 1))
+        row.recommended_focus_skills = focus_skills
+        row.baseline_skill_scores = baseline_skill_scores
+        row.baseline_overall_score = self._safe_float(adaptive_metadata.get("baseline_overall_score"))
+        row.outcome_skill_scores = all_outcome_skills
+        row.outcome_overall_score = self._safe_float(session.scorecard.overall_score)
+        row.skill_delta = skill_delta
+        row.recommendation_success = recommendation_success
+        row.outcome_written_at = datetime.now(timezone.utc)
+        db.flush()
+        return row
 
     def _build_session_snapshot(self, *, session: DrillSession, scenario: Scenario | None) -> dict[str, Any]:
         scorecard = session.scorecard
@@ -325,6 +425,63 @@ class AdaptiveTrainingService:
             difficulty -= 1
         return max(1, min(5, difficulty))
 
+    def _load_recommendation_outcomes(self, db: Session, rep_id: str) -> list[dict[str, Any]]:
+        rows = db.scalars(
+            select(AdaptiveRecommendationOutcome)
+            .where(
+                AdaptiveRecommendationOutcome.rep_id == rep_id,
+                AdaptiveRecommendationOutcome.recommendation_success.is_not(None),
+            )
+            .order_by(AdaptiveRecommendationOutcome.outcome_written_at.desc(), AdaptiveRecommendationOutcome.created_at.desc())
+        ).all()
+        return [
+            {
+                "recommended_difficulty": row.recommended_difficulty,
+                "recommended_focus_skills": list(row.recommended_focus_skills or []),
+                "recommendation_success": row.recommendation_success,
+                "skill_delta": dict(row.skill_delta or {}),
+            }
+            for row in rows
+        ]
+
+    def _tune_difficulty_from_outcomes(
+        self,
+        db: Session,
+        *,
+        rep_id: str,
+        weakest_skills: list[str],
+        recommended_difficulty: int,
+    ) -> int:
+        outcomes = self._load_recommendation_outcomes(db, rep_id)
+        if not outcomes:
+            return recommended_difficulty
+
+        relevant = [
+            item
+            for item in outcomes
+            if item["recommended_difficulty"] == recommended_difficulty
+            and any(skill in (item["recommended_focus_skills"] or []) for skill in weakest_skills)
+        ]
+        if not relevant:
+            return recommended_difficulty
+
+        successes = [
+            1.0 if item["recommendation_success"] else 0.0
+            for item in relevant
+            if item["recommendation_success"] is not None
+        ]
+        if not successes:
+            return recommended_difficulty
+
+        total = len(successes)
+        success_rate = self._mean(successes)
+        failure_count = total - int(sum(successes))
+        if failure_count >= 3 and success_rate < 0.4:
+            return max(1, recommended_difficulty - 1)
+        if total >= 5 and success_rate > 0.8:
+            return min(5, recommended_difficulty + 1)
+        return recommended_difficulty
+
     def _target_difficulty_factors(self, *, skill_profile: dict[str, dict[str, Any]], recommended_difficulty: int) -> dict[str, Any]:
         weakest_skills = [node["skill"] for node in sorted(skill_profile.values(), key=lambda item: item["score"])[:2]]
         objection_frequency = max(1, min(5, recommended_difficulty + (1 if "objection_handling" in weakest_skills else 0)))
@@ -492,6 +649,12 @@ class AdaptiveTrainingService:
         if denominator == 0:
             return 0.0
         return numerator / denominator
+
+    def _safe_float(self, value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _patience_label(self, score: int) -> str:
         if score <= 2:

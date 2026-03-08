@@ -10,9 +10,13 @@ from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
 from app.models.types import ReviewReason, UserRole
 from app.models.user import User
+from app.services.warehouse_etl_service import WarehouseEtlService
 
 
 class ManagerReviewService:
+    def __init__(self) -> None:
+        self.warehouse_etl_service = WarehouseEtlService()
+
     def _session_bundle(
         self,
         db: Session,
@@ -133,7 +137,7 @@ class ManagerReviewService:
         visible_to_rep: bool,
         weakness_tags: list[str] | None = None,
     ) -> ManagerCoachingNote | None:
-        scorecard, _, assignment = self._scorecard_bundle(db, scorecard_id=scorecard_id)
+        scorecard, source_session, assignment = self._scorecard_bundle(db, scorecard_id=scorecard_id)
         if scorecard is None or not self._manager_owns_assignment(reviewer, assignment):
             return None
 
@@ -146,6 +150,8 @@ class ManagerReviewService:
         )
         db.add(row)
         db.flush()
+        if source_session is not None:
+            self.warehouse_etl_service.write_session(db, source_session.id, commit=False)
         return row
 
     def list_coaching_notes(self, db: Session, *, scorecard_id: str) -> list[ManagerCoachingNote]:
@@ -165,4 +171,3 @@ class ManagerReviewService:
             )
             .order_by(ManagerCoachingNote.created_at.desc())
         )
-

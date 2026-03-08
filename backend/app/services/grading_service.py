@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from app.models.session import Session as DrillSession
 from app.models.types import SessionStatus
 from app.schemas.scorecard import StructuredScorecardPayloadV2
 from app.services.analytics_refresh_service import AnalyticsRefreshService
+from app.services.prompt_experiment_service import PromptExperimentService
 
 CATEGORY_KEYS = [
     "opening",
@@ -99,6 +101,7 @@ class GradingService:
         self.settings = get_settings()
         self.prompt_builder = GradingPromptBuilder()
         self.analytics_refresh_service = AnalyticsRefreshService()
+        self.prompt_experiment_service = PromptExperimentService()
         self._active_prompt_version_id: str | None = None
 
     async def grade_session(self, db: Session, session_id: str) -> Scorecard:
@@ -106,7 +109,7 @@ class GradingService:
         if session is None:
             raise ValueError("session not found")
 
-        prompt_version = self._ensure_active_prompt_version(db)
+        prompt_version = self._select_prompt_version(db, session_id=session_id)
         self._active_prompt_version_id = prompt_version.id
 
         grading_run = GradingRun(
@@ -182,6 +185,22 @@ class GradingService:
             .where(PromptVersion.active.is_(True))
             .order_by(PromptVersion.created_at.desc())
         )
+
+    def _select_prompt_version(self, db: Session, *, session_id: str) -> PromptVersion:
+        experiment = self.prompt_experiment_service.get_active_experiment(db, prompt_type="grading_v2")
+        if experiment is None:
+            return self._ensure_active_prompt_version(db)
+
+        bucket = int(hashlib.md5(session_id.encode("utf-8")).hexdigest(), 16) % 100
+        selected_id = (
+            experiment.challenger_version_id
+            if bucket < int(experiment.challenger_traffic_pct)
+            else experiment.control_version_id
+        )
+        selected = db.get(PromptVersion, selected_id)
+        if selected is None:
+            return self._ensure_active_prompt_version(db)
+        return selected
 
     def _ensure_active_prompt_version(self, db: Session) -> PromptVersion:
         row = self._get_active_prompt_version(db)

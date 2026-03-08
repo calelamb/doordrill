@@ -209,6 +209,22 @@ class ObjectionTaxonomyService:
             stmt = stmt.where(ObjectionType.org_id.is_(None))
         if industry:
             stmt = stmt.where(or_(ObjectionType.industry.is_(None), ObjectionType.industry == industry))
-        return db.scalars(
-            stmt.order_by(ObjectionType.category.asc(), ObjectionType.display_name.asc(), ObjectionType.created_at.asc())
+        rows = db.scalars(
+            stmt.order_by(ObjectionType.tag.asc(), ObjectionType.created_at.asc())
         ).all()
+        if not org_id:
+            return rows
+
+        merged_by_tag: dict[str, ObjectionType] = {}
+        for row in rows:
+            current = merged_by_tag.get(row.tag)
+            if current is None:
+                merged_by_tag[row.tag] = row
+                continue
+            if current.org_id is None and row.org_id == org_id:
+                merged_by_tag[row.tag] = row
+
+        return sorted(
+            merged_by_tag.values(),
+            key=lambda item: (item.category, item.display_name, item.created_at),
+        )
