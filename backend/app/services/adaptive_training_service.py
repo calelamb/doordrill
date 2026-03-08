@@ -87,6 +87,7 @@ class AdaptiveTrainingService:
             recommended_difficulty=recommended_difficulty,
             target_difficulty_factors=target_difficulty_factors,
             weakest_skills=weakest_skills,
+            snapshots=snapshots,
         )
 
         return {
@@ -127,6 +128,7 @@ class AdaptiveTrainingService:
                     recommended_difficulty=plan["recommended_difficulty"],
                     target_difficulty_factors=plan["target_difficulty_factors"],
                     weakest_skills=plan["weakest_skills"],
+                    snapshots=[],
                 )[0]
         else:
             if not recommendations:
@@ -183,6 +185,7 @@ class AdaptiveTrainingService:
 
         return {
             "ended_at": session.ended_at or session.created_at,
+            "scenario_id": session.scenario_id,
             "overall_score": self._bounded_score(scorecard.overall_score, fallback=5.0),
             "professionalism": professionalism,
             "emotion_recovery": emotion_recovery,
@@ -245,8 +248,10 @@ class AdaptiveTrainingService:
         recommended_difficulty: int,
         target_difficulty_factors: dict[str, Any],
         weakest_skills: list[str],
+        snapshots: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         recommendations: list[dict[str, Any]] = []
+        scenario_relevance = self._scenario_relevance_map(snapshots=snapshots, weakest_skills=weakest_skills)
         for scenario in scenarios:
             factors = self._scenario_difficulty_factors(scenario)
             focus = self._scenario_skill_focus(scenario)
@@ -261,7 +266,11 @@ class AdaptiveTrainingService:
                 ]
             )
             targeted_weaknesses = [skill for skill in weakest_skills if focus.get(skill, 0.0) >= 0.18]
-            recommendation_score = round(self._clamp_10((weakness_alignment * 0.75) + (difficulty_fit * 0.65)), 2)
+            historical_relevance = scenario_relevance.get(scenario.id, 0.0)
+            recommendation_score = round(
+                self._clamp_10((weakness_alignment * 0.75) + (difficulty_fit * 0.65) + historical_relevance),
+                2,
+            )
             focus_skills = [skill for skill, weight in sorted(focus.items(), key=lambda item: item[1], reverse=True) if weight >= 0.18]
             recommendations.append(
                 {
@@ -276,6 +285,35 @@ class AdaptiveTrainingService:
                 }
             )
         return sorted(recommendations, key=lambda item: (item["recommendation_score"], -item["difficulty"]), reverse=True)[:5]
+
+    def _scenario_relevance_map(
+        self,
+        *,
+        snapshots: list[dict[str, Any]],
+        weakest_skills: list[str],
+    ) -> dict[str, float]:
+        relevance: dict[str, float] = {}
+        for snapshot in snapshots:
+            scenario_id = snapshot.get("scenario_id")
+            if not isinstance(scenario_id, str) or not scenario_id:
+                continue
+
+            scenario_score = 0.0
+            if snapshot.get("overall_score", 10.0) <= 6.5:
+                scenario_score += 0.45
+
+            skills = snapshot.get("skills") or {}
+            for skill in weakest_skills:
+                raw_score = skills.get(skill)
+                if not isinstance(raw_score, (int, float)):
+                    continue
+                if raw_score <= 6.0:
+                    scenario_score += max(0.0, (6.2 - float(raw_score)) * 0.35)
+
+            if scenario_score <= 0:
+                continue
+            relevance[scenario_id] = round(max(relevance.get(scenario_id, 0.0), min(1.5, scenario_score)), 2)
+        return relevance
 
     def _recommended_difficulty(self, *, skill_profile: dict[str, dict[str, Any]], performance_trend: float) -> int:
         readiness = self._mean(node["score"] for node in skill_profile.values())

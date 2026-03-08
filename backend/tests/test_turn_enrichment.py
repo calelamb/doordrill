@@ -271,13 +271,12 @@ def _seed_enrichment_session(seed_org: dict[str, str]) -> dict[str, str]:
         db.close()
 
 
-def test_turn_enrichment_populates_turns_and_fact_events(seed_org):
+def test_turn_enrichment_populates_emotion_columns(seed_org):
     seeded = _seed_enrichment_session(seed_org)
     db = SessionLocal()
     try:
         service = TurnEnrichmentService()
-        first_run = service.enrich_session(db, seeded["session_id"])
-        second_run = service.enrich_session(db, seeded["session_id"])
+        result = service.enrich_session(db, seeded["session_id"])
 
         turns = db.scalars(
             select(SessionTurn).where(SessionTurn.session_id == seeded["session_id"]).order_by(SessionTurn.turn_index.asc())
@@ -317,13 +316,24 @@ def test_turn_enrichment_populates_turns_and_fact_events(seed_org):
 
         assert ai_turn_2.mb_interruption_type == "homeowner_cuts_off_rep"
         assert ai_turn_2.mb_sentence_length == "short"
+        assert result["turn_count"] == 4
+    finally:
+        db.close()
+
+
+def test_turn_enrichment_writes_fact_events_idempotently(seed_org):
+    seeded = _seed_enrichment_session(seed_org)
+    db = SessionLocal()
+    try:
+        service = TurnEnrichmentService()
+        first_run = service.enrich_session(db, seeded["session_id"])
+        second_run = service.enrich_session(db, seeded["session_id"])
 
         fact_rows = db.scalars(
             select(FactTurnEvent).where(FactTurnEvent.session_id == seeded["session_id"]).order_by(FactTurnEvent.occurred_at.asc())
         ).all()
         fact_types = {row.event_type for row in fact_rows}
 
-        assert first_run["turn_count"] == 4
         assert first_run["fact_event_count"] == second_run["fact_event_count"] == len(fact_rows)
         assert {
             "emotion_transition",

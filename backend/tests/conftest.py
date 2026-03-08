@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import MetaData
 
 from app.main import app
 from app.db.session import SessionLocal, engine
@@ -13,7 +15,10 @@ from app.models.types import UserRole
 
 @pytest.fixture(autouse=True)
 def reset_db() -> None:
-    Base.metadata.drop_all(bind=engine)
+    reflected = MetaData()
+    reflected.reflect(bind=engine)
+    if reflected.tables:
+        reflected.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
 
@@ -26,14 +31,25 @@ def client() -> TestClient:
 @pytest.fixture()
 def seed_org() -> dict[str, str]:
     db = SessionLocal()
+    seed_token = uuid4().hex[:8]
 
-    org = Organization(name="Acme D2D", industry="pest_control", plan_tier="pro")
+    org = Organization(name=f"Acme D2D {seed_token}", industry="pest_control", plan_tier="pro")
     db.add(org)
     db.commit()
     db.refresh(org)
 
-    manager = User(org_id=org.id, role=UserRole.MANAGER, name="Mia Manager", email="mia@example.com")
-    rep = User(org_id=org.id, role=UserRole.REP, name="Ray Rep", email="ray@example.com")
+    manager = User(
+        org_id=org.id,
+        role=UserRole.MANAGER,
+        name="Mia Manager",
+        email=f"mia+{seed_token}@example.com",
+    )
+    rep = User(
+        org_id=org.id,
+        role=UserRole.REP,
+        name="Ray Rep",
+        email=f"ray+{seed_token}@example.com",
+    )
     db.add_all([manager, rep])
     db.commit()
     db.refresh(manager)
