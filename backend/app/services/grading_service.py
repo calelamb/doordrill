@@ -13,12 +13,14 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.grading import GradingRun
+from app.models.scenario import Scenario
 from app.models.prompt_version import PromptVersion
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.types import SessionStatus
 from app.schemas.scorecard import StructuredScorecardPayloadV2
 from app.services.analytics_refresh_service import AnalyticsRefreshService
+from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.prompt_experiment_service import PromptExperimentService
 
 CATEGORY_KEYS = [
@@ -101,6 +103,7 @@ class GradingService:
         self.settings = get_settings()
         self.prompt_builder = GradingPromptBuilder()
         self.analytics_refresh_service = AnalyticsRefreshService()
+        self.document_retrieval_service = DocumentRetrievalService(settings=self.settings)
         self.prompt_experiment_service = PromptExperimentService()
         self._active_prompt_version_id: str | None = None
 
@@ -111,6 +114,11 @@ class GradingService:
 
         prompt_version = self._select_prompt_version(db, session_id=session_id)
         self._active_prompt_version_id = prompt_version.id
+        effective_prompt_template = self._build_effective_prompt_template(
+            db,
+            session=session,
+            prompt_template=prompt_version.content,
+        )
 
         grading_run = GradingRun(
             session_id=session_id,
@@ -126,7 +134,7 @@ class GradingService:
 
         llm_result = await self._grade_with_llm(
             session=session,
-            prompt_template=prompt_version.content,
+            prompt_template=effective_prompt_template,
         )
         grading = llm_result["grading"]
         category_scores = grading["category_scores"]
@@ -231,6 +239,48 @@ class GradingService:
         db.flush()
         return row
 
+    def _build_effective_prompt_template(
+        self,
+        db: Session,
+        *,
+        session: DrillSession,
+        prompt_template: str,
+    ) -> str:
+        rep = session.rep
+        org_id = rep.org_id if rep is not None else None
+        if not org_id:
+            return prompt_template
+
+        scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
+        context_hint_parts: list[str] = []
+        if scenario is not None:
+            context_hint_parts.append(scenario.name)
+            context_hint_parts.append(f"difficulty {scenario.difficulty}")
+        context_hint = " ".join(part for part in context_hint_parts if part).strip()
+
+        chunks = self.document_retrieval_service.retrieve_for_topic(
+            db,
+            org_id=org_id,
+            topic="sales rubric objection handling closing technique grading methodology",
+            context_hint=context_hint,
+            k=4,
+            min_score=0.72,
+        )
+        if not chunks:
+            return prompt_template
+
+        formatted_context = self.document_retrieval_service.format_for_prompt(chunks)
+        if not formatted_context:
+            return prompt_template
+
+        return (
+            f"{prompt_template}\n\n"
+            f"{formatted_context}\n\n"
+            "Use the company training material above to interpret whether the rep's responses align\n"
+            "with their specific methodology. Weight company-specific technique guidance over generic\n"
+            "best practices when they conflict."
+        )
+
     async def _grade_with_llm(
         self,
         *,
@@ -241,19 +291,19 @@ class GradingService:
         rep_turns = [t for t in turns if t.speaker.value == "rep"]
         ai_turns = [t for t in turns if t.speaker.value == "ai"]
         fallback = self._grade_with_fallback(session=session, rep_turns=rep_turns, ai_turns=ai_turns)
+        prompt = self.prompt_builder.build(turns, prompt_template=prompt_template)
 
         if not self.settings.openai_api_key or os.getenv("PYTEST_CURRENT_TEST"):
             return {
                 "status": "fallback_used",
                 "grading": fallback,
-                "raw_llm_response": None,
+                "raw_llm_response": prompt[:12000],
                 "parse_error": "llm disabled for local/test execution",
                 "input_token_count": None,
                 "output_token_count": None,
                 "model_latency_ms": 0,
             }
 
-        prompt = self.prompt_builder.build(turns, prompt_template=prompt_template)
         started = perf_counter()
         url = f"{self.settings.openai_base_url.rstrip('/')}/chat/completions"
         headers = {

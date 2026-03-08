@@ -23,6 +23,7 @@ from app.models.assignment import Assignment
 from app.models.base import Base
 from app.models.device_token import DeviceToken
 from app.models.grading import GradingRun
+from app.models.knowledge import OrgDocument, OrgDocumentChunk
 from app.models.manager_action import ManagerActionLog
 from app.models.notification_delivery import NotificationDelivery
 from app.models.postprocess_run import PostprocessRun
@@ -66,6 +67,8 @@ __all__ = [
     "FactRepDaily",
     "FactSession",
     "GradingRun",
+    "OrgDocument",
+    "OrgDocumentChunk",
     "ManagerActionLog",
     "ManagerCoachingNote",
     "ManagerReview",

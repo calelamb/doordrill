@@ -4,6 +4,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.user import User
+from app.services.document_retrieval_service import DocumentRetrievalService
+
 if TYPE_CHECKING:
     from app.models.scenario import Scenario
 
@@ -270,6 +276,8 @@ class SessionPromptContext:
     scenario_snapshot: ScenarioSnapshot
     persona: HomeownerPersona
     prompt_version: str | None = None
+    org_id: str | None = None
+    territory_context: str | None = None
 
 
 @dataclass
@@ -440,6 +448,7 @@ class ConversationOrchestrator:
         self._states: dict[str, ConversationState] = {}
         self._contexts: dict[str, SessionPromptContext] = {}
         self._prompt_builder = PromptBuilder()
+        self._document_retrieval_service = DocumentRetrievalService()
 
     def initialize_session(
         self,
@@ -451,6 +460,8 @@ class ConversationOrchestrator:
         persona: dict[str, Any] | None = None,
         stages: list[str] | None = None,
         prompt_version: str | None = None,
+        org_id: str | None = None,
+        territory_context: str | None = None,
     ) -> ConversationState:
         context = SessionPromptContext(
             scenario=None,
@@ -463,6 +474,8 @@ class ConversationOrchestrator:
             ),
             persona=HomeownerPersona.from_payload(persona),
             prompt_version=prompt_version,
+            org_id=org_id,
+            territory_context=territory_context,
         )
         self._contexts[session_id] = context
 
@@ -497,13 +510,33 @@ class ConversationOrchestrator:
             "resolved_objections": list(state.resolved_objections),
         }
 
-    def bind_session_context(self, session_id: str, scenario: "Scenario | None", prompt_version: str | None = None) -> None:
+    def bind_session_context(
+        self,
+        session_id: str,
+        scenario: "Scenario | None",
+        prompt_version: str | None = None,
+        *,
+        db: Session | None = None,
+        org_id: str | None = None,
+        rep_id: str | None = None,
+    ) -> None:
         snapshot = ScenarioSnapshot.from_scenario(scenario)
+        resolved_org_id = org_id
+        if resolved_org_id is None and db is not None and rep_id:
+            rep = db.scalar(select(User).where(User.id == rep_id))
+            resolved_org_id = rep.org_id if rep is not None else None
         context = SessionPromptContext(
             scenario=scenario,
             scenario_snapshot=snapshot,
             persona=HomeownerPersona.from_payload(snapshot.persona_payload),
             prompt_version=prompt_version,
+            org_id=resolved_org_id,
+            territory_context=self._build_territory_context(
+                db,
+                scenario=scenario,
+                scenario_snapshot=snapshot,
+                org_id=resolved_org_id,
+            ),
         )
         self._contexts[session_id] = context
 
@@ -612,7 +645,7 @@ class ConversationOrchestrator:
         state = self._states.get(session_id or "")
 
         if context is not None:
-            return self._prompt_builder.build(
+            prompt = self._prompt_builder.build(
                 scenario=context.scenario,
                 scenario_snapshot=context.scenario_snapshot,
                 persona=context.persona,
@@ -626,6 +659,16 @@ class ConversationOrchestrator:
                 resolved_objections=list(state.resolved_objections) if state is not None else [],
                 behavioral_signals=list(state.last_behavior_signals) if state is not None else [],
             )
+            if context.territory_context:
+                prompt = (
+                    f"{prompt}\n\n"
+                    "=== Territory & Objection Context (from your company's training materials) ===\n"
+                    f"{context.territory_context}\n\n"
+                    "Draw on the above when deciding how to respond to the rep's pitch. These are real\n"
+                    "objections and concerns from your specific market — use them to make the simulation\n"
+                    "more realistic and representative."
+                )
+            return prompt
 
         fallback_snapshot = ScenarioSnapshot()
         fallback_persona = HomeownerPersona.from_payload(fallback_snapshot.persona_payload)
@@ -643,6 +686,41 @@ class ConversationOrchestrator:
             resolved_objections=list(state.resolved_objections) if state is not None else [],
             behavioral_signals=list(state.last_behavior_signals) if state is not None else [],
         )
+
+    def _build_territory_context(
+        self,
+        db: Session | None,
+        *,
+        scenario: "Scenario | None" = None,
+        scenario_snapshot: ScenarioSnapshot,
+        org_id: str | None,
+    ) -> str | None:
+        if db is None or not org_id:
+            return None
+        concerns = scenario_snapshot.persona_payload.get("concerns") or []
+        industry = str(getattr(scenario, "industry", "") or scenario_snapshot.persona_payload.get("industry") or "").strip()
+        context_hint = (
+            f"{scenario_snapshot.persona_payload.get('attitude', '')} homeowner "
+            f"{industry} "
+            f"{' '.join(str(item) for item in concerns if str(item).strip())}"
+        ).strip()
+        if not context_hint:
+            context_hint = f"homeowner {industry}".strip()
+        elif industry and industry not in context_hint:
+            context_hint = f"{context_hint} {industry}".strip()
+
+        chunks = self._document_retrieval_service.retrieve_for_topic(
+            db,
+            org_id=org_id,
+            topic="homeowner objections territory D2D door to door sales typical concerns",
+            context_hint=context_hint,
+            k=3,
+            min_score=0.70,
+        )
+        if not chunks:
+            return None
+        formatted = self._document_retrieval_service.format_for_prompt(chunks)
+        return formatted or None
 
     def _detect_stage(
         self,

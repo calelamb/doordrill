@@ -3,12 +3,14 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 import json
+import os
 from statistics import pstdev
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_manager, resolve_ws_actor_with_query
@@ -16,11 +18,12 @@ from app.db.session import get_db
 from app.models.analytics import AnalyticsFactAlert, AnalyticsFactManagerCalibration
 from app.models.assignment import Assignment
 from app.models.grading import GradingRun
+from app.models.knowledge import OrgDocument
 from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionEvent, SessionTurn
-from app.models.types import AssignmentStatus, ReviewReason, SessionStatus, UserRole
+from app.models.types import AssignmentStatus, OrgDocumentFileType, OrgDocumentStatus, ReviewReason, SessionStatus, UserRole
 from app.models.user import Team, User
 from app.schemas.adaptive_training import (
     AdaptiveAssignmentRequest,
@@ -28,6 +31,15 @@ from app.schemas.adaptive_training import (
     AdaptiveTrainingPlanResponse,
 )
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
+from app.schemas.knowledge import (
+    DocumentAskRequest,
+    DocumentAskResponse,
+    DocumentDeleteResponse,
+    DocumentQueryRequest,
+    DocumentQueryResponse,
+    OrgDocumentListResponse,
+    OrgDocumentResponse,
+)
 from app.schemas.manager_analytics import CalibrationAnalyticsResponse, RepRiskDetailResponse
 from app.schemas.notification import NotificationDeliveryResponse
 from app.schemas.manager_ai import (
@@ -66,6 +78,8 @@ from app.services.manager_ai_coaching_service import (
     AiCoachingUnavailableError,
     ManagerAiCoachingService,
 )
+from app.services.document_processing_service import DocumentProcessingService
+from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.services.management_analytics_runtime_service import ManagementAnalyticsRuntimeService
 from app.services.manager_feed_service import ManagerFeedService
@@ -83,6 +97,8 @@ notification_service = NotificationService()
 management_analytics_service = ManagementAnalyticsRuntimeService()
 analytics_refresh_service = AnalyticsRefreshService()
 manager_ai_service = ManagerAiCoachingService()
+document_processing_service = DocumentProcessingService(storage_service=storage_service)
+document_retrieval_service = DocumentRetrievalService()
 RUBRIC_CATEGORY_KEYS = {
     "opening": "opening",
     "pitch": "pitch",
@@ -120,6 +136,10 @@ def _serialize_review(review: ManagerReview) -> ManagerReviewResponse:
 
 def _serialize_coaching_note(note: ManagerCoachingNote) -> ManagerCoachingNoteResponse:
     return ManagerCoachingNoteResponse.model_validate(note)
+
+
+def _serialize_org_document(document: OrgDocument) -> OrgDocumentResponse:
+    return OrgDocumentResponse.model_validate(document)
 
 
 def _resolve_period_bounds(
@@ -248,6 +268,50 @@ def _get_authorized_manager(db: Session, actor: Actor, manager_id: str, detail: 
     manager = _get_user_or_404(db, manager_id, "manager")
     _ensure_same_org(actor, manager.org_id)
     return manager
+
+
+def _parse_document_file_type(filename: str | None) -> OrgDocumentFileType:
+    ext = (os.path.splitext(filename or "")[1] or "").lower().lstrip(".")
+    mapping = {
+        "pdf": OrgDocumentFileType.PDF,
+        "docx": OrgDocumentFileType.DOCX,
+        "txt": OrgDocumentFileType.TXT,
+    }
+    file_type = mapping.get(ext)
+    if file_type is None:
+        raise HTTPException(status_code=400, detail="unsupported document type")
+    return file_type
+
+
+def _build_document_storage_key(manager: User, filename: str) -> str:
+    safe_name = os.path.basename(filename or "document").replace(" ", "_")
+    return f"org-documents/{manager.org_id}/{manager.id}/{uuid4().hex}/{safe_name}"
+
+
+def _manager_chat_training_query(
+    *,
+    classification,
+    message: str,
+) -> tuple[str, str]:
+    intent = classification.intent
+    topic_by_intent = {
+        "team_performance": "team performance coaching objection handling closing methodology",
+        "rep_specific": "rep coaching skill improvement objection handling closing technique",
+        "scenario_analysis": "scenario-specific homeowner objections and technique guidance",
+        "coaching_effectiveness": "coaching methodology improvement manager feedback techniques",
+        "risk_alerts": "rep risk patterns plateau decline coaching intervention",
+        "comparison": "rep comparison coaching methodology benchmark technique",
+        "general": "sales coaching methodology objection handling closing technique",
+    }
+    topic = topic_by_intent.get(intent, topic_by_intent["general"])
+    context_hint_parts = [
+        classification.rep_name_mentioned or "",
+        classification.scenario_mentioned or "",
+        classification.category_mentioned or "",
+        message,
+    ]
+    context_hint = " ".join(part for part in context_hint_parts if part).strip()
+    return topic, context_hint
 
 
 def _serialize_chat_payload(value: Any) -> Any:
@@ -599,6 +663,143 @@ def _get_live_sessions_payload(db: Session, manager_id: str, actor: Actor) -> Li
         live_sessions=live_sessions,
         checked_at=checked_at.isoformat(),
     )
+
+
+@router.post("/documents", response_model=OrgDocumentResponse)
+async def upload_manager_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    manager_id: str = Form(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> OrgDocumentResponse:
+    manager = _get_authorized_manager(db, actor, manager_id, "manager can only upload their own documents")
+    file_type = _parse_document_file_type(file.filename)
+    document_name = name.strip()
+    if not document_name:
+        raise HTTPException(status_code=400, detail="document name is required")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="uploaded file is empty")
+
+    storage_key = _build_document_storage_key(manager, file.filename or f"{document_name}.{file_type.value}")
+    storage_service.upload_bytes(storage_key, file_bytes, content_type=file.content_type or "application/octet-stream")
+
+    document = OrgDocument(
+        org_id=manager.org_id,
+        name=document_name,
+        original_filename=file.filename or f"{document_name}.{file_type.value}",
+        file_type=file_type,
+        storage_key=storage_key,
+        status=OrgDocumentStatus.PENDING,
+        uploaded_by=manager.id,
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    background_tasks.add_task(document_processing_service.run_background_task, document.id)
+    return _serialize_org_document(document)
+
+
+@router.get("/documents", response_model=OrgDocumentListResponse)
+def list_manager_documents(
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> OrgDocumentListResponse:
+    manager = _get_authorized_manager(db, actor, manager_id, "manager can only access their own documents")
+    documents = db.scalars(
+        select(OrgDocument)
+        .where(OrgDocument.org_id == manager.org_id)
+        .order_by(OrgDocument.created_at.desc(), OrgDocument.id.desc())
+    ).all()
+    return OrgDocumentListResponse(documents=[_serialize_org_document(document) for document in documents])
+
+
+@router.get("/documents/{document_id}", response_model=OrgDocumentResponse)
+def get_manager_document(
+    document_id: str,
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> OrgDocumentResponse:
+    manager = _get_authorized_manager(db, actor, manager_id, "manager can only access their own documents")
+    document = db.scalar(select(OrgDocument).where(OrgDocument.id == document_id))
+    if document is None or document.org_id != manager.org_id:
+        raise HTTPException(status_code=404, detail="document not found")
+    return _serialize_org_document(document)
+
+
+@router.delete("/documents/{document_id}", response_model=DocumentDeleteResponse)
+def delete_manager_document(
+    document_id: str,
+    manager_id: str = Query(...),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> DocumentDeleteResponse:
+    manager = _get_authorized_manager(db, actor, manager_id, "manager can only delete their own documents")
+    document = db.scalar(select(OrgDocument).where(OrgDocument.id == document_id))
+    if document is None or document.org_id != manager.org_id:
+        raise HTTPException(status_code=404, detail="document not found")
+
+    storage_key = document.storage_key
+    db.execute(delete(OrgDocument).where(OrgDocument.id == document.id))
+    db.commit()
+    storage_service.delete_object(storage_key)
+    return DocumentDeleteResponse(document_id=document_id)
+
+
+@router.post("/documents/query", response_model=DocumentQueryResponse)
+def query_manager_documents(
+    payload: DocumentQueryRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> DocumentQueryResponse:
+    manager = _get_authorized_manager(db, actor, payload.manager_id, "manager can only query their own documents")
+    has_documents = document_retrieval_service.has_ready_documents(db, org_id=manager.org_id)
+    if not has_documents:
+        return DocumentQueryResponse(chunks=[], has_documents=False)
+
+    chunks = document_retrieval_service.retrieve(
+        db,
+        org_id=manager.org_id,
+        query=payload.query,
+        k=payload.k,
+    )
+    return DocumentQueryResponse(chunks=chunks, has_documents=True)
+
+
+@router.post("/documents/ask", response_model=DocumentAskResponse)
+def ask_manager_documents(
+    payload: DocumentAskRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> DocumentAskResponse:
+    manager = _get_authorized_manager(db, actor, payload.manager_id, "manager can only query their own documents")
+    sources = document_retrieval_service.retrieve(
+        db,
+        org_id=manager.org_id,
+        query=payload.question,
+        k=5,
+    )
+    if not sources:
+        return DocumentAskResponse(
+            answer="The uploaded company training material does not address that question.",
+            sources=[],
+        )
+
+    try:
+        answer = manager_ai_service.answer_company_material_question(
+            question=payload.question,
+            sources=sources,
+        )
+    except AiCoachingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return DocumentAskResponse(answer=answer, sources=sources)
 
 
 @router.get("/team")
@@ -1501,6 +1702,22 @@ def chat_with_manager_ai(
                 ]
             },
         )
+
+    training_topic, training_context_hint = _manager_chat_training_query(
+        classification=classification,
+        message=payload.message,
+    )
+    company_training_context = manager_ai_service._get_company_training_context(
+        db,
+        org_id=manager.org_id,
+        topic=training_topic,
+        context_hint=training_context_hint,
+        k=3,
+        min_score=0.68,
+        max_tokens=900,
+    )
+    if company_training_context:
+        relevant_data["company_training_context"] = company_training_context
 
     try:
         answer = manager_ai_service.answer_manager_chat(

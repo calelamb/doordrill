@@ -38,3 +38,17 @@ class ReviewReason(str, enum.Enum):
     POLICY_OVERRIDE = "policy_override"
     MANAGER_COACHING = "manager_coaching"
     REVIEW_ONLY = "review_only"
+
+
+class OrgDocumentFileType(str, enum.Enum):
+    PDF = "pdf"
+    DOCX = "docx"
+    TXT = "txt"
+    VIDEO_TRANSCRIPT = "video_transcript"
+
+
+class OrgDocumentStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"

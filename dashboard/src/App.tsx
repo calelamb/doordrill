@@ -12,6 +12,7 @@ import { CoachingLabPage } from "./pages/CoachingLabPage";
 import { ExplorerPage } from "./pages/ExplorerPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LiveSessionPage } from "./pages/LiveSessionPage";
+import { KnowledgeBasePage } from "./pages/KnowledgeBasePage";
 import { ManagerReplayPage } from "./pages/ManagerReplayPage";
 import { RepProgressPage } from "./pages/RepProgressPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
@@ -82,6 +83,7 @@ export function App() {
           <Route path="/manager/scenarios" element={<ScenarioIntelligencePage />} />
           <Route path="/manager/coaching" element={<CoachingLabPage />} />
           <Route path="/manager/explorer" element={<ExplorerPage />} />
+          <Route path="/knowledge-base" element={<KnowledgeBasePage />} />
           <Route path="/manager/actions" element={<ActionsPage />} />
           <Route path="/manager/assignments/new" element={<AssignmentCreatePage />} />
         </Route>

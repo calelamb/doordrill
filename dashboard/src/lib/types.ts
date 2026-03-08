@@ -263,6 +263,42 @@ export type SessionAnnotationsResponse = {
   annotations: SessionAnnotation[];
 };
 
+export type KnowledgeDocumentStatus = "pending" | "processing" | "ready" | "failed";
+
+export type KnowledgeDocument = {
+  id: string;
+  name: string;
+  original_filename: string;
+  file_type: string;
+  status: KnowledgeDocumentStatus;
+  chunk_count: number | null;
+  token_count: number | null;
+  error_message: string | null;
+  created_at: string;
+};
+
+export type KnowledgeDocumentListResponse = {
+  documents: KnowledgeDocument[];
+};
+
+export type KnowledgeDeleteResponse = {
+  ok: boolean;
+  document_id: string;
+};
+
+export type KnowledgeQueryChunk = {
+  chunk_id: string;
+  document_id: string;
+  document_name: string;
+  text: string;
+  similarity_score: number;
+};
+
+export type KnowledgeQueryResponse = {
+  chunks: KnowledgeQueryChunk[];
+  has_documents: boolean;
+};
+
 export type TeamCoachingSummaryResponse = {
   manager_id: string;
   period_days: number;

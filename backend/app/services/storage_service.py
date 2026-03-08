@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 from app.core.config import Settings, get_settings
@@ -44,6 +45,9 @@ class StorageService:
         except Exception:
             logger.exception("Failed to initialize object storage client")
             return None
+
+    def _local_object_path(self, storage_key: str) -> Path:
+        return Path("uploads") / "storage" / storage_key
 
     def upload_audio(self, storage_key: str, ttl_seconds: int = 3600, content_type: str = "audio/ogg") -> dict[str, Any]:
         ttl = ttl_seconds or self.settings.default_presign_ttl_seconds
@@ -88,6 +92,43 @@ class StorageService:
             "storage_key": storage_key,
             "expires_in": ttl,
         }
+
+    def upload_bytes(self, storage_key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
+        if self._s3_client is not None:
+            self._s3_client.put_object(
+                Bucket=self.settings.storage_bucket,
+                Key=storage_key,
+                Body=data,
+                ContentType=content_type,
+            )
+            return storage_key
+
+        object_path = self._local_object_path(storage_key)
+        object_path.parent.mkdir(parents=True, exist_ok=True)
+        object_path.write_bytes(data)
+        return storage_key
+
+    def download_bytes(self, storage_key: str) -> bytes:
+        if self._s3_client is not None:
+            response = self._s3_client.get_object(Bucket=self.settings.storage_bucket, Key=storage_key)
+            body = response.get("Body")
+            if body is None:
+                raise FileNotFoundError(f"storage object missing body: {storage_key}")
+            return body.read()
+
+        object_path = self._local_object_path(storage_key)
+        if not object_path.exists():
+            raise FileNotFoundError(f"storage object not found: {storage_key}")
+        return object_path.read_bytes()
+
+    def delete_object(self, storage_key: str) -> None:
+        if self._s3_client is not None:
+            self._s3_client.delete_object(Bucket=self.settings.storage_bucket, Key=storage_key)
+            return
+
+        object_path = self._local_object_path(storage_key)
+        if object_path.exists():
+            object_path.unlink()
 
     def get_presigned_url(self, storage_key: str, ttl_seconds: int = 3600) -> str:
         ttl = ttl_seconds or self.settings.default_presign_ttl_seconds

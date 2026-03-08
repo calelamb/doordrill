@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActivitySquare, BarChart2, Compass, History, LayoutDashboard, LogOut, Scale, Shield, TreePine } from "lucide-react";
+import { ActivitySquare, BarChart2, BookOpenText, Compass, History, LayoutDashboard, LogOut, Scale, Shield, TreePine } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { clearStoredAuth, getValidStoredAuth } from "../lib/auth";
@@ -24,6 +24,7 @@ export function Sidebar() {
     const isScenarios = location.pathname.startsWith("/manager/scenarios");
     const isCoaching = location.pathname.startsWith("/manager/coaching");
     const isExplorer = location.pathname.startsWith("/manager/explorer");
+    const isKnowledgeBase = location.pathname.startsWith("/knowledge-base");
     const isActions = location.pathname.startsWith("/manager/actions");
 
     useEffect(() => {
@@ -143,6 +144,17 @@ export function Sidebar() {
                 >
                     <Compass className="w-4.5 h-4.5 min-w-4.5" />
                     Explorer
+                </Link>
+
+                <Link
+                    to="/knowledge-base"
+                    className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-200 text-sm ${isKnowledgeBase
+                            ? "bg-accent-soft text-accent font-semibold"
+                            : "text-muted hover:bg-white/40 font-medium"
+                        }`}
+                >
+                    <BookOpenText className="w-4.5 h-4.5 min-w-4.5" />
+                    Knowledge Base
                 </Link>
 
                 <Link

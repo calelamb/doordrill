@@ -32,7 +32,9 @@ from app.schemas.manager_ai import (
     TeamCoachingSummaryResponse,
     WeeklyTeamBriefingResponse,
 )
+from app.schemas.knowledge import RetrievedChunk
 from app.services.adaptive_training_service import AdaptiveTrainingService
+from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.management_cache_service import ManagementCacheService
 
 READINESS_THRESHOLD = 7.0
@@ -133,6 +135,7 @@ class ManagerAiCoachingService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.adaptive_training_service = AdaptiveTrainingService()
+        self.document_retrieval_service = DocumentRetrievalService(settings=self.settings)
         cache_size = max(128, self.settings.management_analytics_cache_max_entries)
         self.rep_insight_cache = ManagementCacheService(
             redis_url=self.settings.redis_url,
@@ -228,6 +231,72 @@ Respond with JSON:
             action_suggestion=content.action_suggestion,
             data_points=content.data_points[:4],
         )
+
+    def answer_company_material_question(
+        self,
+        *,
+        question: str,
+        sources: list[RetrievedChunk],
+    ) -> str:
+        if not sources:
+            return "The uploaded company training material does not address that question."
+
+        formatted_sources = self.document_retrieval_service.format_for_prompt(sources, max_tokens=1400)
+        prompt = f"""
+Answer the manager's question using only the provided company training material.
+If the material does not answer the question, say so directly.
+Do not invent advice, policies, or details that are not stated in the material.
+
+Question: "{question.strip()}"
+
+Provided company training material:
+{formatted_sources}
+
+Respond with JSON only:
+{{
+  "answer": "2-4 sentence answer grounded only in the provided material"
+}}
+""".strip()
+
+        content = self._call_claude_json(
+            system_prompt="You answer questions strictly from provided company training material. Return only valid JSON.",
+            user_prompt=prompt,
+            max_tokens=320,
+            model=self.settings.anthropic_chat_answer_model,
+        )
+
+        if isinstance(content, dict):
+            answer = content.get("answer")
+            if isinstance(answer, str) and answer.strip():
+                return answer.strip()
+
+        raise AiCoachingUnavailableError("Claude returned an invalid company material answer payload")
+
+    def _get_company_training_context(
+        self,
+        db: Session,
+        *,
+        org_id: str | None,
+        topic: str,
+        context_hint: str = "",
+        k: int = 3,
+        min_score: float = 0.68,
+        max_tokens: int = 900,
+    ) -> str | None:
+        if not org_id:
+            return None
+        chunks = self.document_retrieval_service.retrieve_for_topic(
+            db,
+            org_id=org_id,
+            topic=topic,
+            context_hint=context_hint,
+            k=k,
+            min_score=min_score,
+        )
+        if not chunks:
+            return None
+        formatted = self.document_retrieval_service.format_for_prompt(chunks, max_tokens=max_tokens)
+        return formatted or None
 
     def generate_rep_insight(self, db: Session, *, rep: User, period_days: int) -> RepInsightResponse:
         cache_key = f"rep_insight:{rep.id}:{period_days}"
@@ -371,6 +440,15 @@ Respond with JSON:
             trend_direction = "flat"
 
         top_weakness_tags = [tag for tag, _ in weakness_counts.most_common(3)]
+        company_training_context = self._get_company_training_context(
+            db,
+            org_id=rep.org_id,
+            topic=f"coaching {' '.join(top_weakness_tags)} technique improvement".strip(),
+            context_hint=f"rep {rep.name} weak areas {' '.join(adaptive_plan.get('weakest_skills', []))}".strip(),
+            k=3,
+            min_score=0.68,
+            max_tokens=900,
+        )
         below_threshold_count = sum(1 for score in scores if score < 6.0)
         last_three_summaries = "\n".join(
             f"- {item['scenario_name']} (difficulty {item['scenario_difficulty']}): {item['summary']}"
@@ -396,6 +474,8 @@ Rep data:
 - Readiness trajectory: {json.dumps(readiness_trajectory, default=str)}
 - Recent AI session summaries:
 {last_three_summaries}
+
+{"Company training material relevant to this rep's weak areas:\n" + company_training_context + "\n\nWhen writing the coaching_script, reference what the company's own material says\nabout improving these skills. Quote or paraphrase it specifically — don't give generic advice." if company_training_context else ""}
 
 Provide a coaching analysis in this exact JSON format:
 {{
@@ -614,6 +694,15 @@ Provide a coaching analysis in this exact JSON format:
             for outcome in outcomes
         ]
         latest_recommendation = next(iter(adaptive_plan.get("recommended_scenarios") or []), {})
+        company_training_context = self._get_company_training_context(
+            db,
+            org_id=rep.org_id,
+            topic=f"1:1 coaching {' '.join(adaptive_plan.get('weakest_skills', []))} conversation technique".strip(),
+            context_hint=f"manager {manager.name} coaching rep {rep.name}".strip(),
+            k=3,
+            min_score=0.68,
+            max_tokens=900,
+        )
         prompt = f"""
 You are an expert D2D sales manager preparing for a 1:1 coaching conversation.
 
@@ -630,6 +719,8 @@ Rep:
 - Last 5 sessions: {json.dumps(recent_sessions_payload, default=str)}
 - Recent adaptive recommendation outcomes: {json.dumps(recent_outcomes_payload, default=str)}
 - Current top recommended next scenario: {json.dumps(latest_recommendation, default=str)}
+
+{"Company training material relevant to this rep's weak areas:\n" + company_training_context + "\n\nWhen writing the prep, reference what the company's own material says\nabout improving these skills. Quote or paraphrase it specifically — don't give generic advice." if company_training_context else ""}
 
 Return JSON in this exact shape:
 {{

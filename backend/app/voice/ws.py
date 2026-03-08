@@ -19,6 +19,7 @@ from app.models.scenario import Scenario
 from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionTurn
 from app.models.types import AssignmentStatus, EventDirection, SessionStatus, TurnSpeaker
+from app.models.user import User
 from app.schemas.ws import WsEvent
 from app.services.conversation_orchestrator import ConversationOrchestrator
 from app.services.ledger_buffer import InMemoryEventBuffer, RedisEventBuffer
@@ -131,10 +132,14 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     ws_trace_id = _resolve_trace_id(websocket.headers)
 
     scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
+    rep = db.scalar(select(User).where(User.id == session.rep_id))
     orchestrator.bind_session_context(
         session_id=session_id,
         scenario=scenario,
         prompt_version=session.prompt_version,
+        db=db,
+        org_id=rep.org_id if rep is not None else None,
+        rep_id=session.rep_id,
     )
     micro_behavior_engine.initialize_session(
         session_id,
