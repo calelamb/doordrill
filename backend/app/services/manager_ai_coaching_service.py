@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
@@ -8,25 +9,33 @@ from typing import Any, Sequence
 
 import httpx
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import get_settings
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionTurn
+from app.models.training import AdaptiveRecommendationOutcome, OverrideLabel
 from app.models.user import User
+from app.models.warehouse import FactRepDaily
 from app.schemas.manager_ai import (
     ManagerChatAnswerContent,
     ManagerChatClassification,
+    OneOnOnePrepContent,
+    OneOnOnePrepResponse,
     RepInsightContent,
     RepInsightResponse,
     SessionAnnotation,
     SessionAnnotationsResponse,
     TeamCoachingSummaryContent,
     TeamCoachingSummaryResponse,
+    WeeklyTeamBriefingResponse,
 )
+from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.management_cache_service import ManagementCacheService
+
+READINESS_THRESHOLD = 7.0
 
 RUBRIC_CATEGORY_KEYS = {
     "opening": "opening",
@@ -123,10 +132,21 @@ def _trim_to_three_sentences(text: str) -> str:
 class ManagerAiCoachingService:
     def __init__(self) -> None:
         self.settings = get_settings()
+        self.adaptive_training_service = AdaptiveTrainingService()
         cache_size = max(128, self.settings.management_analytics_cache_max_entries)
         self.rep_insight_cache = ManagementCacheService(
             redis_url=self.settings.redis_url,
             ttl_seconds=3600,
+            max_entries=cache_size,
+        )
+        self.one_on_one_prep_cache = ManagementCacheService(
+            redis_url=self.settings.redis_url,
+            ttl_seconds=2 * 3600,
+            max_entries=cache_size,
+        )
+        self.weekly_team_briefing_cache = ManagementCacheService(
+            redis_url=self.settings.redis_url,
+            ttl_seconds=6 * 3600,
             max_entries=cache_size,
         )
         self.session_annotations_cache = ManagementCacheService(
@@ -238,6 +258,51 @@ Respond with JSON:
         if not rows:
             raise AiCoachingDataUnavailableError("No scored sessions are available for this rep in the selected period")
 
+        recent_session_ids = [str(row["session_id"]) for row in rows if row["session_id"]]
+        detailed_sessions = db.scalars(
+            select(DrillSession)
+            .where(DrillSession.id.in_(recent_session_ids))
+            .order_by(DrillSession.started_at.asc(), DrillSession.created_at.asc())
+            .options(
+                selectinload(DrillSession.scorecard),
+                selectinload(DrillSession.turns),
+                selectinload(DrillSession.events),
+            )
+        ).all()
+        scenarios_by_id = {
+            scenario.id: scenario
+            for scenario in db.scalars(
+                select(Scenario).where(Scenario.id.in_({session.scenario_id for session in detailed_sessions}))
+            ).all()
+        }
+        recent_snapshots = [
+            self.adaptive_training_service._build_session_snapshot(
+                session=session,
+                scenario=scenarios_by_id.get(session.scenario_id),
+            )
+            for session in detailed_sessions
+            if session.scorecard is not None
+        ]
+        adaptive_plan = self.adaptive_training_service.build_plan(db, rep_id=rep.id)
+        adaptive_skill_profile = list(adaptive_plan.get("skill_profile") or [])
+        readiness_trajectory = self._compute_readiness_trajectory(
+            recent_snapshots,
+            adaptive_skill_profile,
+        )
+        emotion_recovery_average = round(
+            self._mean(
+                snapshot.get("emotion_recovery", 0.0)
+                for snapshot in recent_snapshots
+                if isinstance(snapshot.get("emotion_recovery"), (int, float))
+            ),
+            2,
+        )
+        override_signal = self._load_override_signal(
+            db,
+            rep_id=rep.id,
+            cutoff=cutoff,
+        )
+
         scores = [float(row["overall_score"]) for row in rows if row["overall_score"] is not None]
         average_score = round(sum(scores) / len(scores), 2) if scores else 0.0
 
@@ -322,6 +387,13 @@ Rep data:
 - Score trend: {trend_direction} ({trend_delta:+.1f} over last 10 sessions)
 - Category averages: Opening {category_averages['opening']}/10, Pitch {category_averages['pitch']}/10, Objection Handling {category_averages['objection_handling']}/10, Closing {category_averages['closing']}/10, Professionalism {category_averages['professionalism']}/10
 - Top weakness tags: {", ".join(top_weakness_tags) if top_weakness_tags else "None identified"}
+- Adaptive skill profile: {json.dumps(adaptive_skill_profile, default=str)}
+- Adaptive readiness score: {adaptive_plan.get('readiness_score', 0.0)}/10
+- Recommended difficulty: {adaptive_plan.get('recommended_difficulty')}
+- Adaptive weakest skills: {", ".join(adaptive_plan.get('weakest_skills', [])) or "None identified"}
+- Emotion recovery average across recent sessions: {emotion_recovery_average}/10
+- Override signal: {json.dumps(override_signal, default=str)}
+- Readiness trajectory: {json.dumps(readiness_trajectory, default=str)}
 - Recent AI session summaries:
 {last_three_summaries}
 
@@ -336,12 +408,20 @@ Provide a coaching analysis in this exact JSON format:
 }}
 """.strip()
 
+        content_payload = self._call_claude_json(
+            system_prompt="You are a precise sales coaching analyst. Return only valid JSON.",
+            user_prompt=prompt,
+            max_tokens=700,
+        )
+        if not isinstance(content_payload, dict):
+            raise AiCoachingUnavailableError("Claude returned an invalid rep insight payload")
         content = RepInsightContent.model_validate(
-            self._call_claude_json(
-                system_prompt="You are a precise sales coaching analyst. Return only valid JSON.",
-                user_prompt=prompt,
-                max_tokens=700,
-            )
+            {
+                **content_payload,
+                "readiness_trajectory": readiness_trajectory,
+                "override_signal": override_signal,
+                "adaptive_skill_profile": adaptive_skill_profile,
+            }
         )
 
         data_summary = {
@@ -359,6 +439,14 @@ Provide a coaching analysis in this exact JSON format:
             },
             "recent_session_summaries": recent_summaries[:3],
             "recent_scenarios": scenario_samples[:10],
+            "adaptive_plan": {
+                "readiness_score": adaptive_plan.get("readiness_score"),
+                "recommended_difficulty": adaptive_plan.get("recommended_difficulty"),
+                "weakest_skills": adaptive_plan.get("weakest_skills", []),
+            },
+            "emotion_recovery_average": emotion_recovery_average,
+            "override_signal": override_signal,
+            "readiness_trajectory": readiness_trajectory,
         }
         response = RepInsightResponse(
             rep_id=rep.id,
@@ -369,6 +457,590 @@ Provide a coaching analysis in this exact JSON format:
         )
         self.rep_insight_cache.set_json(cache_key, response.model_dump(mode="json"))
         return response
+
+    def generate_one_on_one_prep(
+        self,
+        db: Session,
+        *,
+        rep: User,
+        manager: User,
+        period_days: int,
+    ) -> OneOnOnePrepResponse:
+        cache_key = f"one_on_one_prep:{manager.id}:{rep.id}:{period_days}"
+        cached = self.one_on_one_prep_cache.get_json(cache_key)
+        if cached is not None:
+            return OneOnOnePrepResponse.model_validate(cached)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
+        sessions = db.scalars(
+            select(DrillSession)
+            .join(Scorecard, Scorecard.session_id == DrillSession.id)
+            .where(
+                DrillSession.rep_id == rep.id,
+                DrillSession.started_at >= cutoff,
+            )
+            .order_by(DrillSession.started_at.desc(), DrillSession.created_at.desc())
+            .limit(5)
+            .options(
+                selectinload(DrillSession.scorecard).selectinload(Scorecard.coaching_notes),
+                selectinload(DrillSession.turns),
+                selectinload(DrillSession.events),
+            )
+        ).all()
+        if not sessions:
+            raise AiCoachingDataUnavailableError("No scored sessions are available for this rep in the selected period")
+
+        outcomes = db.scalars(
+            select(AdaptiveRecommendationOutcome)
+            .where(
+                AdaptiveRecommendationOutcome.rep_id == rep.id,
+                AdaptiveRecommendationOutcome.created_at >= cutoff,
+            )
+            .order_by(AdaptiveRecommendationOutcome.outcome_written_at.desc(), AdaptiveRecommendationOutcome.created_at.desc())
+            .limit(5)
+        ).all()
+
+        session_ids = [session.id for session in sessions]
+        labels = db.scalars(
+            select(OverrideLabel)
+            .where(OverrideLabel.session_id.in_(session_ids))
+            .order_by(OverrideLabel.created_at.desc())
+        ).all() if session_ids else []
+        labels_by_session: dict[str, list[OverrideLabel]] = defaultdict(list)
+        for label in labels:
+            labels_by_session[label.session_id].append(label)
+
+        scenario_ids = {session.scenario_id for session in sessions}
+        scenario_ids.update(
+            str(outcome.recommended_scenario_id)
+            for outcome in outcomes
+            if outcome.recommended_scenario_id
+        )
+        scenarios_by_id = {
+            scenario.id: scenario
+            for scenario in db.scalars(select(Scenario).where(Scenario.id.in_(scenario_ids))).all()
+        } if scenario_ids else {}
+
+        chronological_sessions = sorted(
+            sessions,
+            key=lambda session: (
+                session.started_at or session.created_at,
+                session.created_at,
+            ),
+        )
+        recent_snapshots = [
+            self.adaptive_training_service._build_session_snapshot(
+                session=session,
+                scenario=scenarios_by_id.get(session.scenario_id),
+            )
+            for session in chronological_sessions
+            if session.scorecard is not None
+        ]
+        adaptive_plan = self.adaptive_training_service.build_plan(db, rep_id=rep.id)
+        readiness_trajectory = self._compute_readiness_trajectory(
+            recent_snapshots,
+            adaptive_plan.get("skill_profile") or [],
+        )
+        override_signal = self._load_override_signal(
+            db,
+            rep_id=rep.id,
+            cutoff=cutoff,
+        )
+        note_tag_counts: Counter[str] = Counter()
+        recent_sessions_payload: list[dict[str, Any]] = []
+
+        for session in sessions:
+            scorecard = session.scorecard
+            if scorecard is None:
+                continue
+            scenario = scenarios_by_id.get(session.scenario_id)
+            normalized_scores = self._normalize_category_scores(scorecard.category_scores)
+            coaching_notes = [
+                {
+                    "note": note.note,
+                    "visible_to_rep": note.visible_to_rep,
+                    "weakness_tags": list(note.weakness_tags or []),
+                    "created_at": note.created_at.isoformat() if note.created_at else None,
+                }
+                for note in scorecard.coaching_notes[:2]
+            ]
+            for note in scorecard.coaching_notes:
+                note_tag_counts.update(
+                    tag for tag in (note.weakness_tags or []) if isinstance(tag, str) and tag.strip()
+                )
+
+            recent_sessions_payload.append(
+                {
+                    "session_id": session.id,
+                    "started_at": session.started_at.isoformat() if session.started_at else None,
+                    "scenario_name": scenario.name if scenario else "Unknown Scenario",
+                    "scenario_difficulty": int(scenario.difficulty) if scenario else None,
+                    "overall_score": round(float(scorecard.overall_score), 2),
+                    "category_scores": normalized_scores,
+                    "weakness_tags": list(scorecard.weakness_tags or []),
+                    "ai_summary": scorecard.ai_summary,
+                    "coaching_notes": coaching_notes,
+                    "override_labels": [
+                        {
+                            "delta": round(label.override_delta_overall, 2),
+                            "reason": label.override_reason_text,
+                            "most_overridden_category": self._most_overridden_category([label]),
+                            "created_at": label.created_at.isoformat() if label.created_at else None,
+                        }
+                        for label in labels_by_session.get(session.id, [])[:2]
+                    ],
+                }
+            )
+
+        recent_outcomes_payload = [
+            {
+                "scenario_name": (
+                    scenarios_by_id[outcome.recommended_scenario_id].name
+                    if outcome.recommended_scenario_id in scenarios_by_id
+                    else outcome.recommended_scenario_id
+                ),
+                "recommended_difficulty": outcome.recommended_difficulty,
+                "focus_skills": list(outcome.recommended_focus_skills or []),
+                "recommendation_success": outcome.recommendation_success,
+                "skill_delta": dict(outcome.skill_delta or {}),
+                "baseline_overall_score": outcome.baseline_overall_score,
+                "outcome_overall_score": outcome.outcome_overall_score,
+                "outcome_written_at": (
+                    outcome.outcome_written_at.isoformat()
+                    if outcome.outcome_written_at
+                    else outcome.created_at.isoformat() if outcome.created_at else None
+                ),
+            }
+            for outcome in outcomes
+        ]
+        latest_recommendation = next(iter(adaptive_plan.get("recommended_scenarios") or []), {})
+        prompt = f"""
+You are an expert D2D sales manager preparing for a 1:1 coaching conversation.
+
+Manager:
+- Name: {manager.name}
+
+Rep:
+- Name: {rep.name}
+- Period analyzed: {period_days} days
+- Adaptive plan: {json.dumps(adaptive_plan, default=str)}
+- Readiness trajectory: {json.dumps(readiness_trajectory, default=str)}
+- Override signal: {json.dumps(override_signal, default=str)}
+- Coaching note themes: {json.dumps(note_tag_counts.most_common(3), default=str)}
+- Last 5 sessions: {json.dumps(recent_sessions_payload, default=str)}
+- Recent adaptive recommendation outcomes: {json.dumps(recent_outcomes_payload, default=str)}
+- Current top recommended next scenario: {json.dumps(latest_recommendation, default=str)}
+
+Return JSON in this exact shape:
+{{
+  "discussion_topics": [
+    {{"topic": "string", "evidence": "1 sentence with specific numbers", "suggested_opener": "exact words the manager should say"}},
+    {{"topic": "string", "evidence": "1 sentence with specific numbers", "suggested_opener": "exact words the manager should say"}},
+    {{"topic": "string", "evidence": "1 sentence with specific numbers", "suggested_opener": "exact words the manager should say"}}
+  ],
+  "strength_to_acknowledge": {{"skill": "string", "what_to_say": "1-2 sentences"}},
+  "pattern_to_challenge": {{"skill": "string", "pattern": "description with concrete evidence", "what_to_say": "1-2 sentences"}},
+  "suggested_next_scenario": {{"scenario_type": "string", "difficulty": 1, "rationale": "1 sentence with specific rationale"}},
+  "readiness_summary": "one sentence on where this rep stands overall right now"
+}}
+
+Requirements:
+- `discussion_topics` must be exactly 3 items ordered by priority.
+- Every evidence sentence must cite real numbers from the provided data.
+- Avoid generic coaching language. Make each opener feel like something a manager would actually say in a 1:1.
+""".strip()
+
+        content_payload = self._call_claude_json(
+            system_prompt="You are a precise manager prep copilot. Return only valid JSON.",
+            user_prompt=prompt,
+            max_tokens=900,
+        )
+        if not isinstance(content_payload, dict):
+            raise AiCoachingUnavailableError("Claude returned an invalid one-on-one prep payload")
+        if isinstance(content_payload.get("discussion_topics"), list):
+            content_payload["discussion_topics"] = content_payload["discussion_topics"][:3]
+
+        content = OneOnOnePrepContent.model_validate(content_payload)
+        data_summary = {
+            "period_days": period_days,
+            "adaptive_plan": {
+                "readiness_score": adaptive_plan.get("readiness_score"),
+                "recommended_difficulty": adaptive_plan.get("recommended_difficulty"),
+                "weakest_skills": adaptive_plan.get("weakest_skills", []),
+            },
+            "readiness_trajectory": readiness_trajectory,
+            "override_signal": override_signal,
+            "coaching_note_themes": [
+                {"tag": tag, "count": count}
+                for tag, count in note_tag_counts.most_common(3)
+            ],
+            "recent_sessions": recent_sessions_payload,
+            "adaptive_outcomes": recent_outcomes_payload,
+        }
+        response = OneOnOnePrepResponse(
+            manager_id=manager.id,
+            rep_id=rep.id,
+            rep_name=rep.name,
+            period_days=period_days,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            data_summary=data_summary,
+            **content.model_dump(),
+        )
+        self.one_on_one_prep_cache.set_json(cache_key, response.model_dump(mode="json"))
+        return response
+
+    def generate_weekly_team_briefing(
+        self,
+        db: Session,
+        *,
+        manager: User,
+        reps: list[User],
+    ) -> WeeklyTeamBriefingResponse:
+        cache_key = f"weekly_team_briefing:{manager.id}"
+        cached = self.weekly_team_briefing_cache.get_json(cache_key)
+        if cached is not None:
+            return WeeklyTeamBriefingResponse.model_validate(cached)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        rep_ids = [rep.id for rep in reps]
+        if not rep_ids:
+            raise AiCoachingDataUnavailableError("No reps are available for this manager")
+
+        sessions = db.scalars(
+            select(DrillSession)
+            .join(Scorecard, Scorecard.session_id == DrillSession.id)
+            .where(
+                DrillSession.rep_id.in_(rep_ids),
+                DrillSession.started_at >= cutoff,
+            )
+            .order_by(DrillSession.started_at.desc(), DrillSession.created_at.desc())
+            .options(
+                selectinload(DrillSession.scorecard),
+                selectinload(DrillSession.turns),
+                selectinload(DrillSession.events),
+            )
+        ).all()
+        if not sessions:
+            raise AiCoachingDataUnavailableError("No scored sessions are available for this team in the last 7 days")
+
+        sessions_by_rep: dict[str, list[DrillSession]] = defaultdict(list)
+        weakness_counts: Counter[str] = Counter()
+        for session in sessions:
+            sessions_by_rep[session.rep_id].append(session)
+            if session.scorecard is not None:
+                weakness_counts.update(
+                    tag for tag in (session.scorecard.weakness_tags or []) if isinstance(tag, str) and tag.strip()
+                )
+
+        active_reps = [
+            rep
+            for rep in reps
+            if sessions_by_rep.get(rep.id)
+        ]
+        active_reps.sort(
+            key=lambda rep: (
+                len(sessions_by_rep.get(rep.id, [])),
+                max(
+                    (
+                        (session.started_at or session.created_at)
+                        for session in sessions_by_rep.get(rep.id, [])
+                    ),
+                    default=datetime.min.replace(tzinfo=timezone.utc),
+                ),
+            ),
+            reverse=True,
+        )
+        capped_reps = active_reps[:8]
+        capped_rep_ids = [rep.id for rep in capped_reps]
+
+        fact_rows = db.scalars(
+            select(FactRepDaily)
+            .where(
+                FactRepDaily.manager_id == manager.id,
+                FactRepDaily.rep_id.in_(capped_rep_ids),
+                FactRepDaily.session_date >= cutoff.date(),
+            )
+            .order_by(FactRepDaily.session_date.asc())
+        ).all() if capped_rep_ids else []
+        facts_by_rep: dict[str, list[FactRepDaily]] = defaultdict(list)
+        for row in fact_rows:
+            facts_by_rep[row.rep_id].append(row)
+
+        rep_briefs: list[dict[str, Any]] = []
+        for rep in capped_reps:
+            rep_sessions = sorted(
+                sessions_by_rep.get(rep.id, []),
+                key=lambda session: (
+                    session.started_at or session.created_at,
+                    session.created_at,
+                ),
+            )
+            adaptive_plan = self.adaptive_training_service.build_plan(db, rep_id=rep.id)
+            scores = [
+                float(session.scorecard.overall_score)
+                for session in rep_sessions
+                if session.scorecard is not None and session.scorecard.overall_score is not None
+            ]
+            trend_delta = round(scores[-1] - scores[0], 2) if len(scores) >= 2 else 0.0
+            week_average = round(self._mean(scores), 2) if scores else 0.0
+            weakest_skills = list(adaptive_plan.get("weakest_skills") or [])
+            weakness_snapshot = {
+                skill: round(float(node.get("score", 0.0)), 2)
+                for skill, node in self._normalize_skill_profile(adaptive_plan.get("skill_profile") or []).items()
+                if skill in weakest_skills
+            }
+            latest_session = rep_sessions[-1] if rep_sessions else None
+            latest_scorecard = latest_session.scorecard if latest_session is not None else None
+            warehouse_summary = {
+                "days_tracked": len(facts_by_rep.get(rep.id, [])),
+                "session_count": sum(row.session_count for row in facts_by_rep.get(rep.id, [])),
+                "avg_score": round(
+                    self._mean(
+                        row.avg_score for row in facts_by_rep.get(rep.id, [])
+                        if row.avg_score is not None
+                    ),
+                    2,
+                ) if facts_by_rep.get(rep.id) else None,
+                "avg_objection_handling": round(
+                    self._mean(
+                        row.avg_objection_handling for row in facts_by_rep.get(rep.id, [])
+                        if row.avg_objection_handling is not None
+                    ),
+                    2,
+                ) if facts_by_rep.get(rep.id) else None,
+                "avg_closing_technique": round(
+                    self._mean(
+                        row.avg_closing_technique for row in facts_by_rep.get(rep.id, [])
+                        if row.avg_closing_technique is not None
+                    ),
+                    2,
+                ) if facts_by_rep.get(rep.id) else None,
+                "override_count": sum(row.override_count for row in facts_by_rep.get(rep.id, [])),
+                "coaching_note_count": sum(row.coaching_note_count for row in facts_by_rep.get(rep.id, [])),
+            }
+            rep_briefs.append(
+                {
+                    "rep_id": rep.id,
+                    "rep_name": rep.name,
+                    "session_count": len(rep_sessions),
+                    "average_score": week_average,
+                    "trend_delta": trend_delta,
+                    "readiness_score": adaptive_plan.get("readiness_score"),
+                    "recommended_difficulty": adaptive_plan.get("recommended_difficulty"),
+                    "weakest_skills": weakest_skills,
+                    "weakest_skill_scores": weakness_snapshot,
+                    "latest_summary": latest_scorecard.ai_summary if latest_scorecard is not None else None,
+                    "latest_weakness_tags": list(latest_scorecard.weakness_tags or []) if latest_scorecard is not None else [],
+                    "warehouse_summary": warehouse_summary,
+                }
+            )
+
+        team_average_score = round(
+            self._mean(item["average_score"] for item in rep_briefs if isinstance(item.get("average_score"), (int, float))),
+            2,
+        )
+        shared_weakness = weakness_counts.most_common(1)[0][0] if weakness_counts else "objection_handling"
+        prompt = f"""
+You are an expert sales manager preparing a weekly team briefing for a D2D training team.
+
+Manager:
+- Name: {manager.name}
+
+Team data for the last 7 days:
+- Rep summaries: {json.dumps(rep_briefs, default=str)}
+- Team average score: {team_average_score}
+- Most common weakness tag: {shared_weakness}
+
+Return JSON in this exact shape:
+{{
+  "team_pulse": "2 sentences on overall team momentum this week",
+  "standout_rep": {{"name": "string", "why": "1 sentence with specific stat"}},
+  "needs_attention": [
+    {{"name": "string", "concern": "1 sentence with specific stat"}},
+    {{"name": "string", "concern": "1 sentence with specific stat"}}
+  ],
+  "shared_weakness": {{"skill": "string", "team_average": 0.0, "note": "1 sentence"}},
+  "huddle_topic": {{"topic": "string", "suggested_talking_points": ["string", "string", "string"]}},
+  "manager_action_items": ["string", "string"]
+}}
+
+Requirements:
+- `needs_attention` must contain at most 2 reps.
+- `manager_action_items` must be concrete and directly assignable, not vague.
+- Every claim should be grounded in the supplied stats.
+""".strip()
+
+        content_payload = self._call_claude_json(
+            system_prompt="You are a precise weekly team briefing copilot. Return only valid JSON.",
+            user_prompt=prompt,
+            max_tokens=900,
+        )
+        if not isinstance(content_payload, dict):
+            raise AiCoachingUnavailableError("Claude returned an invalid weekly team briefing payload")
+        if isinstance(content_payload.get("needs_attention"), list):
+            content_payload["needs_attention"] = content_payload["needs_attention"][:2]
+
+        response = WeeklyTeamBriefingResponse.model_validate(
+            {
+                "manager_id": manager.id,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "data_summary": {
+                    "period_days": 7,
+                    "rep_count_considered": len(capped_reps),
+                    "team_average_score": team_average_score,
+                    "most_common_weakness_tag": shared_weakness,
+                    "rep_summaries": rep_briefs,
+                },
+                **content_payload,
+            }
+        )
+        self.weekly_team_briefing_cache.set_json(cache_key, response.model_dump(mode="json"))
+        return response
+
+    def _load_override_signal(
+        self,
+        db: Session,
+        *,
+        rep_id: str,
+        cutoff: datetime,
+    ) -> dict[str, Any]:
+        labels = db.scalars(
+            select(OverrideLabel)
+            .join(DrillSession, DrillSession.id == OverrideLabel.session_id)
+            .where(
+                DrillSession.rep_id == rep_id,
+                DrillSession.started_at >= cutoff,
+                OverrideLabel.created_at >= cutoff,
+            )
+            .order_by(OverrideLabel.created_at.desc())
+        ).all()
+
+        mean_delta = round(
+            self._mean(label.override_delta_overall for label in labels),
+            2,
+        ) if labels else 0.0
+        return {
+            "override_count": len(labels),
+            "mean_delta": mean_delta,
+            "most_overridden_category": self._most_overridden_category(labels),
+        }
+
+    def _most_overridden_category(self, labels: Sequence[OverrideLabel]) -> str | None:
+        category_counts: Counter[str] = Counter()
+        for label in labels:
+            ai_scores = label.ai_category_scores or {}
+            override_scores = label.override_category_scores or {}
+            if not isinstance(ai_scores, dict) or not isinstance(override_scores, dict):
+                continue
+
+            for raw_key, override_value in override_scores.items():
+                normalized_key = RUBRIC_CATEGORY_KEYS.get(raw_key, raw_key)
+                ai_value = _score_value(ai_scores.get(raw_key))
+                if ai_value is None:
+                    fallback_key = next(
+                        (key for key, value in RUBRIC_CATEGORY_KEYS.items() if value == normalized_key and key in ai_scores),
+                        None,
+                    )
+                    ai_value = _score_value(ai_scores.get(fallback_key)) if fallback_key else None
+                override_score = _score_value(override_value)
+                if ai_value is None or override_score is None:
+                    continue
+                if abs(override_score - ai_value) >= 0.05:
+                    category_counts[normalized_key] += 1
+
+        if not category_counts:
+            return None
+        return category_counts.most_common(1)[0][0]
+
+    def _compute_readiness_trajectory(
+        self,
+        snapshots: list[dict[str, Any]],
+        skill_profile: list[dict[str, Any]] | dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        profile_map = self._normalize_skill_profile(skill_profile)
+        if not profile_map:
+            return {"sessions_to_readiness": None, "trajectory_per_skill": {}}
+
+        slopes = {
+            skill: _linear_regression_slope(
+                [
+                    float(snapshot["skills"][skill])
+                    for snapshot in snapshots
+                    if isinstance((snapshot.get("skills") or {}).get(skill), (int, float))
+                ]
+            )
+            for skill in profile_map
+        }
+        target_skills = [
+            skill
+            for skill, node in profile_map.items()
+            if float(node.get("score", 0.0)) < READINESS_THRESHOLD
+        ]
+        if not target_skills:
+            return {
+                "sessions_to_readiness": 0,
+                "trajectory_per_skill": {
+                    skill: round(float(node.get("score", 0.0)), 2)
+                    for skill, node in profile_map.items()
+                },
+            }
+
+        sessions_required: list[int] = []
+        for skill in target_skills:
+            current_score = float(profile_map[skill].get("score", 0.0))
+            slope = slopes.get(skill, 0.0)
+            if slope <= 0:
+                projection_horizon = max(1, min(6, len(snapshots) or 1))
+                return {
+                    "sessions_to_readiness": None,
+                    "trajectory_per_skill": {
+                        current_skill: round(self._clamp_score(float(node.get("score", 0.0)) + (slopes.get(current_skill, 0.0) * projection_horizon)), 2)
+                        for current_skill, node in profile_map.items()
+                    },
+                }
+            sessions_required.append(max(0, math.ceil((READINESS_THRESHOLD - current_score) / slope)))
+
+        sessions_to_readiness = max(sessions_required) if sessions_required else 0
+        return {
+            "sessions_to_readiness": sessions_to_readiness,
+            "trajectory_per_skill": {
+                skill: round(self._clamp_score(float(node.get("score", 0.0)) + (slopes.get(skill, 0.0) * sessions_to_readiness)), 2)
+                for skill, node in profile_map.items()
+            },
+        }
+
+    def _normalize_skill_profile(
+        self,
+        skill_profile: list[dict[str, Any]] | dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        if isinstance(skill_profile, dict):
+            return {
+                str(skill): node
+                for skill, node in skill_profile.items()
+                if isinstance(node, dict)
+            }
+        return {
+            str(node["skill"]): node
+            for node in skill_profile
+            if isinstance(node, dict) and isinstance(node.get("skill"), str)
+        }
+
+    def _mean(self, values: Sequence[float]) -> float:
+        items = [float(value) for value in values]
+        if not items:
+            return 0.0
+        return sum(items) / len(items)
+
+    def _clamp_score(self, value: float) -> float:
+        return max(0.0, min(10.0, value))
+
+    def _normalize_category_scores(self, category_scores: dict[str, Any] | None) -> dict[str, float]:
+        normalized: dict[str, float] = {}
+        for raw_key, category_key in RUBRIC_CATEGORY_KEYS.items():
+            value = _score_value((category_scores or {}).get(raw_key))
+            if value is not None and category_key not in normalized:
+                normalized[category_key] = round(value, 2)
+        return normalized
 
     def generate_session_annotations(self, db: Session, *, session_id: str) -> SessionAnnotationsResponse:
         cache_key = f"session_annotations:{session_id}"

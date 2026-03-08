@@ -33,12 +33,16 @@ from app.schemas.notification import NotificationDeliveryResponse
 from app.schemas.manager_ai import (
     ManagerChatRequest,
     ManagerChatResponse,
+    OneOnOnePrepRequest,
+    OneOnOnePrepResponse,
     RepInsightRequest,
     RepInsightResponse,
     SessionAnnotationRequest,
     SessionAnnotationsResponse,
     TeamCoachingSummaryRequest,
     TeamCoachingSummaryResponse,
+    WeeklyTeamBriefingRequest,
+    WeeklyTeamBriefingResponse,
 )
 from app.schemas.scorecard import (
     BulkReviewRequest,
@@ -1230,6 +1234,60 @@ def get_ai_rep_insight(
             db,
             rep=rep,
             period_days=payload.period_days,
+        )
+    except AiCoachingDataUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AiCoachingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/reps/{rep_id}/one-on-one-prep", response_model=OneOnOnePrepResponse)
+def get_one_on_one_prep(
+    rep_id: str,
+    payload: OneOnOnePrepRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> OneOnOnePrepResponse:
+    _ensure_actor_matches_manager(actor, payload.manager_id)
+
+    manager = _get_user_or_404(db, payload.manager_id, "manager")
+    rep = _get_user_or_404(db, rep_id, "rep")
+    _ensure_same_org(actor, manager.org_id)
+    if manager.org_id != rep.org_id:
+        raise HTTPException(status_code=403, detail="cross-organization access denied")
+
+    try:
+        return manager_ai_service.generate_one_on_one_prep(
+            db,
+            rep=rep,
+            manager=manager,
+            period_days=payload.period_days,
+        )
+    except AiCoachingDataUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AiCoachingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/team/weekly-briefing", response_model=WeeklyTeamBriefingResponse)
+def get_weekly_team_briefing(
+    payload: WeeklyTeamBriefingRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> WeeklyTeamBriefingResponse:
+    _ensure_actor_matches_manager(actor, payload.manager_id)
+
+    manager = _get_user_or_404(db, payload.manager_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    reps = db.scalars(
+        select(User).where(User.team_id == manager.team_id, User.role == UserRole.REP).order_by(User.name.asc())
+    ).all()
+
+    try:
+        return manager_ai_service.generate_weekly_team_briefing(
+            db,
+            manager=manager,
+            reps=reps,
         )
     except AiCoachingDataUnavailableError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

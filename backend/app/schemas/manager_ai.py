@@ -18,12 +18,97 @@ class RepInsightContent(BaseModel):
     drill_recommendation: str = Field(min_length=1, max_length=280)
     coaching_script: str = Field(min_length=1, max_length=1200)
     expected_improvement: str = Field(min_length=1, max_length=240)
+    readiness_trajectory: dict[str, Any] = Field(default_factory=dict)
+    override_signal: dict[str, Any] = Field(default_factory=dict)
+    adaptive_skill_profile: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RepInsightResponse(RepInsightContent):
     rep_id: str
     rep_name: str
     generated_at: str
+    data_summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class OneOnOnePrepRequest(BaseModel):
+    manager_id: str
+    period_days: int = Field(default=14, ge=1, le=365)
+
+
+class OneOnOneDiscussionTopic(BaseModel):
+    topic: str = Field(min_length=1, max_length=160)
+    evidence: str = Field(min_length=1, max_length=400)
+    suggested_opener: str = Field(min_length=1, max_length=400)
+
+
+class OneOnOneStrengthToAcknowledge(BaseModel):
+    skill: str = Field(min_length=1, max_length=80)
+    what_to_say: str = Field(min_length=1, max_length=500)
+
+
+class OneOnOnePatternToChallenge(BaseModel):
+    skill: str = Field(min_length=1, max_length=80)
+    pattern: str = Field(min_length=1, max_length=400)
+    what_to_say: str = Field(min_length=1, max_length=500)
+
+
+class OneOnOneSuggestedNextScenario(BaseModel):
+    scenario_type: str = Field(min_length=1, max_length=160)
+    difficulty: int = Field(ge=1, le=5)
+    rationale: str = Field(min_length=1, max_length=400)
+
+
+class OneOnOnePrepContent(BaseModel):
+    discussion_topics: list[OneOnOneDiscussionTopic] = Field(default_factory=list, min_length=3, max_length=3)
+    strength_to_acknowledge: OneOnOneStrengthToAcknowledge
+    pattern_to_challenge: OneOnOnePatternToChallenge
+    suggested_next_scenario: OneOnOneSuggestedNextScenario
+    readiness_summary: str = Field(min_length=1, max_length=320)
+
+
+class OneOnOnePrepResponse(OneOnOnePrepContent):
+    manager_id: str
+    rep_id: str
+    rep_name: str
+    period_days: int
+    generated_at: str
+    data_summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class WeeklyTeamBriefingRequest(BaseModel):
+    manager_id: str
+
+
+class WeeklyTeamBriefingStandoutRep(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    why: str = Field(min_length=1, max_length=400)
+
+
+class WeeklyTeamBriefingNeedsAttentionItem(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    concern: str = Field(min_length=1, max_length=400)
+
+
+class WeeklyTeamBriefingSharedWeakness(BaseModel):
+    skill: str = Field(min_length=1, max_length=80)
+    team_average: float
+    note: str = Field(min_length=1, max_length=320)
+
+
+class WeeklyTeamBriefingHuddleTopic(BaseModel):
+    topic: str = Field(min_length=1, max_length=180)
+    suggested_talking_points: list[str] = Field(default_factory=list, min_length=3, max_length=3)
+
+
+class WeeklyTeamBriefingResponse(BaseModel):
+    manager_id: str
+    generated_at: str
+    team_pulse: str = Field(min_length=1, max_length=500)
+    standout_rep: WeeklyTeamBriefingStandoutRep
+    needs_attention: list[WeeklyTeamBriefingNeedsAttentionItem] = Field(default_factory=list, max_length=2)
+    shared_weakness: WeeklyTeamBriefingSharedWeakness
+    huddle_topic: WeeklyTeamBriefingHuddleTopic
+    manager_action_items: list[str] = Field(default_factory=list, min_length=1, max_length=4)
     data_summary: dict[str, Any] = Field(default_factory=dict)
 
 
