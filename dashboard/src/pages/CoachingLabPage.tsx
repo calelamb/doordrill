@@ -410,12 +410,18 @@ export function CoachingLabPage() {
                   <div className="rounded-2xl border border-white/30 bg-white/70 p-4">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Action Items</div>
                     <div className="mt-3 space-y-3">
-                      {weeklyBriefing.manager_action_items.map((item) => (
-                        <label key={item} className="flex items-start gap-3 text-sm text-ink">
-                          <input type="checkbox" aria-label={item} className="mt-1 h-4 w-4 rounded border-white/40 accent-accent" />
-                          <span className="leading-6">{item}</span>
-                        </label>
-                      ))}
+                      {weeklyBriefing.manager_action_items.length ? (
+                        weeklyBriefing.manager_action_items.map((item) => (
+                          <label key={item} className="flex items-start gap-3 text-sm text-ink">
+                            <input type="checkbox" aria-label={item} className="mt-1 h-4 w-4 rounded border-white/40 accent-accent" />
+                            <span className="leading-6">{item}</span>
+                          </label>
+                        ))
+                      ) : (
+                        <div className="rounded-2xl border border-white/30 bg-white/60 px-4 py-3 text-sm text-muted">
+                          No manager follow-up actions were generated for this week.
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -437,14 +443,18 @@ export function CoachingLabPage() {
 
                 {weeklyBriefingExpanded ? (
                   <div className="border-t border-white/25 px-5 py-4">
-                    <ul className="space-y-3">
-                      {weeklyBriefing.huddle_topic.suggested_talking_points.map((point) => (
-                        <li key={point} className="flex items-start gap-3 text-sm leading-6 text-ink">
-                          <span className="mt-2 h-2 w-2 rounded-full bg-accent" />
-                          <span>{point}</span>
-                        </li>
-                      ))}
-                    </ul>
+                    {weeklyBriefing.huddle_topic.suggested_talking_points.length ? (
+                      <ul className="space-y-3">
+                        {weeklyBriefing.huddle_topic.suggested_talking_points.map((point) => (
+                          <li key={point} className="flex items-start gap-3 text-sm leading-6 text-ink">
+                            <span className="mt-2 h-2 w-2 rounded-full bg-accent" />
+                            <span>{point}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-sm leading-6 text-muted">No suggested huddle talking points are available yet.</p>
+                    )}
                   </div>
                 ) : null}
               </div>

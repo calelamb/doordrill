@@ -228,23 +228,27 @@ export function OneOnOnePrepCard({
 
                   <section className="space-y-3">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Discussion Topics</div>
-                    {data.discussion_topics.map((topic, index) => (
-                      <div key={`${topic.topic}-${index}`} className="rounded-[28px] border border-white/35 bg-white/55 p-5 backdrop-blur-2xl">
-                        <div className="flex items-start gap-4">
-                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-accent/10 text-sm font-black text-accent">
-                            {index + 1}
-                          </div>
-                          <div className="space-y-3">
-                            <h3 className="text-lg font-bold tracking-tight text-ink">{topic.topic}</h3>
-                            <p className="text-sm leading-6 text-ink">{topic.evidence}</p>
-                            <div className="rounded-2xl border border-accent/15 bg-accent-soft/55 px-4 py-3">
-                              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent">Suggested Opener</div>
-                              <p className="mt-2 text-sm leading-6 text-ink">{topic.suggested_opener}</p>
+                    {data.discussion_topics.length ? (
+                      data.discussion_topics.map((topic, index) => (
+                        <div key={`${topic.topic}-${index}`} className="rounded-[28px] border border-white/35 bg-white/55 p-5 backdrop-blur-2xl">
+                          <div className="flex items-start gap-4">
+                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-accent/10 text-sm font-black text-accent">
+                              {index + 1}
+                            </div>
+                            <div className="space-y-3">
+                              <h3 className="text-lg font-bold tracking-tight text-ink">{topic.topic}</h3>
+                              <p className="text-sm leading-6 text-ink">{topic.evidence}</p>
+                              <div className="rounded-2xl border border-accent/15 bg-accent-soft/55 px-4 py-3">
+                                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent">Suggested Opener</div>
+                                <p className="mt-2 text-sm leading-6 text-ink">{topic.suggested_opener}</p>
+                              </div>
                             </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      ))
+                    ) : (
+                      <EmptyState variant="empty" message="No discussion topics were generated for this prep yet." />
+                    )}
                   </section>
 
                   <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
@@ -275,6 +279,10 @@ export function OneOnOnePrepCard({
                     <p className="mt-3 text-sm leading-6 text-ink">{data.suggested_next_scenario.rationale}</p>
                   </div>
                 </div>
+              ) : null}
+
+              {!loading && !error && !data ? (
+                <EmptyState variant="empty" message="No 1:1 prep is available yet for this rep." />
               ) : null}
             </div>
           </motion.aside>

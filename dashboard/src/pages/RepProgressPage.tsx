@@ -716,59 +716,84 @@ export function RepProgressPage() {
           </div>
 
           <div className="space-y-4">
-            <div className="rounded-[28px] border border-white/25 bg-white/55 p-5">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Readiness ETA</div>
-              <div className="mt-3 text-2xl font-black tracking-tight text-ink">
-                {typeof insight?.readiness_trajectory?.sessions_to_readiness === "number"
-                  ? insight.readiness_trajectory.sessions_to_readiness === 0
-                    ? "Ready now"
-                    : `${insight.readiness_trajectory.sessions_to_readiness} sessions`
-                  : "Not projected"}
+            {insightLoading ? (
+              <>
+                <ChartSkeleton heightClass="h-[132px]" className="rounded-[28px]" />
+                <ChartSkeleton heightClass="h-[120px]" className="rounded-[28px]" />
+                <ChartSkeleton heightClass="h-[176px]" className="rounded-[28px]" />
+              </>
+            ) : insightError ? (
+              <div className="rounded-[28px] border border-error/15 bg-error/[0.06] px-5 py-5">
+                <p className="text-sm font-medium text-error">{insightError}</p>
+                <button
+                  type="button"
+                  aria-label="Retry adaptive readiness insights"
+                  onClick={() => void loadInsight()}
+                  className="mt-4 inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-hover"
+                >
+                  <RefreshCcw className="h-4 w-4" />
+                  Retry
+                </button>
               </div>
-              <p className="mt-2 text-sm leading-6 text-muted">
-                {typeof insight?.readiness_trajectory?.sessions_to_readiness === "number"
-                  ? "Projected sessions until the weakest skills reach the readiness threshold."
-                  : "Current growth rates are too flat to give a defensible readiness ETA."}
-              </p>
-            </div>
-
-            <div className="rounded-[28px] border border-white/25 bg-white/55 p-5">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Weakest Skills</div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {adaptiveTrajectoryNodes.length ? (
-                  adaptiveTrajectoryNodes.map((node) => (
-                    <div key={node.skill} className="rounded-full border border-white/35 bg-white/75 px-3 py-1.5 text-sm font-medium text-ink">
-                      {formatAdaptiveSkillLabel(node.skill)} {node.score.toFixed(1)}
-                    </div>
-                  ))
-                ) : (
-                  <div className="text-sm text-muted">No adaptive skill profile available.</div>
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-[28px] border border-white/25 bg-white/55 p-5">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Override Signal</div>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/35 bg-white/75 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">Adjustments</div>
-                  <div className="mt-2 text-2xl font-black tracking-tight text-ink">{overrideSignalSummary?.overrideCount ?? 0}</div>
+            ) : !insight ? (
+              <EmptyState variant="empty" message="Adaptive readiness details are not available yet." />
+            ) : (
+              <>
+                <div className="rounded-[28px] border border-white/25 bg-white/55 p-5">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Readiness ETA</div>
+                  <div className="mt-3 text-2xl font-black tracking-tight text-ink">
+                    {typeof insight.readiness_trajectory?.sessions_to_readiness === "number"
+                      ? insight.readiness_trajectory.sessions_to_readiness === 0
+                        ? "Ready now"
+                        : `${insight.readiness_trajectory.sessions_to_readiness} sessions`
+                      : "Not projected"}
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-muted">
+                    {typeof insight.readiness_trajectory?.sessions_to_readiness === "number"
+                      ? "Projected sessions until the weakest skills reach the readiness threshold."
+                      : "Current growth rates are too flat to give a defensible readiness ETA."}
+                  </p>
                 </div>
-                <div className="rounded-2xl border border-white/35 bg-white/75 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">Mean Δ</div>
-                  <div className="mt-2 text-2xl font-black tracking-tight text-ink">
-                    {typeof overrideSignalSummary?.meanDelta === "number"
-                      ? `${overrideSignalSummary.meanDelta >= 0 ? "+" : ""}${overrideSignalSummary.meanDelta.toFixed(1)}`
-                      : "--"}
+
+                <div className="rounded-[28px] border border-white/25 bg-white/55 p-5">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Weakest Skills</div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {adaptiveTrajectoryNodes.length ? (
+                      adaptiveTrajectoryNodes.map((node) => (
+                        <div key={node.skill} className="rounded-full border border-white/35 bg-white/75 px-3 py-1.5 text-sm font-medium text-ink">
+                          {formatAdaptiveSkillLabel(node.skill)} {node.score.toFixed(1)}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-sm text-muted">No adaptive skill profile available.</div>
+                    )}
                   </div>
                 </div>
-              </div>
-              <p className="mt-4 text-sm leading-6 text-ink">
-                {overrideSignalSummary?.overrideCount
-                  ? `Managers have adjusted AI scores ${overrideSignalSummary.overrideCount} times for this rep, with an average delta of ${overrideSignalSummary.meanDelta >= 0 ? "+" : ""}${overrideSignalSummary.meanDelta.toFixed(1)}${overrideSignalSummary.mostOverriddenCategory ? ` and the most corrected area being ${overrideSignalSummary.mostOverriddenCategory}.` : "."}`
-                  : "No manager override pattern has been recorded for this rep yet."}
-              </p>
-            </div>
+
+                <div className="rounded-[28px] border border-white/25 bg-white/55 p-5">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Override Signal</div>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-white/35 bg-white/75 p-4">
+                      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">Adjustments</div>
+                      <div className="mt-2 text-2xl font-black tracking-tight text-ink">{overrideSignalSummary?.overrideCount ?? 0}</div>
+                    </div>
+                    <div className="rounded-2xl border border-white/35 bg-white/75 p-4">
+                      <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">Mean Δ</div>
+                      <div className="mt-2 text-2xl font-black tracking-tight text-ink">
+                        {typeof overrideSignalSummary?.meanDelta === "number"
+                          ? `${overrideSignalSummary.meanDelta >= 0 ? "+" : ""}${overrideSignalSummary.meanDelta.toFixed(1)}`
+                          : "--"}
+                      </div>
+                    </div>
+                  </div>
+                  <p className="mt-4 text-sm leading-6 text-ink">
+                    {overrideSignalSummary?.overrideCount
+                      ? `Managers have adjusted AI scores ${overrideSignalSummary.overrideCount} times for this rep, with an average delta of ${overrideSignalSummary.meanDelta >= 0 ? "+" : ""}${overrideSignalSummary.meanDelta.toFixed(1)}${overrideSignalSummary.mostOverriddenCategory ? ` and the most corrected area being ${overrideSignalSummary.mostOverriddenCategory}.` : "."}`
+                      : "No manager override pattern has been recorded for this rep yet."}
+                  </p>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </motion.section>
