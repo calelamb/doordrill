@@ -171,6 +171,7 @@ class RepReadinessTrajectoryEntryResponse(BaseModel):
 
 class RepNextScenarioSuggestionResponse(BaseModel):
     name: str
+    scenario_id: str | None = None
     difficulty: int
     reason: str
 

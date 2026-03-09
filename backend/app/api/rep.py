@@ -557,6 +557,7 @@ def get_rep_plan(
                 scenario.name.lower(),
                 {
                     "name": scenario.name,
+                    "scenario_id": scenario.id,
                     "difficulty": int(scenario.difficulty),
                     "reason": recommendation.get("rationale")
                     or f"Targets {', '.join(scenario_focus_skills[:2]) or 'core selling fundamentals'}.",

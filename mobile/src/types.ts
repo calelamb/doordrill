@@ -96,6 +96,29 @@ export type RepSessionDetail = {
   transcript: TranscriptTurn[];
 };
 
+export type RepTrend = {
+  sessions: Array<{
+    session_id: string;
+    started_at: string;
+    overall_score: number;
+    category_scores: Record<string, number>;
+  }>;
+  category_averages: Record<string, number>;
+  overall_trend: "improving" | "declining" | "stable";
+};
+
+export type RepPlan = {
+  focus_skills: string[];
+  recommended_difficulty: number;
+  readiness_trajectory: Record<string, { sessions_to_readiness: number; slope: number }>;
+  next_scenario_suggestion: {
+    name: string;
+    scenario_id: string | null;
+    difficulty: number;
+    reason: string;
+  } | null;
+};
+
 export type RepProgress = {
   rep_id: string;
   rep_name?: string | null;

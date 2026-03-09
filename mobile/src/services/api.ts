@@ -3,8 +3,10 @@ import {
   CategoryScoreDetail,
   ImprovementTarget,
   RepAssignment,
+  RepPlan,
   RepProgress,
   RepSessionDetail,
+  RepTrend,
   ScenarioBrief,
   Scorecard,
   TranscriptTurn,
@@ -98,6 +100,22 @@ function normalizeRepSessionDetail(payload: RawRepSessionDetail): RepSessionDeta
   };
 }
 
+function normalizeRepPlan(plan: RepPlan): RepPlan {
+  return {
+    focus_skills: Array.isArray(plan.focus_skills) ? plan.focus_skills.filter((skill) => typeof skill === "string" && skill) : [],
+    recommended_difficulty: typeof plan.recommended_difficulty === "number" ? plan.recommended_difficulty : 1,
+    readiness_trajectory: plan.readiness_trajectory ?? {},
+    next_scenario_suggestion: plan.next_scenario_suggestion
+      ? {
+          name: plan.next_scenario_suggestion.name,
+          scenario_id: plan.next_scenario_suggestion.scenario_id ?? null,
+          difficulty: plan.next_scenario_suggestion.difficulty,
+          reason: plan.next_scenario_suggestion.reason,
+        }
+      : null,
+  };
+}
+
 export async function checkApiReachable(timeoutMs = 3500): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -172,6 +190,24 @@ export async function fetchRepSessionsHistory(repId: string): Promise<{ items: i
     headers: repHeaders(repId)
   });
   return parseJson<{ items: import("../types").RepSessionHistoryItem[] }>(response, "fetch history");
+}
+
+export async function fetchRepTrend(repId: string, sessions = 10): Promise<RepTrend> {
+  const response = await fetch(
+    `${API_BASE_URL}/rep/progress/trend?rep_id=${encodeURIComponent(repId)}&sessions=${encodeURIComponent(String(sessions))}`,
+    {
+      headers: repHeaders(repId)
+    }
+  );
+  return parseJson<RepTrend>(response, "fetch trend");
+}
+
+export async function fetchRepPlan(repId: string): Promise<RepPlan> {
+  const response = await fetch(`${API_BASE_URL}/rep/plan?rep_id=${encodeURIComponent(repId)}`, {
+    headers: repHeaders(repId)
+  });
+  const payload = await parseJson<RepPlan>(response, "fetch plan");
+  return normalizeRepPlan(payload);
 }
 
 export async function lookupRepByEmail(email: string): Promise<{ rep_id: string }> {

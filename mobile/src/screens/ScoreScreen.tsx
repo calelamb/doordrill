@@ -27,10 +27,10 @@ import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 
 import { RootStackParamList } from "../navigation/types";
-import { fetchRepScenario, fetchRepSession } from "../services/api";
+import { fetchRepPlan, fetchRepScenario, fetchRepSession } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { CategoryScoreDetail, RepSessionDetail, ScenarioBrief, TranscriptTurn } from "../types";
+import { CategoryScoreDetail, RepPlan, RepSessionDetail, ScenarioBrief, TranscriptTurn } from "../types";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Score">;
 
@@ -101,6 +101,10 @@ function scoreBand(score: number) {
   if (score < 5) return { bg: colors.dangerSoft, text: colors.danger, border: "rgba(180, 35, 24, 0.2)" };
   if (score < 8) return { bg: colors.warningSoft, text: colors.warning, border: "rgba(180, 83, 9, 0.2)" };
   return { bg: colors.accentSoft, text: colors.accent, border: "rgba(22, 101, 52, 0.2)" };
+}
+
+function difficultyDots(difficulty: number) {
+  return Array.from({ length: 5 }, (_, index) => index < clamp(Math.round(difficulty), 0, 5));
 }
 
 function formatTurnLabel(turnId: string, turnIndexById: Record<string, number>): string {
@@ -499,6 +503,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   const { repId } = useSession();
   const { sessionId } = route.params;
   const [data, setData] = useState<RepSessionDetail | null>(null);
+  const [plan, setPlan] = useState<RepPlan | null>(null);
   const [scenario, setScenario] = useState<ScenarioBrief | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -574,6 +579,27 @@ export function ScoreScreen({ route, navigation }: Props) {
   const improvementTargets = scorecard?.improvement_targets ?? [];
   const highlights = (scorecard?.highlights ?? []).slice(0, 4);
   const weaknessTags = scorecard?.weakness_tags ?? [];
+  const nextScenarioSuggestion = plan?.next_scenario_suggestion ?? null;
+  const focusSkills = plan?.focus_skills ?? [];
+
+  const readinessHint = useMemo(() => {
+    if (!plan) {
+      return null;
+    }
+
+    for (const skill of plan.focus_skills) {
+      const trajectory = plan.readiness_trajectory?.[skill];
+      const remaining = trajectory?.sessions_to_readiness;
+      if (typeof remaining === "number" && remaining > 0 && remaining <= 20) {
+        return {
+          skillLabel: titleCase(skill),
+          remaining,
+        };
+      }
+    }
+
+    return null;
+  }, [plan]);
 
   useEffect(() => {
     if (scorecard) {
@@ -590,6 +616,33 @@ export function ScoreScreen({ route, navigation }: Props) {
       setExpandedCategoryKey(null);
     }
   }, [scorecard]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPlan() {
+      if (!repId) {
+        return;
+      }
+
+      try {
+        const result = await fetchRepPlan(repId);
+        if (!cancelled) {
+          setPlan(result);
+        }
+      } catch {
+        if (!cancelled) {
+          setPlan(null);
+        }
+      }
+    }
+
+    void loadPlan();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [repId]);
 
   useEffect(() => {
     const width = Math.max(0, (tabSwitcherWidth - 8) / 2);
@@ -734,6 +787,14 @@ export function ScoreScreen({ route, navigation }: Props) {
           ))}
         </BlurView>
 
+        {readinessHint ? (
+          <Animated.View entering={FadeInDown.delay(480).springify()} style={styles.readinessHintWrap}>
+            <Text style={styles.readinessHintText}>
+              {`At this rate, you'll hit target on ${readinessHint.skillLabel} in ~${readinessHint.remaining} more drills`}
+            </Text>
+          </Animated.View>
+        ) : null}
+
         {improvementTargets.length > 0 ? (
           <>
             <Text style={styles.sectionTitle}>WHAT TO WORK ON</Text>
@@ -822,6 +883,55 @@ export function ScoreScreen({ route, navigation }: Props) {
               ))}
             </ScrollView>
           </>
+        ) : null}
+
+        {nextScenarioSuggestion && focusSkills.length > 0 ? (
+          <Animated.View entering={FadeInDown.delay(1180).springify()} style={styles.nextDrillWrapper}>
+            <BlurView intensity={40} tint="light" style={styles.nextDrillCard}>
+              <Text style={styles.sectionTitleCompact}>RECOMMENDED NEXT DRILL</Text>
+              <Text style={styles.nextDrillName}>{nextScenarioSuggestion.name}</Text>
+
+              <View style={styles.difficultyDotsRow}>
+                {difficultyDots(nextScenarioSuggestion.difficulty || plan?.recommended_difficulty || 1).map((filled, index) => (
+                  <View
+                    key={`difficulty-dot-${index}`}
+                    style={[
+                      styles.difficultyDot,
+                      filled ? styles.difficultyDotFilled : styles.difficultyDotEmpty,
+                    ]}
+                  />
+                ))}
+              </View>
+
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.nextDrillSkillsRow}>
+                {focusSkills.map((skill) => (
+                  <View key={skill} style={[styles.signalChip, styles.signalChipPositive]}>
+                    <Text style={[styles.signalChipText, styles.signalChipTextPositive]}>{titleCase(skill)}</Text>
+                  </View>
+                ))}
+              </ScrollView>
+
+              <Text style={styles.nextDrillReason}>{nextScenarioSuggestion.reason}</Text>
+
+              <Pressable
+                disabled={!nextScenarioSuggestion.scenario_id}
+                style={({ pressed }) => [
+                  styles.nextDrillButton,
+                  !nextScenarioSuggestion.scenario_id ? styles.nextDrillButtonDisabled : null,
+                  pressed && nextScenarioSuggestion.scenario_id ? styles.nextDrillButtonPressed : null,
+                ]}
+                onPress={() => {
+                  if (!nextScenarioSuggestion.scenario_id) {
+                    return;
+                  }
+                  navigation.navigate("PreSession", { scenarioId: nextScenarioSuggestion.scenario_id });
+                }}
+              >
+                <Text style={styles.nextDrillButtonText}>Start This Drill</Text>
+                <ArrowRight size={16} color="#fff" />
+              </Pressable>
+            </BlurView>
+          </Animated.View>
         ) : null}
 
         <View style={styles.ctaRow}>
@@ -1177,6 +1287,14 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
     elevation: 3,
   },
+  readinessHintWrap: {
+    marginTop: 10,
+  },
+  readinessHintText: {
+    fontSize: 13,
+    color: colors.muted,
+    lineHeight: 19,
+  },
   categoryRow: {
     gap: 6,
   },
@@ -1502,6 +1620,78 @@ const styles = StyleSheet.create({
     color: colors.danger,
     fontSize: 12,
     fontFamily: "Poppins_600SemiBold",
+  },
+  nextDrillWrapper: {
+    marginTop: 28,
+  },
+  nextDrillCard: {
+    gap: 14,
+    borderRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    backgroundColor: "rgba(255, 255, 255, 0.62)",
+    padding: 22,
+    overflow: "hidden",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.04,
+    shadowRadius: 16,
+    elevation: 3,
+  },
+  nextDrillName: {
+    fontSize: 22,
+    color: colors.ink,
+    fontFamily: "Poppins_700Bold",
+    lineHeight: 28,
+  },
+  difficultyDotsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  difficultyDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  difficultyDotFilled: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  difficultyDotEmpty: {
+    backgroundColor: "rgba(255,255,255,0.75)",
+    borderColor: "rgba(108, 98, 85, 0.2)",
+  },
+  nextDrillSkillsRow: {
+    gap: 8,
+    paddingRight: 10,
+  },
+  nextDrillReason: {
+    fontSize: 13,
+    color: colors.muted,
+    lineHeight: 20,
+  },
+  nextDrillButton: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: colors.accent,
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  nextDrillButtonDisabled: {
+    opacity: 0.45,
+  },
+  nextDrillButtonPressed: {
+    opacity: 0.86,
+  },
+  nextDrillButtonText: {
+    color: "#fff",
+    fontSize: 14,
+    fontFamily: "Poppins_700Bold",
   },
 
   transcriptLoadingState: {
