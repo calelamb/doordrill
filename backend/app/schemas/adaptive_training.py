@@ -164,6 +164,24 @@ class AdaptiveTrainingPlanResponse(BaseModel):
     recommended_scenarios: list[ScenarioRecommendationResponse] = Field(default_factory=list)
 
 
+class RepReadinessTrajectoryEntryResponse(BaseModel):
+    sessions_to_readiness: int | None = None
+    slope: float
+
+
+class RepNextScenarioSuggestionResponse(BaseModel):
+    name: str
+    difficulty: int
+    reason: str
+
+
+class RepAdaptivePlanResponse(BaseModel):
+    focus_skills: list[str] = Field(default_factory=list)
+    recommended_difficulty: int = 1
+    readiness_trajectory: dict[str, RepReadinessTrajectoryEntryResponse] = Field(default_factory=dict)
+    next_scenario_suggestion: RepNextScenarioSuggestionResponse | None = None
+
+
 class AdaptiveAssignmentRequest(BaseModel):
     assigned_by: str
     scenario_id: str | None = None

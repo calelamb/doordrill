@@ -553,7 +553,12 @@ class AnalyticsRefreshService:
             for event in events
             if event.event_type == "server.session.state" and isinstance(event.payload, dict) and event.payload.get("state") == "barge_in_detected"
         )
-        first_response_latency_ms = self._first_response_latency_ms(events)
+        first_response_latency_ms_raw = self._first_response_latency_ms(events)
+        first_response_latency_ms = (
+            min(int(first_response_latency_ms_raw), 2_147_483_647)
+            if first_response_latency_ms_raw is not None
+            else None
+        )
         talk_ratio = round(rep_word_count / max(1, rep_word_count + ai_word_count), 3) if (rep_word_count + ai_word_count) else None
         close_attempt_count = sum(
             1

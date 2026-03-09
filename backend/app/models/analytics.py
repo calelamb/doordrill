@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -209,7 +209,7 @@ class AnalyticsFactSessionTurnMetrics(Base, TimestampMixin):
     average_ai_turn_words: Mapped[float | None] = mapped_column(Float, nullable=True)
     longest_rep_turn_words: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     longest_ai_turn_words: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    first_response_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_response_latency_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     interruption_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     objection_tag_counts_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 

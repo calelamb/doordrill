@@ -1,33 +1,68 @@
 import os
 import shutil
 import uuid
+from typing import Any
 from datetime import datetime, timezone
 
+from pydantic import ValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_rep_or_manager
 from app.db.session import get_db
 from app.models.assignment import Assignment
 from app.models.prompt_version import PromptVersion
+from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
+from app.models.session import SessionTurn
 from app.models.types import AssignmentStatus, SessionStatus
 from app.models.user import User, Team
-from app.schemas.adaptive_training import RepForecastResponse
+from app.schemas.adaptive_training import RepAdaptivePlanResponse, RepForecastResponse
 from app.schemas.assignment import AssignmentResponse
 from app.schemas.notification import DeviceTokenCreateRequest, DeviceTokenResponse
 from app.schemas.profile import ProfileUpdateRequest, HierarchyNode
-from app.schemas.session import SessionCreateRequest, SessionResponse
+from app.schemas.scorecard import CategoryScoreV2, ManagerCoachingNoteResponse
+from app.schemas.session import (
+    RepProgressTrendResponse,
+    RepSessionFeedbackResponse,
+    SessionCreateRequest,
+    SessionResponse,
+)
+from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.notification_service import NotificationService
 from app.services.manager_review_service import ManagerReviewService
 from app.services.predictive_modeling_service import PredictiveModelingService
 
 router = APIRouter(prefix="/rep", tags=["rep"])
+REP_CATEGORY_KEY_MAP = {
+    "opening": "opening",
+    "pitch": "pitch_delivery",
+    "pitch_delivery": "pitch_delivery",
+    "objection_handling": "objection_handling",
+    "closing": "closing_technique",
+    "closing_technique": "closing_technique",
+    "professionalism": "professionalism",
+}
+REP_CATEGORY_ORDER = (
+    "opening",
+    "pitch_delivery",
+    "objection_handling",
+    "closing_technique",
+    "professionalism",
+)
+IMPROVEMENT_TARGET_LABELS = {
+    "opening": "Opening",
+    "pitch_delivery": "Pitch",
+    "objection_handling": "Objection Handling",
+    "closing_technique": "Closing",
+    "professionalism": "Professionalism",
+}
 notification_service = NotificationService()
 review_service = ManagerReviewService()
 predictive_modeling_service = PredictiveModelingService()
+adaptive_training_service = AdaptiveTrainingService()
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -40,6 +75,123 @@ def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
 def _ensure_same_org(actor: Actor, org_id: str | None) -> None:
     if actor.org_id and org_id and actor.org_id != org_id:
         raise HTTPException(status_code=403, detail="cross-organization access denied")
+
+
+def _category_score_value(raw_value: Any) -> float | None:
+    value = raw_value.get("score") if isinstance(raw_value, dict) else raw_value
+    if not isinstance(value, (int, float)):
+        return None
+    return round(float(value), 2)
+
+
+def _normalize_category_scores(category_scores: dict[str, Any] | None) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for raw_key, value in (category_scores or {}).items():
+        category_key = REP_CATEGORY_KEY_MAP.get(str(raw_key))
+        if not category_key or category_key in normalized:
+            continue
+        score = _category_score_value(value)
+        if score is None:
+            continue
+        normalized[category_key] = score
+    return normalized
+
+
+def _linear_regression_slope(scores: list[float]) -> float | None:
+    if len(scores) < 2:
+        return None
+    x_mean = (len(scores) - 1) / 2
+    y_mean = sum(scores) / len(scores)
+    numerator = sum((index - x_mean) * (score - y_mean) for index, score in enumerate(scores))
+    denominator = sum((index - x_mean) ** 2 for index in range(len(scores)))
+    if denominator <= 0:
+        return None
+    return numerator / denominator
+
+
+def _serialize_transcript(turns: list[SessionTurn]) -> list[dict[str, Any]]:
+    return [
+        {
+            "turn_index": turn.turn_index,
+            "rep_text": turn.text if turn.speaker.value == "rep" else "",
+            "ai_text": turn.text if turn.speaker.value == "ai" else "",
+            "turn_id": turn.id,
+            "objection_tags": list(turn.objection_tags or []),
+            "emotion": turn.emotion_after or turn.emotion_before,
+            "stage": turn.stage,
+        }
+        for turn in turns
+    ]
+
+
+def _build_improvement_targets(category_scores: dict[str, CategoryScoreV2]) -> list[dict[str, Any]]:
+    candidates = [
+        {
+            "category": category_key,
+            "label": IMPROVEMENT_TARGET_LABELS.get(category_key, category_key.replace("_", " ").title()),
+            "target": category.improvement_target,
+            "score": round(float(category.score), 2),
+        }
+        for category_key, category in category_scores.items()
+        if category.improvement_target
+    ]
+    return sorted(candidates, key=lambda item: (item["score"], item["label"]))[:3]
+
+
+def _serialize_scorecard(scorecard: Scorecard | None) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    if scorecard is None:
+        return None, []
+
+    schema_version = scorecard.scorecard_schema_version or "v1"
+    serialized_category_scores: dict[str, Any]
+    improvement_targets: list[dict[str, Any]] = []
+
+    if schema_version == "v2":
+        serialized_category_scores = {}
+        parsed_category_scores: dict[str, CategoryScoreV2] = {}
+        for category_key, raw_value in (scorecard.category_scores or {}).items():
+            try:
+                parsed = CategoryScoreV2.model_validate(raw_value)
+            except ValidationError:
+                serialized_category_scores[category_key] = raw_value
+                continue
+            parsed_category_scores[category_key] = parsed
+            serialized_category_scores[category_key] = parsed.model_dump()
+        improvement_targets = _build_improvement_targets(parsed_category_scores)
+    else:
+        serialized_category_scores = scorecard.category_scores or {}
+
+    return (
+        {
+            "id": scorecard.id,
+            "overall_score": scorecard.overall_score,
+            "scorecard_schema_version": schema_version,
+            "category_scores": serialized_category_scores,
+            "highlights": scorecard.highlights,
+            "ai_summary": scorecard.ai_summary,
+            "evidence_turn_ids": scorecard.evidence_turn_ids,
+            "weakness_tags": scorecard.weakness_tags,
+        },
+        improvement_targets,
+    )
+
+
+def _default_rep_plan() -> dict[str, Any]:
+    return {
+        "focus_skills": [],
+        "recommended_difficulty": 1,
+        "readiness_trajectory": {},
+        "next_scenario_suggestion": None,
+    }
+
+
+def _scenario_focus_skills(scenario: Scenario) -> list[str]:
+    focus = adaptive_training_service._scenario_skill_focus(scenario)
+    return [
+        skill
+        for skill, weight in sorted(focus.items(), key=lambda item: item[1], reverse=True)
+        if weight >= 0.18
+    ]
 
 
 @router.get("/lookup")
@@ -157,7 +309,7 @@ def create_session(
     return session
 
 
-@router.get("/sessions/{session_id}")
+@router.get("/sessions/{session_id}", response_model=RepSessionFeedbackResponse)
 def get_session_with_feedback(
     session_id: str,
     actor: Actor = Depends(require_rep_or_manager),
@@ -174,36 +326,23 @@ def get_session_with_feedback(
         raise HTTPException(status_code=403, detail="rep can only access their own sessions")
 
     scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
+    transcript_turns = db.scalars(
+        select(SessionTurn)
+        .where(SessionTurn.session_id == session_id)
+        .order_by(SessionTurn.turn_index.asc(), SessionTurn.started_at.asc())
+    ).all()
+    scorecard_payload, improvement_targets = _serialize_scorecard(scorecard)
     manager_coaching_note = review_service.latest_rep_visible_note(db, session_id=session_id)
     return {
-        "session": SessionResponse.model_validate(session).model_dump(),
-        "scorecard": (
-            {
-                "id": scorecard.id,
-                "overall_score": scorecard.overall_score,
-                "scorecard_schema_version": scorecard.scorecard_schema_version,
-                "category_scores": scorecard.category_scores,
-                "highlights": scorecard.highlights,
-                "ai_summary": scorecard.ai_summary,
-                "evidence_turn_ids": scorecard.evidence_turn_ids,
-                "weakness_tags": scorecard.weakness_tags,
-            }
-            if scorecard
-            else None
-        ),
+        "session": SessionResponse.model_validate(session).model_dump(mode="json"),
+        "scorecard": scorecard_payload,
         "manager_coaching_note": (
-            {
-                "id": manager_coaching_note.id,
-                "scorecard_id": manager_coaching_note.scorecard_id,
-                "reviewer_id": manager_coaching_note.reviewer_id,
-                "note": manager_coaching_note.note,
-                "visible_to_rep": manager_coaching_note.visible_to_rep,
-                "weakness_tags": manager_coaching_note.weakness_tags,
-                "created_at": manager_coaching_note.created_at.isoformat() if manager_coaching_note.created_at else None,
-            }
+            ManagerCoachingNoteResponse.model_validate(manager_coaching_note).model_dump(mode="json")
             if manager_coaching_note
             else None
         ),
+        "transcript": _serialize_transcript(transcript_turns),
+        "improvement_targets": improvement_targets,
     }
 
 
@@ -276,6 +415,164 @@ def get_rep_progress(
         "session_count": int(sessions_count),
         "scored_session_count": int(scored_count),
         "average_score": round(float(avg_score), 2) if avg_score is not None else None,
+    }
+
+
+@router.get("/progress/trend", response_model=RepProgressTrendResponse)
+def get_rep_progress_trend(
+    rep_id: str = Query(...),
+    sessions: int = Query(default=10, ge=1, le=20),
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "rep" and actor.user_id != rep_id:
+        raise HTTPException(status_code=403, detail="rep can only access their own progress")
+
+    rep_user = _get_user_or_404(db, rep_id, "rep")
+    _ensure_same_org(actor, rep_user.org_id)
+
+    rows = (
+        db.execute(
+            select(DrillSession, Scorecard)
+            .join(Scorecard, Scorecard.session_id == DrillSession.id)
+            .where(DrillSession.rep_id == rep_id)
+            .order_by(DrillSession.started_at.desc(), DrillSession.created_at.desc())
+            .limit(sessions)
+        )
+        .all()
+    )
+
+    ordered_rows = list(reversed(rows))
+    session_items: list[dict[str, Any]] = []
+    overall_scores: list[float] = []
+    category_totals: dict[str, list[float]] = {key: [] for key in REP_CATEGORY_ORDER}
+
+    for session, scorecard in ordered_rows:
+        category_scores = _normalize_category_scores(scorecard.category_scores)
+        for category_key, value in category_scores.items():
+            category_totals.setdefault(category_key, []).append(value)
+        overall_score = round(float(scorecard.overall_score), 2)
+        overall_scores.append(overall_score)
+        session_items.append(
+            {
+                "session_id": session.id,
+                "started_at": session.started_at.isoformat() if session.started_at else None,
+                "overall_score": overall_score,
+                "category_scores": category_scores,
+            }
+        )
+
+    slope = _linear_regression_slope(overall_scores)
+    if slope is not None and slope > 0.2:
+        overall_trend = "improving"
+    elif slope is not None and slope < -0.2:
+        overall_trend = "declining"
+    else:
+        overall_trend = "stable"
+
+    return {
+        "sessions": session_items,
+        "category_averages": {
+            category_key: round(sum(values) / len(values), 2)
+            for category_key, values in category_totals.items()
+            if values
+        },
+        "overall_trend": overall_trend,
+    }
+
+
+@router.get("/plan", response_model=RepAdaptivePlanResponse)
+def get_rep_plan(
+    rep_id: str = Query(...),
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "rep" and actor.user_id != rep_id:
+        raise HTTPException(status_code=403, detail="rep can only access their own plan")
+
+    rep_user = _get_user_or_404(db, rep_id, "rep")
+    _ensure_same_org(actor, rep_user.org_id)
+
+    try:
+        plan = adaptive_training_service.build_plan(db, rep_id=rep_id)
+    except Exception:
+        return _default_rep_plan()
+
+    if int(plan.get("session_count") or 0) <= 0:
+        return _default_rep_plan()
+
+    focus_skills = [
+        str(skill)
+        for skill in plan.get("weakest_skills", [])
+        if isinstance(skill, str) and skill
+    ]
+    if not focus_skills:
+        focus_skills = [
+            str(skill)
+            for skill in ((plan.get("recommended_scenarios") or [{}])[0].get("focus_skills") or [])
+            if isinstance(skill, str) and skill
+        ]
+
+    recommended_difficulty = max(1, min(5, int(plan.get("recommended_difficulty") or 1)))
+    readiness_trajectory = {
+        str(item.get("skill")): {
+            "sessions_to_readiness": item.get("sessions_to_readiness"),
+            "slope": round(float(item.get("velocity") or 0.0), 4),
+        }
+        for item in (plan.get("readiness_forecast") or [])
+        if isinstance(item, dict) and item.get("skill")
+    }
+
+    recommendations_by_id = {
+        str(item.get("scenario_id")): item
+        for item in (plan.get("recommended_scenarios") or [])
+        if isinstance(item, dict) and item.get("scenario_id")
+    }
+    candidates = db.scalars(
+        select(Scenario)
+        .where(
+            Scenario.difficulty == recommended_difficulty,
+            or_(Scenario.org_id == rep_user.org_id, Scenario.org_id.is_(None)),
+        )
+        .order_by(Scenario.created_at.desc(), Scenario.name.asc())
+    ).all()
+
+    next_scenario_suggestion = None
+    focus_skill_set = set(focus_skills)
+    ranked_candidates: list[tuple[int, float, str, dict[str, Any]]] = []
+    for scenario in candidates:
+        recommendation = recommendations_by_id.get(scenario.id, {})
+        scenario_focus_skills = [
+            str(skill)
+            for skill in (recommendation.get("focus_skills") or _scenario_focus_skills(scenario))
+            if isinstance(skill, str) and skill
+        ]
+        overlap = len(focus_skill_set.intersection(scenario_focus_skills))
+        if overlap <= 0:
+            continue
+        ranked_candidates.append(
+            (
+                overlap,
+                float(recommendation.get("recommendation_score") or 0.0),
+                scenario.name.lower(),
+                {
+                    "name": scenario.name,
+                    "difficulty": int(scenario.difficulty),
+                    "reason": recommendation.get("rationale")
+                    or f"Targets {', '.join(scenario_focus_skills[:2]) or 'core selling fundamentals'}.",
+                },
+            )
+        )
+
+    if ranked_candidates:
+        ranked_candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        next_scenario_suggestion = ranked_candidates[0][3]
+
+    return {
+        "focus_skills": focus_skills,
+        "recommended_difficulty": recommended_difficulty,
+        "readiness_trajectory": readiness_trajectory,
+        "next_scenario_suggestion": next_scenario_suggestion,
     }
 
 

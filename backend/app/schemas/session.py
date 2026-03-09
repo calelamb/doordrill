@@ -3,7 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.schemas.scorecard import ManagerCoachingNoteResponse, ManagerReviewResponse
+from app.schemas.scorecard import CategoryScoreV2, ManagerCoachingNoteResponse, ManagerReviewResponse, ScorecardCategoryGrade
 
 
 class SessionCreateRequest(BaseModel):
@@ -22,6 +22,58 @@ class SessionResponse(BaseModel):
     status: str
 
     model_config = {"from_attributes": True}
+
+
+RepCategoryScoreValue = float | ScorecardCategoryGrade | CategoryScoreV2 | dict[str, Any]
+
+
+class RepSessionTranscriptEntryResponse(BaseModel):
+    turn_index: int
+    rep_text: str
+    ai_text: str
+    turn_id: str
+    objection_tags: list[str] = Field(default_factory=list)
+    emotion: str | None = None
+    stage: str | None = None
+
+
+class RepSessionImprovementTargetResponse(BaseModel):
+    category: str
+    label: str
+    target: str
+    score: float
+
+
+class RepSessionScorecardResponse(BaseModel):
+    id: str
+    overall_score: float
+    scorecard_schema_version: str = "v1"
+    category_scores: dict[str, RepCategoryScoreValue] = Field(default_factory=dict)
+    highlights: list[dict[str, Any]] = Field(default_factory=list)
+    ai_summary: str
+    evidence_turn_ids: list[str] = Field(default_factory=list)
+    weakness_tags: list[str] = Field(default_factory=list)
+
+
+class RepSessionFeedbackResponse(BaseModel):
+    session: SessionResponse
+    scorecard: RepSessionScorecardResponse | None = None
+    manager_coaching_note: ManagerCoachingNoteResponse | None = None
+    transcript: list[RepSessionTranscriptEntryResponse] = Field(default_factory=list)
+    improvement_targets: list[RepSessionImprovementTargetResponse] = Field(default_factory=list)
+
+
+class RepProgressTrendSessionResponse(BaseModel):
+    session_id: str
+    started_at: str | None = None
+    overall_score: float
+    category_scores: dict[str, float] = Field(default_factory=dict)
+
+
+class RepProgressTrendResponse(BaseModel):
+    sessions: list[RepProgressTrendSessionResponse] = Field(default_factory=list)
+    category_averages: dict[str, float] = Field(default_factory=dict)
+    overall_trend: str
 
 
 class SessionReplayResponse(BaseModel):
