@@ -68,6 +68,23 @@ async function readErrorMessage(response: Response): Promise<string> {
     if (typeof payload.detail === "string" && payload.detail.trim()) {
       return payload.detail;
     }
+
+    if (Array.isArray(payload.detail)) {
+      const messages = payload.detail
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return null;
+          }
+
+          const message = "msg" in entry ? entry.msg : null;
+          return typeof message === "string" && message.trim() ? message : null;
+        })
+        .filter((message): message is string => Boolean(message));
+
+      if (messages.length > 0) {
+        return messages.join(", ");
+      }
+    }
   } catch {
     // Ignore malformed or empty JSON error payloads.
   }

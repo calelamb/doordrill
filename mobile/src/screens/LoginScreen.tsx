@@ -52,18 +52,19 @@ export function LoginScreen() {
 
             <BlurView intensity={40} tint="light" style={styles.glassCard}>
               <View style={styles.inputGroup}>
-                <Text style={styles.label}>Email Address</Text>
+                <Text style={styles.label}>Email or Username</Text>
                 <View style={styles.inputWrapper}>
                   <Mail size={18} color="#9ca3af" style={styles.inputIcon} />
                   <TextInput
                     style={styles.input}
                     value={email}
                     onChangeText={setEmail}
-                    placeholder="Enter your email"
+                    placeholder="Enter your email or username"
                     placeholderTextColor="#6b7280"
                     autoCapitalize="none"
                     autoCorrect={false}
-                    keyboardType="email-address"
+                    autoComplete="username"
+                    textContentType="username"
                     selectionColor="#22c55e"
                   />
                 </View>
