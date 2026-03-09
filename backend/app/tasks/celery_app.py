@@ -6,8 +6,10 @@ from app.core.config import get_settings
 
 try:  # pragma: no cover - optional runtime dependency
     from celery import Celery
+    from celery.schedules import crontab
 except Exception:  # pragma: no cover
     Celery = None  # type: ignore[assignment]
+    crontab = None  # type: ignore[assignment]
 
 
 @lru_cache(maxsize=1)
@@ -31,6 +33,8 @@ def get_celery_app():
         "post_session.notify": {"queue": "postprocess.notify"},
         "post_session.retry_due": {"queue": "postprocess.retry"},
         "notifications.retry_due": {"queue": "notifications.retry"},
+        "notifications.assignment_due_soon": {"queue": "notifications.scheduled"},
+        "notifications.streak_nudges": {"queue": "notifications.scheduled"},
         "analytics.refresh_manager": {"queue": "analytics.refresh"},
         "analytics.backfill": {"queue": "analytics.backfill"},
     }
@@ -50,4 +54,17 @@ def get_celery_app():
             "schedule": 3600.0,
         },
     }
+    if crontab is not None:
+        celery_app.conf.beat_schedule.update(
+            {
+                "assignment-due-soon-reminders": {
+                    "task": "notifications.assignment_due_soon",
+                    "schedule": crontab(minute=0, hour="*/1"),
+                },
+                "streak-nudges-daily": {
+                    "task": "notifications.streak_nudges",
+                    "schedule": crontab(minute=0, hour=18),
+                },
+            }
+        )
     return celery_app

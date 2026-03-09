@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.postprocess_run import PostprocessRun
+from app.models.scenario import Scenario
 from app.models.session import Session as DrillSession
 from app.models.user import User
 from app.services.adaptive_training_service import AdaptiveTrainingService
@@ -85,6 +86,16 @@ class SessionPostprocessService:
                 payload = {"artifact_id": result.id}
             elif task_type == "grade":
                 result = await self.grading_service.grade_session(db, session_id=session_id)
+                session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+                if session is not None:
+                    scenario_name = db.scalar(select(Scenario.name).where(Scenario.id == session.scenario_id)) or "your drill"
+                    await self.notification_service.notify_rep_score_ready(
+                        db,
+                        rep_id=session.rep_id,
+                        session_id=session_id,
+                        scenario_name=scenario_name,
+                        overall_score=float(result.overall_score),
+                    )
                 enrichment = self.turn_enrichment_service.enrich_session(db, session_id)
                 adaptive_outcome = self.adaptive_training_service.write_recommendation_outcome(db, session_id=session_id)
                 warehouse_write = self.warehouse_etl_service.write_session(db, session_id)

@@ -2,6 +2,7 @@ import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { ClipboardList, History, User, MessageSquare } from "lucide-react-native";
+import { useEffect } from "react";
 import { Platform } from "react-native";
 
 import { useSession } from "../store/session";
@@ -17,6 +18,7 @@ import { MessageThreadScreen } from "../screens/MessageThreadScreen";
 import { NewMessageScreen } from "../screens/NewMessageScreen";
 import { RootStackParamList, BottomTabParamList } from "./types";
 import { colors } from "../theme/tokens";
+import { flushPendingNotificationNavigation, navigationRef } from "../services/notifications";
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<BottomTabParamList>();
@@ -82,8 +84,12 @@ function MainTabNavigator() {
 export function AppNavigator() {
   const { repId } = useSession();
 
+  useEffect(() => {
+    flushPendingNotificationNavigation();
+  }, [repId]);
+
   return (
-    <NavigationContainer>
+    <NavigationContainer ref={navigationRef} onReady={flushPendingNotificationNavigation}>
       {!repId ? (
         <Stack.Navigator>
           <Stack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />

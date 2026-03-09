@@ -49,6 +49,22 @@ def _run_notification_retry(limit: int):
         db.close()
 
 
+def _run_assignment_due_soon_reminders():
+    db = SessionLocal()
+    try:
+        return _run(notification_service.send_assignment_due_soon_reminders(db))
+    finally:
+        db.close()
+
+
+def _run_streak_nudges():
+    db = SessionLocal()
+    try:
+        return _run(notification_service.send_streak_nudges(db))
+    finally:
+        db.close()
+
+
 def _run_analytics_backfill():
     db = SessionLocal()
     try:
@@ -126,6 +142,28 @@ if celery_app is not None:  # pragma: no branch - depends on runtime settings
             if self.request.retries >= self.max_retries:
                 return {"ok": False, "task": "notifications.retry_due", "error": str(exc)}
             raise self.retry(exc=exc, countdown=30)
+
+
+    @celery_app.task(bind=True, name="notifications.assignment_due_soon", max_retries=1)
+    def send_assignment_due_soon_reminders(self):
+        try:
+            result = _run_assignment_due_soon_reminders()
+            return {"ok": True, "task": "notifications.assignment_due_soon", "result": result}
+        except Exception as exc:  # pragma: no cover - worker runtime
+            if self.request.retries >= self.max_retries:
+                return {"ok": False, "task": "notifications.assignment_due_soon", "error": str(exc)}
+            raise self.retry(exc=exc, countdown=60)
+
+
+    @celery_app.task(bind=True, name="notifications.streak_nudges", max_retries=1)
+    def send_streak_nudges(self):
+        try:
+            result = _run_streak_nudges()
+            return {"ok": True, "task": "notifications.streak_nudges", "result": result}
+        except Exception as exc:  # pragma: no cover - worker runtime
+            if self.request.retries >= self.max_retries:
+                return {"ok": False, "task": "notifications.streak_nudges", "error": str(exc)}
+            raise self.retry(exc=exc, countdown=60)
 
 
     @celery_app.task(bind=True, name="analytics.refresh_manager", max_retries=3)

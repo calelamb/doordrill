@@ -4,6 +4,16 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class NotificationPreferences(BaseModel):
+    score_ready: bool = True
+    assignment_created: bool = True
+    assignment_due_soon: bool = True
+    coaching_note: bool = True
+    streak_nudge: bool = True
+
+    model_config = {"extra": "forbid"}
+
+
 class DeviceTokenCreateRequest(BaseModel):
     platform: str = Field(pattern="^(ios|android)$")
     provider: str = Field(default="expo", pattern="^(expo|fcm)$")

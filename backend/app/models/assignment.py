@@ -31,6 +31,7 @@ class Assignment(Base, TimestampMixin):
     rep_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     assigned_by: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    due_soon_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[AssignmentStatus] = mapped_column(Enum(AssignmentStatus), default=AssignmentStatus.ASSIGNED, nullable=False)
     min_score_target: Mapped[float | None] = mapped_column(nullable=True)
     retry_policy: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)

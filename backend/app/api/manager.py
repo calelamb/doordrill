@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -91,6 +92,7 @@ from app.services.predictive_modeling_service import PredictiveModelingService
 from app.services.storage_service import StorageService
 
 router = APIRouter(prefix="/manager", tags=["manager"])
+logger = logging.getLogger(__name__)
 adaptive_training_service = AdaptiveTrainingService()
 feed_service = ManagerFeedService()
 storage_service = StorageService()
@@ -113,6 +115,17 @@ RUBRIC_CATEGORY_KEYS = {
     "professionalism": "professionalism",
 }
 TEAM_RISK_CATEGORY_KEYS = ("opening", "pitch", "objection_handling", "closing", "professionalism")
+
+
+def _run_async(coro):
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -986,6 +999,15 @@ def create_assignment(
     analytics_refresh_service.refresh_manager(db, manager_id=manager.id)
     db.commit()
     db.refresh(assignment)
+    _run_async(
+        notification_service.notify_rep_assignment_created(
+            db,
+            rep_id=assignment.rep_id,
+            assignment_id=assignment.id,
+            scenario_name=scenario.name,
+            due_at=assignment.due_at,
+        )
+    )
     return assignment
 
 
@@ -1054,6 +1076,15 @@ def create_followup_assignment(
     analytics_refresh_service.refresh_manager(db, manager_id=manager.id)
     db.commit()
     db.refresh(assignment)
+    _run_async(
+        notification_service.notify_rep_assignment_created(
+            db,
+            rep_id=assignment.rep_id,
+            assignment_id=assignment.id,
+            scenario_name=scenario.name,
+            due_at=assignment.due_at,
+        )
+    )
 
     return {
         "assignment": AssignmentResponse.model_validate(assignment).model_dump(),
@@ -2407,8 +2438,20 @@ def create_coaching_note(
         },
     )
     analytics_refresh_service.refresh_session(db, session_id=coaching_note.scorecard.session_id)
+    source_session = db.scalar(select(DrillSession).where(DrillSession.id == coaching_note.scorecard.session_id))
     db.commit()
     db.refresh(coaching_note)
+    if coaching_note.visible_to_rep and source_session is not None:
+        manager_name = reviewer.name.strip() or "Your manager"
+        _run_async(
+            notification_service.notify_rep_coaching_note(
+                db,
+                rep_id=source_session.rep_id,
+                session_id=source_session.id,
+                manager_name=manager_name,
+                note_preview=coaching_note.note,
+            )
+        )
     return _serialize_coaching_note(coaching_note)
 
 

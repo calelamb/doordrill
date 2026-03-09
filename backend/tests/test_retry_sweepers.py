@@ -18,7 +18,7 @@ from app.services.session_postprocess_service import SessionPostprocessService
 
 
 @pytest.mark.asyncio
-async def test_notification_retry_sweeper_invalidates_bad_tokens(seed_org):
+async def test_notification_retry_sweeper_revokes_bad_tokens(seed_org):
     db = SessionLocal()
     try:
         service = NotificationService()
@@ -68,7 +68,7 @@ async def test_notification_retry_sweeper_invalidates_bad_tokens(seed_org):
         assert delivery.status == "dead_letter"
         assert delivery.next_retry_at is None
         assert token.provider == "expo"
-        assert token.status == "invalid"
+        assert token.status == "revoked"
     finally:
         db.close()
 

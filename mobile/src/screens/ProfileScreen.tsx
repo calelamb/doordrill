@@ -1,17 +1,51 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View, TextInput, Image, ScrollView } from "react-native";
-import { Award, Camera, Check, Edit2, Flame, LogOut, Star, Target, TrendingUp, X, Zap } from "lucide-react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  SafeAreaView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+  Image,
+  ScrollView,
+} from "react-native";
+import {
+  Award,
+  BellRing,
+  Camera,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Edit2,
+  Flame,
+  LogOut,
+  Star,
+  Target,
+  TrendingUp,
+  X,
+} from "lucide-react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 import * as ImagePicker from "expo-image-picker";
 
 import { BottomTabParamList, RootStackParamList } from "../navigation/types";
-import { fetchRepProgress, updateRepProfile, uploadRepAvatar, fetchRepHierarchy } from "../services/api";
+import {
+  fetchNotificationPreferences,
+  fetchRepHierarchy,
+  fetchRepProgress,
+  revokeDeviceToken,
+  updateNotificationPreferences,
+  updateRepProfile,
+  uploadRepAvatar,
+} from "../services/api";
 import { API_BASE_URL } from "../services/config";
+import { clearStoredPushToken, getStoredPushToken } from "../services/notifications";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { RepProgress, HierarchyNode } from "../types";
+import { DEFAULT_NOTIFICATION_PREFERENCES, HierarchyNode, NotificationPreferences, RepProgress } from "../types";
 import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
 import { CompositeScreenProps } from "@react-navigation/native";
 
@@ -28,6 +62,18 @@ const CATEGORY_LABELS: Record<string, string> = {
   professionalism: "Professionalism",
 };
 
+const NOTIFICATION_PREFERENCE_ITEMS: Array<{
+  key: keyof NotificationPreferences;
+  label: string;
+  description: string;
+}> = [
+  { key: "score_ready", label: "Score Ready", description: "When your latest drill is graded." },
+  { key: "assignment_created", label: "New Assignment", description: "When a manager assigns you a drill." },
+  { key: "assignment_due_soon", label: "Due Reminders", description: "Twenty-four hours before a deadline." },
+  { key: "coaching_note", label: "Coaching Notes", description: "When a manager posts visible feedback." },
+  { key: "streak_nudge", label: "Practice Reminders", description: "When you have been inactive for multiple days." },
+];
+
 export function ProfileScreen({ navigation }: Props) {
   const { repId, clearSession } = useSession();
   const [progress, setProgress] = useState<RepProgress | null>(null);
@@ -39,6 +85,12 @@ export function ProfileScreen({ navigation }: Props) {
   const [editName, setEditName] = useState("");
   const [savingProfile, setSavingProfile] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [prefs, setPrefs] = useState<NotificationPreferences>({ ...DEFAULT_NOTIFICATION_PREFERENCES });
+  const [prefsLoading, setPrefsLoading] = useState(false);
+  const [prefsSaving, setPrefsSaving] = useState(false);
+  const [prefsError, setPrefsError] = useState<string | null>(null);
+  const [notificationsExpanded, setNotificationsExpanded] = useState(true);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const loadProgress = useCallback(async () => {
     if (!repId) return;
@@ -62,6 +114,27 @@ export function ProfileScreen({ navigation }: Props) {
   useEffect(() => {
     void loadProgress();
   }, [loadProgress]);
+
+  const loadPreferences = useCallback(async () => {
+    if (!repId) {
+      return;
+    }
+    setPrefsLoading(true);
+    setPrefsError(null);
+    try {
+      const savedPrefs = await fetchNotificationPreferences(repId);
+      setPrefs(savedPrefs);
+    } catch (err) {
+      setPrefsError(err instanceof Error ? err.message : "Failed to load notification preferences");
+      setPrefs({ ...DEFAULT_NOTIFICATION_PREFERENCES });
+    } finally {
+      setPrefsLoading(false);
+    }
+  }, [repId]);
+
+  useEffect(() => {
+    void loadPreferences();
+  }, [loadPreferences]);
 
   const handleSaveProfile = async () => {
     if (!repId) return;
@@ -99,6 +172,47 @@ export function ProfileScreen({ navigation }: Props) {
     }
   };
 
+  const togglePref = async (key: keyof NotificationPreferences) => {
+    if (!repId || prefsSaving) {
+      return;
+    }
+
+    const previousPrefs = prefs;
+    const updatedPrefs = { ...previousPrefs, [key]: !previousPrefs[key] };
+    setPrefs(updatedPrefs);
+    setPrefsSaving(true);
+    setPrefsError(null);
+    try {
+      const savedPrefs = await updateNotificationPreferences(repId, updatedPrefs);
+      setPrefs(savedPrefs);
+    } catch (err) {
+      setPrefs(previousPrefs);
+      setPrefsError(err instanceof Error ? err.message : "Failed to update notification preferences");
+    } finally {
+      setPrefsSaving(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (!repId || loggingOut) {
+      clearSession();
+      return;
+    }
+
+    setLoggingOut(true);
+    try {
+      const tokenId = await getStoredPushToken();
+      if (tokenId) {
+        await revokeDeviceToken(repId, tokenId);
+      }
+    } catch {
+      // Best-effort cleanup; logout should not be blocked on network state.
+    } finally {
+      await clearStoredPushToken().catch(() => undefined);
+      clearSession();
+    }
+  };
+
   const displayName = progress?.rep_name || "Sales Representative";
   const initials = progress?.rep_name 
     ? progress.rep_name.split(" ").map(n => n[0]).join("").substring(0, 2).toUpperCase()
@@ -115,12 +229,21 @@ export function ProfileScreen({ navigation }: Props) {
         <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
           <BlurView intensity={40} tint="light" style={styles.profileCard}>
             {!isEditing && (
-              <Pressable style={styles.editButton} onPress={() => setIsEditing(true)}>
+              <Pressable
+                style={styles.editButton}
+                onPress={() => setIsEditing(true)}
+                accessibilityLabel="Edit profile"
+              >
                 <Edit2 size={18} color={colors.muted} />
               </Pressable>
             )}
             
-            <Pressable onPress={pickImage} disabled={!isEditing} style={[styles.avatar, isEditing && styles.avatarEditing]}>
+            <Pressable
+              onPress={pickImage}
+              disabled={!isEditing}
+              style={[styles.avatar, isEditing && styles.avatarEditing]}
+              accessibilityLabel="Update profile picture"
+            >
               {uploadingAvatar ? (
                 <ActivityIndicator color={colors.accent} />
               ) : avatarUrl ? (
@@ -148,10 +271,16 @@ export function ProfileScreen({ navigation }: Props) {
                   <Pressable 
                     style={[styles.actionBtn, styles.cancelBtn]} 
                     onPress={() => { setIsEditing(false); setEditName(progress?.rep_name || ""); }}
+                    accessibilityLabel="Cancel profile editing"
                   >
                     <X size={16} color="#6b7280" />
                   </Pressable>
-                  <Pressable style={[styles.actionBtn, styles.saveBtn]} onPress={handleSaveProfile} disabled={savingProfile}>
+                  <Pressable
+                    style={[styles.actionBtn, styles.saveBtn]}
+                    onPress={handleSaveProfile}
+                    disabled={savingProfile}
+                    accessibilityLabel="Save profile"
+                  >
                     {savingProfile ? <ActivityIndicator size="small" color="#fff" /> : <Check size={16} color="#fff" />}
                   </Pressable>
                 </View>
@@ -264,13 +393,90 @@ export function ProfileScreen({ navigation }: Props) {
                   </View>
                 </View>
               )}
+
+              <BlurView intensity={40} tint="light" style={styles.preferencesCard}>
+                <Pressable
+                  style={styles.preferencesHeader}
+                  onPress={() => setNotificationsExpanded((current) => !current)}
+                  accessibilityLabel="Toggle notification preferences"
+                >
+                  <View style={styles.preferencesHeaderCopy}>
+                    <View style={styles.preferencesIconWrap}>
+                      <BellRing size={18} color={colors.accent} />
+                    </View>
+                    <View style={styles.preferencesHeaderText}>
+                      <Text style={styles.sectionTitle}>Notifications</Text>
+                      <Text style={styles.preferencesSubtitle}>Choose which reminders and coaching alerts you receive.</Text>
+                    </View>
+                  </View>
+                  {notificationsExpanded ? (
+                    <ChevronUp size={18} color={colors.muted} />
+                  ) : (
+                    <ChevronDown size={18} color={colors.muted} />
+                  )}
+                </Pressable>
+
+                {notificationsExpanded ? (
+                  <View style={styles.preferencesBody}>
+                    {prefsLoading ? (
+                      <ActivityIndicator color={colors.accent} style={styles.preferencesLoading} />
+                    ) : (
+                      <>
+                        {prefsError ? (
+                          <View style={styles.preferenceErrorRow}>
+                            <Text style={styles.preferenceErrorText}>{prefsError}</Text>
+                            <Pressable onPress={loadPreferences} accessibilityLabel="Retry loading notification preferences">
+                              <Text style={styles.preferenceRetryText}>Retry</Text>
+                            </Pressable>
+                          </View>
+                        ) : null}
+
+                        {NOTIFICATION_PREFERENCE_ITEMS.map(({ key, label, description }, index) => (
+                          <View
+                            key={key}
+                            style={[
+                              styles.preferenceRow,
+                              index < NOTIFICATION_PREFERENCE_ITEMS.length - 1 && styles.preferenceRowBorder,
+                            ]}
+                          >
+                            <View style={styles.preferenceTextGroup}>
+                              <Text style={styles.preferenceLabel}>{label}</Text>
+                              <Text style={styles.preferenceDescription}>{description}</Text>
+                            </View>
+                            <Switch
+                              value={prefs[key]}
+                              onValueChange={() => {
+                                void togglePref(key);
+                              }}
+                              disabled={prefsLoading || prefsSaving || loggingOut}
+                              trackColor={{ false: colors.line, true: colors.accent }}
+                              thumbColor="#FFFFFF"
+                              ios_backgroundColor={colors.line}
+                              accessibilityLabel={`Toggle ${label} notifications`}
+                            />
+                          </View>
+                        ))}
+
+                        {prefsSaving ? <Text style={styles.preferenceSavingText}>Saving changes…</Text> : null}
+                      </>
+                    )}
+                  </View>
+                ) : null}
+              </BlurView>
             </>
           ) : null}
 
           <View style={styles.actionsContainer}>
-            <Pressable style={({pressed}) => [styles.logoutButton, pressed && styles.logoutButtonPressed]} onPress={clearSession}>
-              <LogOut size={18} color="#991B1B" />
-              <Text style={styles.logoutText}>Sign Out</Text>
+            <Pressable
+              style={({pressed}) => [styles.logoutButton, pressed && styles.logoutButtonPressed, loggingOut && styles.logoutButtonDisabled]}
+              onPress={() => {
+                void handleLogout();
+              }}
+              disabled={loggingOut}
+              accessibilityLabel="Sign out"
+            >
+              {loggingOut ? <ActivityIndicator color="#991B1B" /> : <LogOut size={18} color="#991B1B" />}
+              <Text style={styles.logoutText}>{loggingOut ? "Signing Out…" : "Sign Out"}</Text>
             </Pressable>
           </View>
         </ScrollView>
@@ -340,6 +546,100 @@ const styles = StyleSheet.create({
     color: colors.ink,
     fontFamily: "Poppins_600SemiBold",
   },
+  preferencesCard: {
+    marginTop: 32,
+    borderRadius: 28,
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    overflow: "hidden",
+  },
+  preferencesHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+  },
+  preferencesHeaderCopy: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+  },
+  preferencesIconWrap: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(22, 101, 52, 0.1)",
+  },
+  preferencesHeaderText: { flex: 1 },
+  preferencesSubtitle: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.muted,
+    marginTop: -6,
+  },
+  preferencesBody: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+  },
+  preferencesLoading: {
+    paddingVertical: 18,
+  },
+  preferenceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 16,
+    paddingVertical: 14,
+  },
+  preferenceRowBorder: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.line,
+  },
+  preferenceTextGroup: {
+    flex: 1,
+    paddingRight: 8,
+  },
+  preferenceLabel: {
+    fontSize: 15,
+    fontFamily: "Poppins_600SemiBold",
+    color: colors.ink,
+    marginBottom: 4,
+  },
+  preferenceDescription: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.muted,
+  },
+  preferenceErrorRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    paddingVertical: 12,
+  },
+  preferenceErrorText: {
+    flex: 1,
+    color: "#991B1B",
+    fontWeight: "600",
+  },
+  preferenceRetryText: {
+    color: "#991B1B",
+    fontWeight: "800",
+  },
+  preferenceSavingText: {
+    paddingTop: 12,
+    fontSize: 12,
+    color: colors.muted,
+    textAlign: "right",
+  },
   errorContainer: {
     backgroundColor: "#FEE2E2",
     borderWidth: 1,
@@ -390,6 +690,9 @@ const styles = StyleSheet.create({
   },
   logoutButtonPressed: {
     opacity: 0.7,
+  },
+  logoutButtonDisabled: {
+    opacity: 0.8,
   },
   logoutText: { fontSize: 16, fontWeight: "700", color: "#991B1B" },
   editButton: { position: "absolute", top: 20, right: 20, padding: 8 },

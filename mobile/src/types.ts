@@ -159,3 +159,29 @@ export type WsInboundEvent = {
   timestamp?: string;
   payload: Record<string, unknown>;
 };
+
+export type NotificationPreferences = {
+  score_ready: boolean;
+  assignment_created: boolean;
+  assignment_due_soon: boolean;
+  coaching_note: boolean;
+  streak_nudge: boolean;
+};
+
+export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+  score_ready: true,
+  assignment_created: true,
+  assignment_due_soon: true,
+  coaching_note: true,
+  streak_nudge: true,
+};
+
+export type RegisteredDeviceToken = {
+  id: string;
+  user_id: string;
+  platform: "ios" | "android";
+  provider: "expo" | "fcm";
+  token: string;
+  status: string;
+  last_seen_at: string;
+};

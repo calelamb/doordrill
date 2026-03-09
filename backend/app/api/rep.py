@@ -22,7 +22,7 @@ from app.models.types import AssignmentStatus, SessionStatus
 from app.models.user import User, Team
 from app.schemas.adaptive_training import RepAdaptivePlanResponse, RepForecastResponse
 from app.schemas.assignment import AssignmentResponse
-from app.schemas.notification import DeviceTokenCreateRequest, DeviceTokenResponse
+from app.schemas.notification import DeviceTokenCreateRequest, DeviceTokenResponse, NotificationPreferences
 from app.schemas.profile import ProfileUpdateRequest, HierarchyNode
 from app.schemas.scorecard import CategoryScoreV2, ManagerCoachingNoteResponse
 from app.schemas.session import (
@@ -254,6 +254,22 @@ def _default_rep_plan() -> dict[str, Any]:
         "readiness_trajectory": {},
         "next_scenario_suggestion": None,
     }
+
+
+def _serialize_notification_preferences(user: User) -> NotificationPreferences:
+    raw_preferences = user.notification_preferences or {}
+
+    def _resolve(key: str) -> bool:
+        value = raw_preferences.get(key)
+        return value if isinstance(value, bool) else True
+
+    return NotificationPreferences(
+        score_ready=_resolve("score_ready"),
+        assignment_created=_resolve("assignment_created"),
+        assignment_due_soon=_resolve("assignment_due_soon"),
+        coaching_note=_resolve("coaching_note"),
+        streak_nudge=_resolve("streak_nudge"),
+    )
 
 
 def _scenario_focus_skills(scenario: Scenario) -> list[str]:
@@ -708,6 +724,34 @@ def register_device_token(
         "status": token.status,
         "last_seen_at": token.last_seen_at,
     }
+
+
+@router.get("/notification-preferences", response_model=NotificationPreferences)
+def get_notification_preferences(
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> NotificationPreferences:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+    user = _get_user_or_404(db, actor.user_id, "user")
+    _ensure_same_org(actor, user.org_id)
+    return _serialize_notification_preferences(user)
+
+
+@router.put("/notification-preferences", response_model=NotificationPreferences)
+def update_notification_preferences(
+    prefs: NotificationPreferences,
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> NotificationPreferences:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+    user = _get_user_or_404(db, actor.user_id, "user")
+    _ensure_same_org(actor, user.org_id)
+    user.notification_preferences = prefs.model_dump()
+    db.commit()
+    db.refresh(user)
+    return _serialize_notification_preferences(user)
 
 
 @router.delete("/device-tokens/{token_id}")

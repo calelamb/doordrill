@@ -1,7 +1,10 @@
 import { API_BASE_URL } from "./config";
 import {
   CategoryScoreDetail,
+  DEFAULT_NOTIFICATION_PREFERENCES,
   ImprovementTarget,
+  NotificationPreferences,
+  RegisteredDeviceToken,
   RepAssignment,
   RepPlan,
   RepProgress,
@@ -142,6 +145,33 @@ function normalizeRepProgress(progress: RepProgress): RepProgress {
   };
 }
 
+function normalizeNotificationPreferences(
+  preferences: Partial<NotificationPreferences> | null | undefined
+): NotificationPreferences {
+  return {
+    score_ready:
+      typeof preferences?.score_ready === "boolean"
+        ? preferences.score_ready
+        : DEFAULT_NOTIFICATION_PREFERENCES.score_ready,
+    assignment_created:
+      typeof preferences?.assignment_created === "boolean"
+        ? preferences.assignment_created
+        : DEFAULT_NOTIFICATION_PREFERENCES.assignment_created,
+    assignment_due_soon:
+      typeof preferences?.assignment_due_soon === "boolean"
+        ? preferences.assignment_due_soon
+        : DEFAULT_NOTIFICATION_PREFERENCES.assignment_due_soon,
+    coaching_note:
+      typeof preferences?.coaching_note === "boolean"
+        ? preferences.coaching_note
+        : DEFAULT_NOTIFICATION_PREFERENCES.coaching_note,
+    streak_nudge:
+      typeof preferences?.streak_nudge === "boolean"
+        ? preferences.streak_nudge
+        : DEFAULT_NOTIFICATION_PREFERENCES.streak_nudge,
+  };
+}
+
 export async function checkApiReachable(timeoutMs = 3500): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -242,13 +272,51 @@ export async function lookupRepByEmail(email: string): Promise<{ rep_id: string 
   return parseJson<{ rep_id: string }>(response, "lookup rep");
 }
 
-export async function registerDeviceToken(repId: string, payload: DeviceTokenRegistrationPayload): Promise<void> {
+export async function registerDeviceToken(
+  repId: string,
+  payload: DeviceTokenRegistrationPayload
+): Promise<RegisteredDeviceToken> {
   const response = await fetch(`${API_BASE_URL}/rep/device-tokens`, {
     method: "POST",
     headers: repHeaders(repId),
     body: JSON.stringify(payload)
   });
-  await parseJson<Record<string, unknown>>(response, "register device token");
+  return parseJson<RegisteredDeviceToken>(response, "register device token");
+}
+
+export async function revokeDeviceToken(repId: string, tokenId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/rep/device-tokens/${encodeURIComponent(tokenId)}`, {
+    method: "DELETE",
+    headers: repHeaders(repId)
+  });
+
+  if (response.status === 404) {
+    return;
+  }
+  if (!response.ok) {
+    throw new Error(`revoke device token failed (${response.status})`);
+  }
+}
+
+export async function fetchNotificationPreferences(repId: string): Promise<NotificationPreferences> {
+  const response = await fetch(`${API_BASE_URL}/rep/notification-preferences`, {
+    headers: repHeaders(repId)
+  });
+  const payload = await parseJson<Partial<NotificationPreferences>>(response, "fetch notification preferences");
+  return normalizeNotificationPreferences(payload);
+}
+
+export async function updateNotificationPreferences(
+  repId: string,
+  preferences: NotificationPreferences
+): Promise<NotificationPreferences> {
+  const response = await fetch(`${API_BASE_URL}/rep/notification-preferences`, {
+    method: "PUT",
+    headers: repHeaders(repId),
+    body: JSON.stringify(preferences)
+  });
+  const payload = await parseJson<Partial<NotificationPreferences>>(response, "update notification preferences");
+  return normalizeNotificationPreferences(payload);
 }
 
 export async function uploadRepAvatar(repId: string, uri: string): Promise<{ avatar_url: string }> {
