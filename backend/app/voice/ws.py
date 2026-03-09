@@ -21,8 +21,10 @@ from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionTurn
 from app.models.types import AssignmentStatus, EventDirection, SessionStatus, TurnSpeaker
 from app.models.user import User
+from app.schemas.knowledge import RetrievedChunk
 from app.schemas.ws import WsEvent
 from app.services.conversation_orchestrator import ConversationOrchestrator
+from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.ledger_buffer import InMemoryEventBuffer, RedisEventBuffer
 from app.services.ledger_service import SessionLedgerService
 from app.services.micro_behavior_engine import (
@@ -70,6 +72,17 @@ def homeowner_token_budget(stage: str) -> int:
         "ended": 12,
     }
     return stage_budgets.get(stage, 28)
+
+
+def _dedupe_retrieved_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    seen: set[str] = set()
+    ordered: list[RetrievedChunk] = []
+    for chunk in chunks:
+        if chunk.chunk_id in seen:
+            continue
+        seen.add(chunk.chunk_id)
+        ordered.append(chunk)
+    return ordered
 
 
 def _normalize_ts(value: datetime) -> datetime:
@@ -149,6 +162,50 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
     scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
     rep = db.scalar(select(User).where(User.id == session.rep_id))
+    company_context: str | None = None
+    company_context_chunk_count = 0
+    if rep is not None and rep.org_id:
+        retrieval_service = DocumentRetrievalService(settings=settings)
+        try:
+            if retrieval_service.has_ready_documents(db, org_id=rep.org_id):
+                loop = asyncio.get_event_loop()
+                context_hint = scenario.name if scenario is not None else ""
+                pricing_chunks = await loop.run_in_executor(
+                    None,
+                    lambda: retrieval_service.retrieve_for_topic(
+                        db,
+                        org_id=rep.org_id,
+                        topic="pest control services pricing monthly plan what is included coverage",
+                        context_hint=context_hint,
+                        k=3,
+                        min_score=0.65,
+                    ),
+                )
+                competitor_chunks = await loop.run_in_executor(
+                    None,
+                    lambda: retrieval_service.retrieve_for_topic(
+                        db,
+                        org_id=rep.org_id,
+                        topic="competitor comparison why choose us reviews common objections",
+                        context_hint=context_hint,
+                        k=2,
+                        min_score=0.65,
+                    ),
+                )
+                combined_chunks = _dedupe_retrieved_chunks([*pricing_chunks, *competitor_chunks])
+                if combined_chunks:
+                    formatted_context = retrieval_service.format_for_prompt(combined_chunks, max_tokens=600)
+                    if formatted_context.strip():
+                        company_context = formatted_context
+                        company_context_chunk_count = len(combined_chunks)
+        except Exception:
+            logger.warning(
+                "Failed to load homeowner company context",
+                exc_info=True,
+                extra={"session_id": session_id, "trace_id": ws_trace_id, "org_id": rep.org_id},
+            )
+            company_context = None
+            company_context_chunk_count = 0
     orchestrator.bind_session_context(
         session_id=session_id,
         scenario=scenario,
@@ -156,6 +213,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         db=db,
         org_id=rep.org_id if rep is not None else None,
         rep_id=session.rep_id,
+        company_context=company_context,
     )
     # Keep STT session-scoped to avoid Deepgram websocket cold starts on every rep turn.
     await providers.stt.start_session(session_id)
@@ -832,6 +890,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     try:
         await emit_session_state({"state": "connected", **orchestrator.get_state_payload(session_id)})
         await maybe_flush()
+        if company_context is not None:
+            await emit_server_event("server.session.rag_context_loaded", {"chunks_loaded": company_context_chunk_count})
+            await maybe_flush()
 
         while True:
             if disconnected.is_set() and incoming.empty():

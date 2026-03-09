@@ -485,6 +485,7 @@ class SessionPromptContext:
     prompt_version: str | None = None
     org_id: str | None = None
     territory_context: str | None = None
+    company_context: str | None = None
 
 
 @dataclass
@@ -536,7 +537,8 @@ class PromptBuilder:
             "Layer 3: stage-aware instructions covering DOOR_OPEN, LISTENING, OBJECTING, CONSIDERING, CLOSE_WINDOW, ENDED.\n"
             "Layer 3B: emotional state machine framing with resistance level, objection pressure, active objections, and latent objections.\n"
             "Layer 4: anti-pattern guards for aggressive reps, off-topic reps, and reps asking for hints or coaching.\n"
-            "Layer 4B: edge case directives for missing intros, premature close attempts, repeated objection neglect, and spouse handoff moments."
+            "Layer 4B: edge case directives for missing intros, premature close attempts, repeated objection neglect, and spouse handoff moments.\n"
+            "Layer 5: optional company context the homeowner may have seen before the interaction."
         )
 
     def build(
@@ -554,6 +556,7 @@ class PromptBuilder:
         queued_objections: list[str] | None = None,
         resolved_objections: list[str] | None = None,
         active_edge_cases: list[str] | None = None,
+        company_context: str | None = None,
         behavioral_signals: list[str] | None = None,
     ) -> str:
         snapshot = scenario_snapshot or ScenarioSnapshot.from_scenario(scenario)
@@ -657,10 +660,23 @@ class PromptBuilder:
             ]
             if directives:
                 layer_four_b = "LAYER 4B - EDGE CASE DIRECTIVES\n" + "\n".join(directives)
+        layer_five = None
+        if company_context and company_context.strip():
+            layer_five = (
+                "LAYER 5 - WHAT YOU MAY KNOW ABOUT THIS COMPANY\n"
+                "Before they knocked, you may have encountered this company through a flyer, neighbor mention, "
+                "or a quick online search. The following is what you found. Use it to make your objections "
+                "specific and grounded - but speak naturally, not like you memorized it. Express uncertainty "
+                "where appropriate ('I think I saw...', 'Someone mentioned...').\n\n"
+                f"{company_context.strip()}"
+            )
         version_line = f"Prompt version: {prompt_version or 'conversation_v1'}"
-        parts = [hard_rule, version_line, layer_one, layer_two, layer_three, layer_three_b, layer_four]
+        parts = [version_line, layer_one, layer_two, layer_three, layer_three_b, layer_four]
         if layer_four_b:
             parts.append(layer_four_b)
+        if layer_five:
+            parts.append(layer_five)
+        parts.append(hard_rule)
         return "\n\n".join(parts)
 
     def build_from_scenario(self, scenario: "Scenario | None", stage: str, prompt_version: str | None = None) -> str:
@@ -777,6 +793,7 @@ class ConversationOrchestrator:
         db: Session | None = None,
         org_id: str | None = None,
         rep_id: str | None = None,
+        company_context: str | None = None,
     ) -> None:
         snapshot = ScenarioSnapshot.from_scenario(scenario)
         resolved_org_id = org_id
@@ -789,6 +806,7 @@ class ConversationOrchestrator:
             persona=HomeownerPersona.from_payload(snapshot.persona_payload),
             prompt_version=prompt_version,
             org_id=resolved_org_id,
+            company_context=company_context,
         )
         context.persona = self._enrich_persona(context.persona, context.scenario_snapshot)
         self._contexts[session_id] = context
@@ -921,6 +939,7 @@ class ConversationOrchestrator:
                 queued_objections=list(state.queued_objections) if state is not None else [],
                 resolved_objections=list(state.resolved_objections) if state is not None else [],
                 active_edge_cases=list(state.active_edge_cases) if state is not None else [],
+                company_context=context.company_context,
                 behavioral_signals=list(state.last_behavior_signals) if state is not None else [],
             )
             return prompt
