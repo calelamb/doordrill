@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 from dataclasses import dataclass
 from urllib.parse import urlencode
@@ -22,6 +23,12 @@ class SttTranscript:
 
 class BaseSttClient:
     provider_name = "base"
+
+    async def start_session(self, session_id: str) -> None:
+        return None
+
+    async def end_session(self, session_id: str) -> None:
+        return None
 
     async def finalize_utterance(self, payload: dict) -> SttTranscript:
         raise NotImplementedError
@@ -115,8 +122,17 @@ class MockSttClient(BaseSttClient):
         return SttTranscript(text=hint, confidence=0.98 if hint else 0.0, is_final=bool(hint), source=self.provider_name)
 
 
+@dataclass
+class _DeepgramSessionState:
+    ws: Any
+    lock: asyncio.Lock
+    keepalive_task: asyncio.Task[Any]
+    listen_url: str
+
+
 class DeepgramSttClient(BaseSttClient):
     provider_name = "deepgram"
+    KEEPALIVE_INTERVAL_SECONDS = 10.0
 
     def __init__(self, api_key: str | None, base_url: str, model: str, timeout_seconds: float) -> None:
         self.api_key = api_key
@@ -124,6 +140,8 @@ class DeepgramSttClient(BaseSttClient):
         self.model = model
         self.timeout_seconds = timeout_seconds
         self._fallback = MockSttClient()
+        self._sessions: dict[str, _DeepgramSessionState] = {}
+        self._session_ids: set[str] = set()
 
     async def finalize_utterance(self, payload: dict) -> SttTranscript:
         hint = str(payload.get("transcript_hint", "")).strip()
@@ -143,7 +161,25 @@ class DeepgramSttClient(BaseSttClient):
                 return SttTranscript(text=hint, confidence=0.98, is_final=True, source=self.provider_name)
             return await self._fallback.finalize_utterance(payload)
 
-    async def _stream_utterance(self, payload: dict, audio_bytes: bytes, hint: str) -> SttTranscript:
+    async def start_session(self, session_id: str, payload: dict | None = None) -> None:
+        if not self.api_key:
+            return
+        self._session_ids.add(session_id)
+
+    async def end_session(self, session_id: str) -> None:
+        self._session_ids.discard(session_id)
+        state = self._sessions.pop(session_id, None)
+        if state is None:
+            return
+        state.keepalive_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await state.keepalive_task
+        with contextlib.suppress(Exception):
+            await state.ws.send(json.dumps({"type": "CloseStream"}))
+        with contextlib.suppress(Exception):
+            await state.ws.close()
+
+    def _listen_url(self, payload: dict) -> str:
         content_type = str(payload.get("content_type") or "").lower()
         codec = str(payload.get("codec") or "").lower()
         ws_base = self.base_url.replace("https://", "wss://").replace("http://", "ws://")
@@ -156,80 +192,150 @@ class DeepgramSttClient(BaseSttClient):
         }
         if content_type:
             params["mimetype"] = content_type
-        if codec in {"wav", "pcm16"} or content_type in {"audio/wav", "audio/x-wav", "audio/l16", "audio/raw"}:
+        if codec == "opus" or "opus" in content_type:
+            params["encoding"] = "opus"
+            params["sample_rate"] = str(int(payload.get("sample_rate") or 16000))
+        else:
             params["encoding"] = "linear16"
             params["sample_rate"] = str(int(payload.get("sample_rate") or 16000))
             params["channels"] = str(int(payload.get("channels") or 1))
-        elif codec == "opus" or "opus" in content_type:
-            params["encoding"] = "opus"
-            params["sample_rate"] = str(int(payload.get("sample_rate") or 16000))
+        return f"{ws_base}/v1/listen?{urlencode(params)}"
 
-        url = f"{ws_base}/v1/listen?{urlencode(params)}"
-        latest_partial = ""
-        final_segments: list[str] = []
-        confidences: list[float] = []
-
-        async with websockets.connect(
-            url,
+    async def _open_session(self, session_id: str, payload: dict) -> _DeepgramSessionState:
+        listen_url = self._listen_url(payload)
+        ws = await websockets.connect(
+            listen_url,
             additional_headers={"Authorization": f"Token {self.api_key}"},
             open_timeout=self.timeout_seconds,
             close_timeout=self.timeout_seconds,
             max_size=4_000_000,
-        ) as ws:
-            for idx in range(0, len(audio_bytes), 8192):
-                await ws.send(audio_bytes[idx : idx + 8192])
-                await asyncio.sleep(0)
+        )
+        state = _DeepgramSessionState(
+            ws=ws,
+            lock=asyncio.Lock(),
+            keepalive_task=asyncio.create_task(asyncio.sleep(0)),
+            listen_url=listen_url,
+        )
 
-            await ws.send(json.dumps({"type": "CloseStream"}))
-
+        async def keepalive_loop() -> None:
             while True:
+                await asyncio.sleep(self.KEEPALIVE_INTERVAL_SECONDS)
                 try:
-                    raw_message = await asyncio.wait_for(ws.recv(), timeout=self.timeout_seconds)
-                except TimeoutError:
+                    async with state.lock:
+                        await state.ws.send(json.dumps({"type": "KeepAlive"}))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
                     break
-                except websockets.ConnectionClosed:
-                    break
 
-                if isinstance(raw_message, bytes):
-                    continue
+        state.keepalive_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await state.keepalive_task
+        state.keepalive_task = asyncio.create_task(keepalive_loop())
+        self._sessions[session_id] = state
+        return state
 
-                try:
-                    message = json.loads(raw_message)
-                except json.JSONDecodeError:
-                    continue
+    async def _get_or_open_session(self, session_id: str, *, payload: dict, force_reconnect: bool = False) -> _DeepgramSessionState:
+        state = self._sessions.get(session_id)
+        desired_listen_url = self._listen_url(payload)
+        if state is not None and (force_reconnect or state.listen_url != desired_listen_url):
+            await self.end_session(session_id)
+            state = None
+        if state is not None:
+            return state
+        return await self._open_session(session_id, payload)
 
-                message_type = str(message.get("type", ""))
-                if message_type == "Results":
-                    channel = (message.get("channel") or {}).get("alternatives") or []
-                    alternative = channel[0] if channel else {}
-                    transcript = str(alternative.get("transcript", "")).strip()
-                    if not transcript:
+    async def _stream_utterance(self, payload: dict, audio_bytes: bytes, hint: str) -> SttTranscript:
+        session_id = str(payload.get("session_id") or "")
+        if not session_id:
+            raise RuntimeError("deepgram session_id required")
+        retried = False
+        reopened_state: _DeepgramSessionState | None = None
+
+        while True:
+            latest_partial = ""
+            final_segments: list[str] = []
+            confidences: list[float] = []
+            state = reopened_state or await self._get_or_open_session(session_id, payload=payload)
+            reopened_state = None
+
+            if getattr(state.ws, "closed", False):
+                await self.end_session(session_id)
+                if retried:
+                    raise RuntimeError("deepgram_connection_closed")
+                reopened_state = await self._open_session(session_id, payload)
+                retried = True
+                continue
+
+            async def consume_results() -> None:
+                nonlocal latest_partial, final_segments, confidences
+                while True:
+                    try:
+                        raw_message = await asyncio.wait_for(state.ws.recv(), timeout=self.timeout_seconds)
+                    except TimeoutError:
+                        break
+
+                    if isinstance(raw_message, bytes):
                         continue
 
-                    confidence = float(alternative.get("confidence", 0.0) or 0.0)
-                    is_final = bool(message.get("is_final") or message.get("speech_final"))
-                    if is_final:
-                        final_segments.append(transcript)
-                        confidences.append(confidence)
-                        _emit_handler(payload, "on_final", transcript, True)
-                    else:
-                        latest_partial = transcript
-                        _emit_handler(payload, "on_partial", transcript, False)
-                    continue
+                    try:
+                        message = json.loads(raw_message)
+                    except json.JSONDecodeError:
+                        continue
 
-                if message_type == "UtteranceEnd":
-                    break
-                if message_type == "Error":
-                    raise RuntimeError(str(message.get("description") or "deepgram_error"))
+                    message_type = str(message.get("type", ""))
+                    if message_type == "Results":
+                        channel = (message.get("channel") or {}).get("alternatives") or []
+                        alternative = channel[0] if channel else {}
+                        transcript = str(alternative.get("transcript", "")).strip()
+                        is_final = bool(message.get("is_final") or message.get("speech_final"))
+                        if not transcript:
+                            if is_final:
+                                break
+                            continue
 
-        transcript = " ".join(final_segments).strip() or latest_partial or hint
-        confidence = sum(confidences) / len(confidences) if confidences else (0.98 if transcript == hint and transcript else 0.0)
-        return SttTranscript(
-            text=transcript,
-            confidence=confidence,
-            is_final=bool(final_segments) or bool(transcript),
-            source=self.provider_name,
-        )
+                        confidence = float(alternative.get("confidence", 0.0) or 0.0)
+                        if is_final:
+                            final_segments.append(transcript)
+                            confidences.append(confidence)
+                            _emit_handler(payload, "on_final", transcript, True)
+                            break
+                        else:
+                            latest_partial = transcript
+                            _emit_handler(payload, "on_partial", transcript, False)
+                        continue
+
+                    if message_type == "UtteranceEnd":
+                        break
+                    if message_type == "Error":
+                        raise RuntimeError(str(message.get("description") or "deepgram_error"))
+
+            try:
+                async with state.lock:
+                    for idx in range(0, len(audio_bytes), 8192):
+                        await state.ws.send(audio_bytes[idx : idx + 8192])
+                        await asyncio.sleep(0)
+                    await state.ws.send(json.dumps({"type": "Finalize"}))
+                    await consume_results()
+            except websockets.ConnectionClosed as exc:
+                await self.end_session(session_id)
+                if retried:
+                    raise RuntimeError("deepgram_connection_closed") from exc
+                reopened_state = await self._open_session(session_id, payload)
+                retried = True
+                continue
+            except Exception:
+                await self.end_session(session_id)
+                raise
+
+            transcript = " ".join(final_segments).strip() or latest_partial or hint
+            confidence = sum(confidences) / len(confidences) if confidences else (0.98 if transcript == hint and transcript else 0.0)
+            return SttTranscript(
+                text=transcript,
+                confidence=confidence,
+                is_final=bool(final_segments) or bool(transcript),
+                source=self.provider_name,
+            )
 
 
 class MockLlmClient(BaseLlmClient):

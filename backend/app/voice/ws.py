@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -54,7 +55,8 @@ storage_service = StorageService()
 
 SILENCE_FILLER_SECONDS = 4.0
 MAX_RUNTIME_PAUSE_MS = 60
-HOMEOWNER_MAX_TOKENS = 80
+HOMEOWNER_MAX_TOKENS = 30
+TTS_STREAM_TIMEOUT_SECONDS = 6
 WS_KEEPALIVE_TIMEOUT_SECONDS = 120
 WS_KEEPALIVE_INTERVAL_SECONDS = 30
 
@@ -144,6 +146,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         org_id=rep.org_id if rep is not None else None,
         rep_id=session.rep_id,
     )
+    # Keep STT session-scoped to avoid Deepgram websocket cold starts on every rep turn.
+    await providers.stt.start_session(session_id)
     micro_behavior_engine.initialize_session(
         session_id,
         persona=scenario.persona if scenario is not None and isinstance(scenario.persona, dict) else None,
@@ -246,6 +250,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 partials.put_nowait(text)
 
         payload["on_partial"] = on_partial
+        payload["session_id"] = session_id
         if providers.stt.provider_name == "mock_stt":
             hint = str(payload.get("transcript_hint", "")).strip()
             if hint:
@@ -291,12 +296,26 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         active_objections: list[str],
     ) -> dict[str, Any]:
         nonlocal audio_frame_count, total_audio_duration_ms
+        t0 = asyncio.get_event_loop().time()
+
+        def _elapsed_ms() -> int:
+            return int((asyncio.get_event_loop().time() - t0) * 1000)
+
+        logger.info(
+            "stream_ai_response_start",
+            extra={
+                "session_id": session_id,
+                "elapsed_ms": 0,
+            },
+        )
         ai_text_parts: list[str] = []
-        raw_text_parts: list[str] = []
         llm_started_at = datetime.now(timezone.utc)
         ai_started_at: datetime | None = None
         turn_audio_duration_ms = 0
         ai_interrupted = False
+        last_behavior_plan: MicroBehaviorPlan | None = None
+        tts_tasks: list[asyncio.Task[None]] = []
+        tts_emit_lock = asyncio.Lock()
         persona_voice_id = None
         if scenario is not None and isinstance(scenario.persona, dict):
             raw_voice_id = scenario.persona.get("voice_id")
@@ -308,6 +327,288 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 return
             await asyncio.sleep(min(pause_ms, MAX_RUNTIME_PAUSE_MS) / 1000)
 
+        def build_behavior_plan(raw_text: str) -> MicroBehaviorPlan:
+            try:
+                return micro_behavior_engine.apply_to_response(
+                    session_id=session_id,
+                    raw_text=raw_text,
+                    emotion_before=emotion_before,
+                    emotion_after=emotion_after,
+                    behavioral_signals=behavioral_signals,
+                    active_objections=active_objections,
+                )
+            except Exception as exc:
+                logger.exception("Micro-behavior transform failed", extra={"session_id": session_id, "trace_id": ws_trace_id})
+                fallback_segment = MicroBehaviorSegment(
+                    text=raw_text,
+                    pause_before_ms=0,
+                    pause_after_ms=0,
+                    tone="measured",
+                    behaviors=["fallback_mode"],
+                    sentence_length="medium",
+                    segment_index=0,
+                    segment_count=1,
+                    interruption_type=None,
+                    allow_barge_in=False,
+                )
+                return MicroBehaviorPlan(
+                    transformed_text=raw_text,
+                    tone="measured",
+                    sentence_length="medium",
+                    interruption_type=None,
+                    behaviors=["fallback_mode"],
+                    pause_profile={"opening_pause_ms": 0, "total_pause_ms": 0, "longest_pause_ms": 0},
+                    realism_score=3.0,
+                    segments=[fallback_segment],
+                )
+
+        async def stream_tts_for_plan(plan: MicroBehaviorPlan, first_audio_started: asyncio.Event) -> None:
+            nonlocal audio_frame_count, total_audio_duration_ms, turn_audio_duration_ms, ai_interrupted
+            _task_start_time = asyncio.get_event_loop().time()
+            sentence_text = plan.transformed_text.strip()
+            sentence_chunk_count = 0
+            _first_chunk_logged = False
+            logger.info(
+                "tts_task_started",
+                extra={
+                    "session_id": session_id,
+                    "sentence": plan.transformed_text[:40],
+                    "lock_locked": tts_emit_lock.locked(),
+                },
+            )
+            logger.info(
+                "stream_tts_for_plan_start",
+                extra={
+                    "session_id": session_id,
+                    "trace_id": ws_trace_id,
+                    "sentence_text": sentence_text,
+                    "tts_provider": providers.tts.provider_name,
+                },
+            )
+            try:
+                async with tts_emit_lock:
+                    for segment in plan.segments:
+                        if interrupt_signal_at is not None:
+                            ai_interrupted = True
+                            return
+
+                        await maybe_apply_pause(segment.pause_before_ms)
+                        if interrupt_signal_at is not None:
+                            ai_interrupted = True
+                            return
+
+                        segment_text = segment.text.strip()
+                        if not segment_text:
+                            continue
+
+                        segment_behavior = _serialize_micro_behavior(plan, segment=segment)
+                        tts_text = segment_text
+                        if persona_voice_id and tts_text and not tts_text.startswith("[[voice:"):
+                            tts_text = f"[[voice:{persona_voice_id}]] {tts_text}"
+                        logger.info(
+                            "stream_tts_for_plan_stream_audio_call",
+                            extra={
+                                "session_id": session_id,
+                                "trace_id": ws_trace_id,
+                                "sentence_text": sentence_text,
+                                "segment_index": segment.segment_index,
+                                "tts_provider": providers.tts.provider_name,
+                                "calling_stream_audio": True,
+                                "tts_text": tts_text,
+                            },
+                        )
+                        logger.info(
+                            "tts_elevenlabs_call",
+                            extra={
+                                "session_id": session_id,
+                                "sentence": segment_text[:40],
+                                "pause_before_ms": segment.pause_before_ms,
+                                "pause_after_ms": segment.pause_after_ms,
+                                "elapsed_since_task_start_ms": int((asyncio.get_event_loop().time() - _task_start_time) * 1000),
+                            },
+                        )
+
+                        try:
+                            async with asyncio.timeout(TTS_STREAM_TIMEOUT_SECONDS):
+                                async for audio_chunk in providers.tts.stream_audio(tts_text):
+                                    if interrupt_signal_at is not None:
+                                        ai_interrupted = True
+                                        return
+                                    if not first_audio_started.is_set():
+                                        logger.info(
+                                            "first_audio_set_by_tts_task",
+                                            extra={
+                                                "session_id": session_id,
+                                                "sentence": sentence_text[:40],
+                                                "elapsed_ms": _elapsed_ms(),
+                                            },
+                                        )
+                                        first_audio_started.set()
+                                    if not _first_chunk_logged:
+                                        _t_before = asyncio.get_event_loop().time()
+                                        logger.info(
+                                            "tts_before_first_send",
+                                            extra={
+                                                "session_id": session_id,
+                                                "elapsed_from_t0_ms": int((_t_before - _task_start_time) * 1000),
+                                            },
+                                        )
+                                    sentence_chunk_count += 1
+                                    chunk_duration_ms = int(audio_chunk.get("duration_ms", 0) or 0)
+                                    audio_frame_count += 1
+                                    total_audio_duration_ms += chunk_duration_ms
+                                    turn_audio_duration_ms += chunk_duration_ms
+                                    await emit_server_event(
+                                        "server.ai.audio.chunk",
+                                        {
+                                            "codec": audio_chunk.get("codec", "pcm16"),
+                                            "payload": audio_chunk.get("payload", ""),
+                                            "provider": audio_chunk.get("provider", providers.tts.provider_name),
+                                            "duration_ms": chunk_duration_ms,
+                                            "trace_id": ws_trace_id,
+                                            "micro_behavior": segment_behavior,
+                                        },
+                                    )
+                                    if not _first_chunk_logged:
+                                        _t_after = asyncio.get_event_loop().time()
+                                        logger.info(
+                                            "tts_after_first_send",
+                                            extra={
+                                                "session_id": session_id,
+                                                "send_duration_ms": int((_t_after - _t_before) * 1000),
+                                                "elapsed_from_t0_ms": int((_t_after - _task_start_time) * 1000),
+                                            },
+                                        )
+                                    await asyncio.sleep(0)
+                                    if not _first_chunk_logged:
+                                        _first_chunk_logged = True
+                        except TimeoutError:
+                            logger.warning(
+                                "TTS stream exceeded timeout; committing turn with truncated audio",
+                                extra={
+                                    "session_id": session_id,
+                                    "trace_id": ws_trace_id,
+                                    "timeout_seconds": TTS_STREAM_TIMEOUT_SECONDS,
+                                    "sentence_text": sentence_text,
+                                    "segment_index": segment.segment_index,
+                                    "tts_provider": providers.tts.provider_name,
+                                    "audio_chunks_emitted": sentence_chunk_count,
+                                },
+                            )
+                        except asyncio.CancelledError:
+                            return
+                        except Exception as exc:
+                            logger.exception(
+                                "stream_tts_for_plan_exception",
+                                extra={
+                                    "session_id": session_id,
+                                    "trace_id": ws_trace_id,
+                                    "sentence_text": sentence_text,
+                                    "segment_index": segment.segment_index,
+                                    "tts_provider": providers.tts.provider_name,
+                                    "audio_chunks_emitted": sentence_chunk_count,
+                                    "error": str(exc),
+                                },
+                            )
+                            await emit_error("tts_error", str(exc), retryable=True)
+                            await maybe_flush()
+
+                        if ai_interrupted:
+                            return
+
+                        await maybe_apply_pause(segment.pause_after_ms)
+                        if interrupt_signal_at is not None:
+                            ai_interrupted = True
+                            return
+            finally:
+                logger.info(
+                    "stream_tts_for_plan_complete",
+                    extra={
+                        "session_id": session_id,
+                        "trace_id": ws_trace_id,
+                        "sentence_text": sentence_text,
+                        "tts_provider": providers.tts.provider_name,
+                        "audio_chunks_emitted": sentence_chunk_count,
+                        "ai_interrupted": ai_interrupted,
+                    },
+                )
+                if not first_audio_started.is_set():
+                    logger.info(
+                        "first_audio_set_by_finally",
+                        extra={
+                            "session_id": session_id,
+                            "sentence": sentence_text[:40],
+                            "elapsed_ms": _elapsed_ms(),
+                        },
+                    )
+                    first_audio_started.set()
+
+        async def process_sentence(raw_sentence: str) -> None:
+            nonlocal ai_started_at, last_behavior_plan
+            sentence = raw_sentence.strip()
+            if not sentence:
+                return
+            logger.info(
+                "process_sentence_called",
+                extra={
+                    "session_id": session_id,
+                    "sentence": sentence[:40],
+                    "elapsed_ms": _elapsed_ms(),
+                },
+            )
+            plan = build_behavior_plan(sentence)
+            last_behavior_plan = plan
+            transformed_text = plan.transformed_text.strip()
+            if not transformed_text:
+                return
+
+            if ai_started_at is None:
+                ai_started_at = datetime.now(timezone.utc)
+
+            if ai_text_parts:
+                ai_text_parts.append(" ")
+            ai_text_parts.append(transformed_text)
+
+            await emit_server_event(
+                "server.ai.text.delta",
+                {
+                    "token": transformed_text,
+                    "provider": providers.llm.provider_name,
+                    "stage": stage,
+                    "trace_id": ws_trace_id,
+                    "micro_behavior": _serialize_micro_behavior(plan),
+                },
+            )
+            await maybe_flush()
+            first_audio_started = asyncio.Event()
+            tts_tasks.append(asyncio.create_task(stream_tts_for_plan(plan, first_audio_started)))
+            logger.info(
+                "tts_task_created",
+                extra={
+                    "session_id": session_id,
+                    "sentence": sentence[:40],
+                    "lock_locked": tts_emit_lock.locked(),
+                },
+            )
+            logger.info(
+                "awaiting_first_audio_started",
+                extra={
+                    "session_id": session_id,
+                    "sentence": sentence[:40],
+                    "elapsed_ms": _elapsed_ms(),
+                },
+            )
+            await first_audio_started.wait()
+            logger.info(
+                "first_audio_started_returned",
+                extra={
+                    "session_id": session_id,
+                    "sentence": sentence[:40],
+                    "elapsed_ms": _elapsed_ms(),
+                },
+            )
+
+        sentence_buffer = ""
         try:
             async for chunk in providers.llm.stream_reply(
                 rep_text=prompt_text,
@@ -318,136 +619,47 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 if interrupt_signal_at is not None:
                     ai_interrupted = True
                     break
-                if chunk:
-                    raw_text_parts.append(str(chunk))
+                if not chunk:
+                    continue
+                sentence_buffer += str(chunk)
+                while True:
+                    match = re.search(r"[.?!](?:\s|$)", sentence_buffer)
+                    if match is None:
+                        break
+                    sentence = sentence_buffer[:match.end()].strip()
+                    sentence_buffer = sentence_buffer[match.end():].lstrip()
+                    await process_sentence(sentence)
         except Exception as exc:
             await emit_error("llm_error", str(exc), retryable=True)
             await maybe_flush()
 
-        raw_text = "".join(raw_text_parts).strip()
-        if ai_interrupted or interrupt_signal_at is not None:
-            return {
-                "text": "",
-                "started_at": ai_started_at,
-                "duration_ms": max(120, turn_audio_duration_ms),
-                "interrupted": True,
-                "micro_behavior": None,
-            }
-        if not raw_text:
-            return {
-                "text": "",
-                "started_at": ai_started_at,
-                "duration_ms": max(120, turn_audio_duration_ms),
-                "interrupted": False,
-                "micro_behavior": None,
-            }
+        if sentence_buffer.strip() and not ai_interrupted:
+            await process_sentence(sentence_buffer.strip())
 
-        try:
-            behavior_plan = micro_behavior_engine.apply_to_response(
-                session_id=session_id,
-                raw_text=raw_text,
-                emotion_before=emotion_before,
-                emotion_after=emotion_after,
-                behavioral_signals=behavioral_signals,
-                active_objections=active_objections,
-            )
-        except Exception as exc:
-            logger.exception("Micro-behavior transform failed", extra={"session_id": session_id, "trace_id": ws_trace_id})
-            await emit_error("micro_behavior_error", str(exc), retryable=True)
-            await maybe_flush()
-            fallback_segment = MicroBehaviorSegment(
-                text=raw_text,
-                pause_before_ms=0,
-                pause_after_ms=0,
-                tone="measured",
-                behaviors=["fallback_mode"],
-                sentence_length="medium",
-                segment_index=0,
-                segment_count=1,
-                interruption_type=None,
-                allow_barge_in=False,
-            )
-            behavior_plan = MicroBehaviorPlan(
-                transformed_text=raw_text,
-                tone="measured",
-                sentence_length="medium",
-                interruption_type=None,
-                behaviors=["fallback_mode"],
-                pause_profile={"opening_pause_ms": 0, "total_pause_ms": 0, "longest_pause_ms": 0},
-                realism_score=3.0,
-                segments=[fallback_segment],
-            )
+        logger.info(
+            "emitting_text_done",
+            extra={
+                "session_id": session_id,
+                "elapsed_ms": _elapsed_ms(),
+            },
+        )
+        await emit_server_event(
+            "server.ai.text.done",
+            {
+                "provider": providers.llm.provider_name,
+                "stage": stage,
+                "trace_id": ws_trace_id,
+            },
+        )
+        await maybe_flush()
 
-        for segment in behavior_plan.segments:
-            if interrupt_signal_at is not None:
-                ai_interrupted = True
-                break
-
-            await maybe_apply_pause(segment.pause_before_ms)
-            if interrupt_signal_at is not None:
-                ai_interrupted = True
-                break
-
-            segment_text = segment.text.strip()
-            if not segment_text:
-                continue
-
-            if ai_started_at is None:
-                ai_started_at = datetime.now(timezone.utc)
-
-            if ai_text_parts:
-                ai_text_parts.append(" ")
-            ai_text_parts.append(segment_text)
-
-            segment_behavior = _serialize_micro_behavior(behavior_plan, segment=segment)
-            await emit_server_event(
-                "server.ai.text.delta",
-                {
-                    "token": segment_text,
-                    "provider": providers.llm.provider_name,
-                    "stage": stage,
-                    "trace_id": ws_trace_id,
-                    "micro_behavior": segment_behavior,
-                },
-            )
-            await maybe_flush()
-
-            tts_text = segment_text
-            if persona_voice_id and tts_text and not tts_text.startswith("[[voice:"):
-                tts_text = f"[[voice:{persona_voice_id}]] {tts_text}"
-
+        if tts_tasks:
             try:
-                async for audio_chunk in providers.tts.stream_audio(tts_text):
-                    if interrupt_signal_at is not None:
-                        ai_interrupted = True
-                        break
-                    chunk_duration_ms = int(audio_chunk.get("duration_ms", 0) or 0)
-                    audio_frame_count += 1
-                    total_audio_duration_ms += chunk_duration_ms
-                    turn_audio_duration_ms += chunk_duration_ms
-                    await emit_server_event(
-                        "server.ai.audio.chunk",
-                        {
-                            "codec": audio_chunk.get("codec", "pcm16"),
-                            "payload": audio_chunk.get("payload", ""),
-                            "provider": audio_chunk.get("provider", providers.tts.provider_name),
-                            "duration_ms": chunk_duration_ms,
-                            "trace_id": ws_trace_id,
-                            "micro_behavior": segment_behavior,
-                        },
-                    )
-                    await maybe_flush()
-            except Exception as exc:
-                await emit_error("tts_error", str(exc), retryable=True)
-                await maybe_flush()
-
-            if ai_interrupted:
-                break
-
-            await maybe_apply_pause(segment.pause_after_ms)
-            if interrupt_signal_at is not None:
-                ai_interrupted = True
-                break
+                await asyncio.gather(*tts_tasks)
+            except asyncio.CancelledError:
+                for task in tts_tasks:
+                    task.cancel()
+                await asyncio.gather(*tts_tasks, return_exceptions=True)
 
         duration_ms = max(
             120,
@@ -458,7 +670,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             "started_at": ai_started_at,
             "duration_ms": duration_ms,
             "interrupted": ai_interrupted,
-            "micro_behavior": _serialize_micro_behavior(behavior_plan) if ai_text_parts else None,
+            "micro_behavior": _serialize_micro_behavior(last_behavior_plan) if last_behavior_plan is not None else None,
         }
 
     async def maybe_emit_silence_filler() -> bool:
@@ -867,4 +1079,5 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         finally:
             micro_behavior_engine.end_session(session_id)
             orchestrator.clear_session_context(session_id)
+            await providers.stt.end_session(session_id)
             db.close()

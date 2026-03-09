@@ -205,7 +205,13 @@ class DrillClient:
         ws_uri = f"{self.ws_url}/ws/sessions/{session_id}?user_id={rep_id}&role=rep"
 
         try:
-            async with websockets.connect(ws_uri, open_timeout=10, max_size=8_000_000) as ws:
+            async with websockets.connect(
+                ws_uri,
+                open_timeout=10,
+                max_size=8_000_000,
+                ping_timeout=None,
+                ping_interval=None,
+            ) as ws:
                 seq = 0
                 buffered_messages: list[dict[str, Any]] = []
 
@@ -378,7 +384,7 @@ class DrillClient:
                             if msg_type == "server.ai.audio.chunk":
                                 first_audio_msg = msg
                                 break
-                            if msg_type == "server.turn.committed":
+                            if msg_type in ("server.ai.text.done", "server.turn.committed"):
                                 turn_committed = True
                                 break
                         tm.llm_full_ms = _now_ms() - llm_start
