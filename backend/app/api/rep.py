@@ -24,6 +24,7 @@ from app.schemas.adaptive_training import RepAdaptivePlanResponse, RepForecastRe
 from app.schemas.assignment import AssignmentResponse
 from app.schemas.notification import DeviceTokenCreateRequest, DeviceTokenResponse, NotificationPreferences
 from app.schemas.profile import ProfileUpdateRequest, HierarchyNode
+from app.schemas.scenario import ScenarioResponse
 from app.schemas.scorecard import CategoryScoreV2, ManagerCoachingNoteResponse
 from app.schemas.session import (
     RepProgressResponse,
@@ -324,6 +325,18 @@ def get_rep_assignments(
     _ensure_same_org(actor, rep_user.org_id)
 
     return db.scalars(select(Assignment).where(Assignment.rep_id == rep_id).order_by(Assignment.created_at.desc())).all()
+
+
+@router.get("/scenarios", response_model=list[ScenarioResponse])
+def get_rep_scenarios(
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> list[Scenario]:
+    return db.scalars(
+        select(Scenario)
+        .where(or_(Scenario.org_id == actor.org_id, Scenario.org_id.is_(None)))
+        .order_by(Scenario.difficulty.asc(), Scenario.name.asc())
+    ).all()
 
 
 @router.get("/{rep_id}/forecast", response_model=RepForecastResponse)

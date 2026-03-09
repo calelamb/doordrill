@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -284,3 +284,13 @@ class ExpoPushProvider(PushProvider):
                 response={"provider": "expo"},
                 error=f"expo_exception:{exc}",
             )
+
+
+def build_email_provider(settings: Settings | None = None) -> EmailProvider:
+    resolved_settings = settings or get_settings()
+    provider_name = (resolved_settings.notification_email_provider or "sendgrid").lower()
+    if provider_name == "ses":
+        return SesEmailProvider(resolved_settings)
+    if provider_name == "sendgrid":
+        return SendGridEmailProvider(resolved_settings)
+    return LogEmailProvider()

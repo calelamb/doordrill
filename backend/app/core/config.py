@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     jwt_jwks_url: str | None = Field(default=None, alias="JWT_JWKS_URL")
     access_token_ttl_minutes: int = Field(default=30, alias="ACCESS_TOKEN_TTL_MINUTES")
     refresh_token_ttl_days: int = Field(default=14, alias="REFRESH_TOKEN_TTL_DAYS")
+    invite_ttl_days: int = Field(default=7, alias="INVITE_TTL_DAYS")
+    invite_deep_link_base: str = Field(default="doordrill://invite", alias="INVITE_DEEP_LINK_BASE")
 
     stt_provider: str = Field(default="mock", alias="STT_PROVIDER")
     llm_provider: str = Field(default="mock", alias="LLM_PROVIDER")

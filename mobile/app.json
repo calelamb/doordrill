@@ -2,6 +2,7 @@
   "expo": {
     "name": "DoorDrill",
     "slug": "doordrill-mobile",
+    "scheme": "doordrill",
     "version": "0.1.0",
     "orientation": "portrait",
     "platforms": [
@@ -30,7 +31,8 @@
           "sounds": [],
           "mode": "production"
         }
-      ]
+      ],
+      "expo-secure-store"
     ]
   }
 }

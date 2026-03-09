@@ -10,6 +10,9 @@ import { AssignmentsScreen } from "../screens/AssignmentsScreen";
 import { PreSessionScreen } from "../screens/PreSessionScreen";
 import { HistoryScreen } from "../screens/HistoryScreen";
 import { LoginScreen } from "../screens/LoginScreen";
+import { SplashScreen } from "../screens/SplashScreen";
+import { RegisterScreen } from "../screens/RegisterScreen";
+import { ScenarioPickerScreen } from "../screens/ScenarioPickerScreen";
 import { ScoreScreen } from "../screens/ScoreScreen";
 import { SessionScreen } from "../screens/SessionScreen";
 import { ProfileScreen } from "../screens/ProfileScreen";
@@ -18,6 +21,7 @@ import { MessageThreadScreen } from "../screens/MessageThreadScreen";
 import { NewMessageScreen } from "../screens/NewMessageScreen";
 import { RootStackParamList, BottomTabParamList } from "./types";
 import { colors } from "../theme/tokens";
+import { flushPendingInviteNavigation } from "../services/inviteLinking";
 import { flushPendingNotificationNavigation, navigationRef } from "../services/notifications";
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -82,17 +86,31 @@ function MainTabNavigator() {
 }
 
 export function AppNavigator() {
-  const { repId } = useSession();
+  const { isAuthenticated, isFirstLaunch, repId } = useSession();
 
   useEffect(() => {
-    flushPendingNotificationNavigation();
-  }, [repId]);
+    if (isAuthenticated && repId) {
+      flushPendingNotificationNavigation();
+    }
+    flushPendingInviteNavigation();
+  }, [isAuthenticated, repId]);
+
+  if (isFirstLaunch) {
+    return <SplashScreen />;
+  }
 
   return (
-    <NavigationContainer ref={navigationRef} onReady={flushPendingNotificationNavigation}>
-      {!repId ? (
+    <NavigationContainer
+      ref={navigationRef}
+      onReady={() => {
+        flushPendingNotificationNavigation();
+        flushPendingInviteNavigation();
+      }}
+    >
+      {!isAuthenticated ? (
         <Stack.Navigator>
           <Stack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
+          <Stack.Screen name="Register" component={RegisterScreen} options={{ headerShown: false }} />
         </Stack.Navigator>
       ) : (
         <Stack.Navigator
@@ -103,6 +121,8 @@ export function AppNavigator() {
           }}
         >
           <Stack.Screen name="MainTabs" component={MainTabNavigator} options={{ headerShown: false }} />
+          <Stack.Screen name="Register" component={RegisterScreen} options={{ headerShown: false, presentation: "modal" }} />
+          <Stack.Screen name="ScenarioPicker" component={ScenarioPickerScreen} options={{ headerShown: false, presentation: "card" }} />
           <Stack.Screen 
             name="PreSession" 
             component={PreSessionScreen} 

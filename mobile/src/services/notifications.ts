@@ -7,6 +7,7 @@ import { Platform } from "react-native";
 import { RootStackParamList } from "../navigation/types";
 import { registerDeviceToken } from "./api";
 import { EXPO_PROJECT_ID } from "./config";
+import { useSession } from "../store/session";
 
 type NotificationIntent =
   | {
@@ -102,8 +103,28 @@ export function flushPendingNotificationNavigation(): boolean {
   return navigateToIntent(pendingNotificationIntent);
 }
 
-export async function requestAndRegisterPushToken(repId: string): Promise<void> {
-  if (!repId.trim() || !Device.isDevice) {
+async function getPermissionStatus(): Promise<Notifications.PermissionStatus> {
+  const { status } = await Notifications.getPermissionsAsync();
+  return status;
+}
+
+export async function requestPushPermission(): Promise<boolean> {
+  if (!Device.isDevice || (Platform.OS !== "ios" && Platform.OS !== "android")) {
+    return false;
+  }
+
+  const currentStatus = await getPermissionStatus();
+  if (currentStatus === "granted") {
+    return true;
+  }
+
+  const { status } = await Notifications.requestPermissionsAsync();
+  return status === "granted";
+}
+
+export async function registerPushTokenIfAuthorized(): Promise<void> {
+  const { isAuthenticated, repId } = useSession.getState();
+  if (!isAuthenticated || !repId || !Device.isDevice) {
     return;
   }
 
@@ -115,15 +136,7 @@ export async function requestAndRegisterPushToken(repId: string): Promise<void> 
     return;
   }
 
-  const { status: existingStatus } = await Notifications.getPermissionsAsync();
-  let finalStatus = existingStatus;
-
-  if (existingStatus !== "granted") {
-    const { status } = await Notifications.requestPermissionsAsync();
-    finalStatus = status;
-  }
-
-  if (finalStatus !== "granted") {
+  if ((await getPermissionStatus()) !== "granted") {
     return;
   }
 
@@ -133,12 +146,20 @@ export async function requestAndRegisterPushToken(repId: string): Promise<void> 
     })
   ).data;
 
-  const registeredToken = await registerDeviceToken(repId, {
+  const registeredToken = await registerDeviceToken({
     token,
     platform: Platform.OS,
     provider: "expo",
   });
   await AsyncStorage.setItem(PUSH_TOKEN_ID_STORAGE_KEY, registeredToken.id);
+}
+
+export async function requestAndRegisterPushToken(): Promise<void> {
+  const granted = await requestPushPermission();
+  if (!granted) {
+    return;
+  }
+  await registerPushTokenIfAuthorized();
 }
 
 export async function getStoredPushToken(): Promise<string | null> {

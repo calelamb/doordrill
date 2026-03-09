@@ -99,7 +99,7 @@ export function ProfileScreen({ navigation }: Props) {
     try {
       const [progressData, hierarchyData] = await Promise.all([
         fetchRepProgress(repId),
-        fetchRepHierarchy(repId)
+        fetchRepHierarchy()
       ]);
       setProgress(progressData);
       setHierarchy(hierarchyData);
@@ -122,7 +122,7 @@ export function ProfileScreen({ navigation }: Props) {
     setPrefsLoading(true);
     setPrefsError(null);
     try {
-      const savedPrefs = await fetchNotificationPreferences(repId);
+      const savedPrefs = await fetchNotificationPreferences();
       setPrefs(savedPrefs);
     } catch (err) {
       setPrefsError(err instanceof Error ? err.message : "Failed to load notification preferences");
@@ -140,7 +140,7 @@ export function ProfileScreen({ navigation }: Props) {
     if (!repId) return;
     setSavingProfile(true);
     try {
-      await updateRepProfile(repId, editName);
+      await updateRepProfile(editName);
       await loadProgress(); // reload data
       setIsEditing(false);
     } catch (err) {
@@ -162,7 +162,7 @@ export function ProfileScreen({ navigation }: Props) {
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
         setUploadingAvatar(true);
-        await uploadRepAvatar(repId, result.assets[0].uri);
+        await uploadRepAvatar(result.assets[0].uri);
         await loadProgress(); // reload data to get new avatar URL
       }
     } catch (err) {
@@ -183,7 +183,7 @@ export function ProfileScreen({ navigation }: Props) {
     setPrefsSaving(true);
     setPrefsError(null);
     try {
-      const savedPrefs = await updateNotificationPreferences(repId, updatedPrefs);
+      const savedPrefs = await updateNotificationPreferences(updatedPrefs);
       setPrefs(savedPrefs);
     } catch (err) {
       setPrefs(previousPrefs);
@@ -195,7 +195,7 @@ export function ProfileScreen({ navigation }: Props) {
 
   const handleLogout = async () => {
     if (!repId || loggingOut) {
-      clearSession();
+      await clearSession();
       return;
     }
 
@@ -203,13 +203,13 @@ export function ProfileScreen({ navigation }: Props) {
     try {
       const tokenId = await getStoredPushToken();
       if (tokenId) {
-        await revokeDeviceToken(repId, tokenId);
+        await revokeDeviceToken(tokenId);
       }
     } catch {
       // Best-effort cleanup; logout should not be blocked on network state.
     } finally {
       await clearStoredPushToken().catch(() => undefined);
-      clearSession();
+      await clearSession();
     }
   };
 

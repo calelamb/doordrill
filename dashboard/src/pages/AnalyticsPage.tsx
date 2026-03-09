@@ -17,6 +17,7 @@ import {
 import type { EChartsOption } from "echarts";
 
 import { EChartSurface } from "../components/EChartSurface";
+import { OnboardingChecklist } from "../components/OnboardingChecklist";
 import { RepRiskQuadrant } from "../components/RepRiskQuadrant";
 import { TeamSkillHeatmap } from "../components/TeamSkillHeatmap";
 import { DataTable } from "../components/shared/DataTable";
@@ -692,6 +693,10 @@ export function AnalyticsPage() {
           ) : null}
         </div>
       </motion.header>
+
+      <motion.div variants={cardVariants}>
+        <OnboardingChecklist />
+      </motion.div>
 
       <motion.section variants={cardVariants} className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         {[

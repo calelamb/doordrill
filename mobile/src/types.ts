@@ -185,3 +185,28 @@ export type RegisteredDeviceToken = {
   status: string;
   last_seen_at: string;
 };
+
+export type AuthRole = "rep" | "manager" | "admin";
+
+export type AuthUser = {
+  id: string;
+  org_id: string;
+  team_id: string | null;
+  role: AuthRole;
+  name: string;
+  email: string;
+};
+
+export type AuthTokenResponse = {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+  user: AuthUser;
+};
+
+export type InviteValidationResponse = {
+  email: string;
+  org_id: string;
+  valid: boolean;
+};

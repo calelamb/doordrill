@@ -1,7 +1,8 @@
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, Enum, ForeignKey, Index, String
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -58,6 +59,7 @@ class User(Base, TimestampMixin):
     auth_provider: Mapped[str] = mapped_column(String(50), nullable=False, default="local")
     avatar_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     notification_preferences: Mapped[dict[str, bool]] = mapped_column(JSON, nullable=False, default=dict)
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     organization: Mapped[Organization] = relationship(back_populates="users")
     team: Mapped[Team | None] = relationship(back_populates="members", foreign_keys=[team_id])

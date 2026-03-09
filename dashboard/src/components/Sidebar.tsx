@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActivitySquare, BarChart2, BookOpenText, Compass, History, LayoutDashboard, LogOut, Scale, Shield, TreePine } from "lucide-react";
+import { ActivitySquare, BarChart2, BookOpenText, Compass, History, LayoutDashboard, LogOut, Scale, Shield, TreePine, UserPlus } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { clearStoredAuth, getValidStoredAuth } from "../lib/auth";
@@ -26,6 +26,7 @@ export function Sidebar() {
     const isExplorer = location.pathname.startsWith("/manager/explorer");
     const isKnowledgeBase = location.pathname.startsWith("/knowledge-base");
     const isActions = location.pathname.startsWith("/manager/actions");
+    const isInvite = location.pathname.startsWith("/reps/invite");
 
     useEffect(() => {
         if (!managerId) {
@@ -166,6 +167,17 @@ export function Sidebar() {
                 >
                     <History className="w-4.5 h-4.5 min-w-4.5" />
                     Actions
+                </Link>
+
+                <Link
+                    to="/reps/invite"
+                    className={`mt-4 flex items-center gap-3 rounded-xl border px-3 py-2 text-sm transition-all duration-200 ${isInvite
+                            ? "border-accent/15 bg-accent text-white font-semibold"
+                            : "border-white/25 bg-white/45 text-ink hover:bg-white/70 font-semibold"
+                        }`}
+                >
+                    <UserPlus className="w-4.5 h-4.5 min-w-4.5" />
+                    Invite Rep
                 </Link>
             </nav>
 

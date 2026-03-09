@@ -5,11 +5,11 @@ import { LinearGradient } from "expo-linear-gradient";
 import { TreePine, Mail, Lock } from "lucide-react-native";
 
 import { useSession } from "../store/session";
-import { lookupRepByEmail } from "../services/api";
-import { requestAndRegisterPushToken } from "../services/notifications";
+import { loginWithCredentials } from "../services/api";
+import { registerPushTokenIfAuthorized } from "../services/notifications";
 
 export function LoginScreen() {
-  const { setRepId } = useSession();
+  const { setSession } = useSession();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -21,14 +21,15 @@ export function LoginScreen() {
     setLoading(true);
     setError("");
     try {
-      // In a real app we'd call /auth/login with the password
-      // Since this is a dev prototype using an x-user-id mock auth, 
-      // we just look up the user by email to get their ID.
-      const { rep_id } = await lookupRepByEmail(email.trim());
-      setRepId(rep_id);
-      void requestAndRegisterPushToken(rep_id).catch(() => undefined);
+      const result = await loginWithCredentials(email.trim(), password);
+      await setSession(result.user, {
+        access: result.access_token,
+        refresh: result.refresh_token,
+      });
+      void registerPushTokenIfAuthorized().catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to log in");
+      const message = err instanceof Error ? err.message : "Invalid email or password";
+      setError(message.toLowerCase().includes("invalid credentials") ? "Invalid email or password" : message);
       setLoading(false);
     }
   };
@@ -58,7 +59,7 @@ export function LoginScreen() {
                     style={styles.input}
                     value={email}
                     onChangeText={setEmail}
-                    placeholder="Enter your email or Rep ID"
+                    placeholder="Enter your email"
                     placeholderTextColor="#6b7280"
                     autoCapitalize="none"
                     autoCorrect={false}

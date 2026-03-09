@@ -1,8 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models.invitation import Invitation
 from app.models.types import UserRole
 from app.models.user import Organization, Team, User
 from app.schemas.auth import (
@@ -12,6 +15,7 @@ from app.schemas.auth import (
     AuthTokenResponse,
     AuthUserResponse,
 )
+from app.schemas.invitation import AcceptInviteRequest, ValidateInviteResponse
 from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -32,6 +36,21 @@ def _to_auth_response(user: User, tokens: dict) -> AuthTokenResponse:
             email=user.email,
         ),
     )
+
+
+def _get_pending_invitation(db: Session, token: str) -> Invitation | None:
+    invitation = db.scalar(select(Invitation).where(Invitation.token == token))
+    if invitation is None:
+        return None
+    if invitation.status != "pending":
+        return None
+    now = datetime.now(timezone.utc)
+    expires_at = invitation.expires_at if invitation.expires_at.tzinfo else invitation.expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        invitation.status = "expired"
+        db.commit()
+        return None
+    return invitation
 
 
 @router.post("/register", response_model=AuthTokenResponse)
@@ -108,6 +127,52 @@ def refresh(payload: AuthRefreshRequest, db: Session = Depends(get_db)) -> AuthT
     user = db.scalar(select(User).where(User.id == user_id))
     if user is None:
         raise HTTPException(status_code=401, detail="user not found")
+
+    tokens = auth_service.issue_tokens(user)
+    return _to_auth_response(user, tokens)
+
+
+@router.get("/validate-invite", response_model=ValidateInviteResponse)
+def validate_invite(
+    token: str = Query(..., min_length=16),
+    db: Session = Depends(get_db),
+) -> ValidateInviteResponse:
+    invitation = _get_pending_invitation(db, token)
+    if invitation is None:
+        raise HTTPException(status_code=400, detail="Invitation is invalid or expired")
+
+    return ValidateInviteResponse(email=invitation.email, org_id=invitation.org_id, valid=True)
+
+
+@router.post("/accept-invite", response_model=AuthTokenResponse)
+def accept_invite(payload: AcceptInviteRequest, db: Session = Depends(get_db)) -> AuthTokenResponse:
+    invitation = _get_pending_invitation(db, payload.token)
+    if invitation is None:
+        raise HTTPException(status_code=400, detail="Invitation is invalid or expired")
+
+    existing = db.scalar(select(User).where(User.email == invitation.email))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="email already registered")
+
+    try:
+        role = UserRole(invitation.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid invitation role") from exc
+
+    user = User(
+        org_id=invitation.org_id,
+        team_id=invitation.team_id,
+        role=role,
+        name=payload.name,
+        email=invitation.email,
+        password_hash=auth_service.hash_password(payload.password),
+        auth_provider="invite",
+    )
+    db.add(user)
+    invitation.status = "accepted"
+    invitation.accepted_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(user)
 
     tokens = auth_service.issue_tokens(user)
     return _to_auth_response(user, tokens)

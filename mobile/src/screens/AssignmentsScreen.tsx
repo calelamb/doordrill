@@ -2,16 +2,16 @@ import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View, ActivityIndicator, RefreshControl } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
-import { ClipboardList, BookOpenCheck, TreePine, Bell, Zap, TrendingUp } from "lucide-react-native";
+import { ClipboardList, BookOpenCheck, Bell, ChevronRight, Zap, TrendingUp } from "lucide-react-native";
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { BlurView } from "expo-blur";
 
 import { AssignmentCard } from "../components/AssignmentCard";
 import { BottomTabParamList } from "../navigation/types";
-import { fetchRepAssignments, fetchAllScenarios, fetchRepProgress } from "../services/api";
+import { fetchRepAssignments, fetchAllScenarios, fetchRepProgress, fetchRepSessionsHistory } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { RepAssignment, ScenarioBrief, RepProgress } from "../types";
+import { RepAssignment, RepProgress, RepSessionHistoryItem, ScenarioBrief } from "../types";
 import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
 import { CompositeScreenProps } from "@react-navigation/native";
 import { RootStackParamList } from "../navigation/types";
@@ -52,6 +52,7 @@ function wasYesterday(value: string | null | undefined): boolean {
 export function AssignmentsScreen({ navigation }: Props) {
   const { repId } = useSession();
   const [assignments, setAssignments] = useState<RepAssignment[]>([]);
+  const [sessionHistory, setSessionHistory] = useState<RepSessionHistoryItem[]>([]);
   const [scenarios, setScenarios] = useState<Record<string, ScenarioBrief>>({});
   const [progress, setProgress] = useState<RepProgress | null>(null);
   const [loading, setLoading] = useState(false);
@@ -62,13 +63,15 @@ export function AssignmentsScreen({ navigation }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const [assignmentsRes, scenariosRes, progressRes] = await Promise.all([
+      const [assignmentsRes, scenariosRes, progressRes, historyRes] = await Promise.all([
         fetchRepAssignments(repId),
         fetchAllScenarios(repId),
-        fetchRepProgress(repId)
+        fetchRepProgress(repId),
+        fetchRepSessionsHistory(repId),
       ]);
       setAssignments(assignmentsRes);
       setProgress(progressRes);
+      setSessionHistory(historyRes.items);
       
       const scenarioMap: Record<string, ScenarioBrief> = {};
       for (const sc of scenariosRes) {
@@ -82,15 +85,30 @@ export function AssignmentsScreen({ navigation }: Props) {
     }
   }, [repId]);
 
+  const hasActiveSessions = useMemo(
+    () => sessionHistory.some((session) => session.status === "active" || session.status === "processing"),
+    [sessionHistory]
+  );
+
+  const isFirstTimer = useMemo(
+    () => (progress?.completed_drills ?? 0) === 0 && !hasActiveSessions,
+    [hasActiveSessions, progress?.completed_drills]
+  );
+
+  const navigateToScenarioPicker = useCallback(() => {
+    navigation.navigate("ScenarioPicker", { isFirstTimer });
+  }, [isFirstTimer, navigation]);
+
   const startDrill = useCallback(
     async (assignment: RepAssignment) => {
       if (!repId) return;
       navigation.navigate("PreSession", {
         assignmentId: assignment.id,
         scenarioId: assignment.scenario_id,
+        isFirstSession: isFirstTimer,
       });
     },
-    [navigation, repId]
+    [isFirstTimer, navigation, repId]
   );
 
   useEffect(() => {
@@ -213,23 +231,37 @@ export function AssignmentsScreen({ navigation }: Props) {
               </BlurView>
             </View>
 
+            {isFirstTimer && Object.keys(scenarios).length > 0 ? (
+              <Pressable
+                style={({ pressed }) => [styles.firstDrillBanner, pressed && styles.firstDrillBannerPressed]}
+                onPress={navigateToScenarioPicker}
+                accessibilityLabel="Start your first drill"
+              >
+                <View style={styles.firstDrillIcon}>
+                  <Zap size={22} color={colors.accent} />
+                </View>
+                <View style={styles.firstDrillText}>
+                  <Text style={styles.firstDrillTitle}>Start Your First Drill</Text>
+                  <Text style={styles.firstDrillSubtitle}>Takes 3-5 minutes. Your AI homeowner is waiting.</Text>
+                </View>
+                <ChevronRight size={20} color={colors.accent} />
+              </Pressable>
+            ) : null}
+
             {Object.values(scenarios).length > 0 && (
               <Pressable 
                 style={({ pressed }) => [styles.quickTrainCard, pressed && styles.quickTrainCardPressed]}
-                onPress={() => {
-                  const firstScenarioId = Object.keys(scenarios)[0];
-                  if (firstScenarioId) {
-                    navigation.navigate("PreSession", { scenarioId: firstScenarioId });
-                  }
-                }}
+                onPress={navigateToScenarioPicker}
               >
                 <LinearGradient colors={["#166534", "#15803d"]} style={styles.quickTrainGradient} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}>
                   <View style={styles.quickTrainIcon}>
                     <Zap size={24} color="#fff" fill="#fff" />
                   </View>
                   <View style={styles.quickTrainTextContainer}>
-                    <Text style={styles.quickTrainTitle}>Quick Train</Text>
-                    <Text style={styles.quickTrainSubtitle}>Start an open practice session</Text>
+                    <Text style={styles.quickTrainTitle}>{isFirstTimer ? "Choose Your First Drill" : "Quick Train"}</Text>
+                    <Text style={styles.quickTrainSubtitle}>
+                      {isFirstTimer ? "Pick a beginner-friendly conversation to get started" : "Start an open practice session"}
+                    </Text>
                   </View>
                 </LinearGradient>
               </Pressable>
@@ -362,6 +394,44 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 12,
     marginBottom: 8,
+  },
+  firstDrillBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    padding: 18,
+    borderRadius: 22,
+    backgroundColor: "rgba(255, 255, 255, 0.72)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(22, 101, 52, 0.16)",
+    marginBottom: 6,
+  },
+  firstDrillBannerPressed: {
+    opacity: 0.94,
+    transform: [{ scale: 0.988 }],
+  },
+  firstDrillIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.accentSoft,
+  },
+  firstDrillText: {
+    flex: 1,
+  },
+  firstDrillTitle: {
+    fontSize: 17,
+    fontFamily: "Poppins_700Bold",
+    color: colors.ink,
+    marginBottom: 2,
+  },
+  firstDrillSubtitle: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.muted,
+    fontFamily: "Inter_400Regular",
   },
   statCard: {
     flex: 1,

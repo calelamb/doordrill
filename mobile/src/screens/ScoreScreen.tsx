@@ -510,7 +510,7 @@ function TranscriptTurnCard({
 
 export function ScoreScreen({ route, navigation }: Props) {
   const { repId } = useSession();
-  const { sessionId } = route.params;
+  const { sessionId, isFirstDrill = false } = route.params;
   const [data, setData] = useState<RepSessionDetail | null>(null);
   const [plan, setPlan] = useState<RepPlan | null>(null);
   const [progress, setProgress] = useState<RepProgress | null>(null);
@@ -594,6 +594,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   const focusSkills = plan?.focus_skills ?? [];
   const personalBestScore = progress?.personal_best ?? null;
   const showPersonalBestBanner = Boolean(scorecard && progress && (personalBestScore === null || overallScore >= personalBestScore));
+  const showFirstDrillCongrats = Boolean(isFirstDrill && scorecard);
   const mostImprovedBadge =
     progress?.most_improved_category && typeof progress.most_improved_delta === "number" && progress.most_improved_delta > 1
       ? {
@@ -1094,6 +1095,13 @@ export function ScoreScreen({ route, navigation }: Props) {
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.screenBody}>
           <View style={styles.headerShell}>
+            {showFirstDrillCongrats ? (
+              <Animated.View entering={FadeInDown.delay(100).springify()} style={styles.firstDrillCongrats}>
+                <Text style={styles.congratsEmoji}>🎉</Text>
+                <Text style={styles.congratsTitle}>First Drill Complete!</Text>
+                <Text style={styles.congratsBody}>Nice work. Here&apos;s how you did.</Text>
+              </Animated.View>
+            ) : null}
             <View style={styles.heroBlock}>
               {/* @ts-ignore */}
               <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}>
@@ -1172,6 +1180,34 @@ const styles = StyleSheet.create({
   headerShell: {
     paddingHorizontal: 20,
     paddingTop: 8,
+  },
+  firstDrillCongrats: {
+    alignItems: "center",
+    marginBottom: 14,
+    paddingVertical: 16,
+    paddingHorizontal: 18,
+    borderRadius: 24,
+    backgroundColor: "rgba(255, 255, 255, 0.72)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(22, 101, 52, 0.16)",
+  },
+  congratsEmoji: {
+    fontSize: 24,
+    marginBottom: 6,
+  },
+  congratsTitle: {
+    fontSize: 22,
+    lineHeight: 26,
+    color: colors.ink,
+    fontFamily: "Poppins_800ExtraBold",
+    marginBottom: 4,
+  },
+  congratsBody: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: colors.muted,
+    fontFamily: "Inter_400Regular",
+    textAlign: "center",
   },
   tabContent: {
     paddingHorizontal: 20,

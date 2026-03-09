@@ -1,8 +1,11 @@
 import { API_BASE_URL } from "./config";
+import { useSession } from "../store/session";
 import {
+  AuthTokenResponse,
   CategoryScoreDetail,
   DEFAULT_NOTIFICATION_PREFERENCES,
   ImprovementTarget,
+  InviteValidationResponse,
   NotificationPreferences,
   RegisteredDeviceToken,
   RepAssignment,
@@ -22,6 +25,14 @@ type DeviceTokenRegistrationPayload = {
   provider: "expo" | "fcm";
 };
 
+type ApiRequestOptions = {
+  auth?: boolean;
+  body?: BodyInit;
+  headers?: HeaderMap;
+  allowNotFound?: boolean;
+  retryOn401?: boolean;
+};
+
 type RawCategoryScore = number | (Partial<CategoryScoreDetail> & { score?: number }) | null;
 
 type RawScorecard = Omit<Scorecard, "category_scores" | "improvement_targets" | "scorecard_schema_version"> & {
@@ -36,19 +47,119 @@ type RawRepSessionDetail = Omit<RepSessionDetail, "scorecard" | "transcript" | "
   manager_coaching_note?: RepSessionDetail["manager_coaching_note"];
 };
 
-function repHeaders(repId: string): HeaderMap {
-  return {
-    "x-user-id": repId,
-    "x-user-role": "rep",
-    "content-type": "application/json"
-  };
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function buildHeaders(headers: HeaderMap | undefined, auth: boolean): Promise<HeaderMap> {
+  const mergedHeaders = { ...(headers ?? {}) };
+  if (!auth) {
+    return mergedHeaders;
+  }
+
+  const token = await useSession.getState().getAccessToken();
+  if (token) {
+    mergedHeaders.Authorization = `Bearer ${token}`;
+  }
+  return mergedHeaders;
 }
 
-async function parseJson<T>(response: Response, action: string): Promise<T> {
-  if (!response.ok) {
-    throw new Error(`${action} failed (${response.status})`);
+async function readErrorMessage(response: Response): Promise<string> {
+  try {
+    const payload = (await response.json()) as { detail?: unknown };
+    if (typeof payload.detail === "string" && payload.detail.trim()) {
+      return payload.detail;
+    }
+  } catch {
+    // Ignore malformed or empty JSON error payloads.
   }
+
+  return `HTTP ${response.status}`;
+}
+
+async function apiRequest<T>(
+  method: string,
+  path: string,
+  options: ApiRequestOptions = {},
+  hasRetried = false
+): Promise<T> {
+  const auth = options.auth !== false;
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method,
+    headers: await buildHeaders(options.headers, auth),
+    body: options.body,
+  });
+
+  if (response.status === 401 && auth && options.retryOn401 !== false && !hasRetried) {
+    const refreshed = await attemptSilentRefresh();
+    if (refreshed) {
+      return apiRequest<T>(method, path, options, true);
+    }
+
+    await useSession.getState().clearSession();
+    throw new Error("Session expired");
+  }
+
+  if (response.status === 404 && options.allowNotFound) {
+    return undefined as T;
+  }
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
   return (await response.json()) as T;
+}
+
+async function apiJsonRequest<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  options: Omit<ApiRequestOptions, "body"> = {}
+): Promise<T> {
+  const headers = { "Content-Type": "application/json", ...(options.headers ?? {}) };
+  return apiRequest<T>(
+    method,
+    path,
+    {
+      ...options,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }
+  );
+}
+
+async function attemptSilentRefresh(): Promise<boolean> {
+  if (refreshInFlight) {
+    return refreshInFlight;
+  }
+
+  refreshInFlight = (async () => {
+    const store = useSession.getState();
+    const refreshToken = await store.getRefreshToken();
+    if (!refreshToken) {
+      return false;
+    }
+
+    try {
+      const result = await refreshTokens(refreshToken);
+      await store.setSession(result.user, {
+        access: result.access_token,
+        refresh: result.refresh_token,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
 }
 
 function normalizeCategoryScore(value: RawCategoryScore): CategoryScoreDetail {
@@ -172,13 +283,50 @@ function normalizeNotificationPreferences(
   };
 }
 
+export async function loginWithCredentials(email: string, password: string): Promise<AuthTokenResponse> {
+  return apiJsonRequest<AuthTokenResponse>(
+    "POST",
+    "/auth/login",
+    { email, password },
+    { auth: false, retryOn401: false }
+  );
+}
+
+export async function refreshTokens(refreshToken: string): Promise<AuthTokenResponse> {
+  return apiJsonRequest<AuthTokenResponse>(
+    "POST",
+    "/auth/refresh",
+    { refresh_token: refreshToken },
+    { auth: false, retryOn401: false }
+  );
+}
+
+export async function validateInvite(token: string): Promise<InviteValidationResponse> {
+  return apiRequest<InviteValidationResponse>(
+    "GET",
+    `/auth/validate-invite?token=${encodeURIComponent(token)}`,
+    { auth: false, retryOn401: false }
+  );
+}
+
+export async function acceptInvite(payload: {
+  token: string;
+  name: string;
+  password: string;
+}): Promise<AuthTokenResponse> {
+  return apiJsonRequest<AuthTokenResponse>("POST", "/auth/accept-invite", payload, {
+    auth: false,
+    retryOn401: false,
+  });
+}
+
 export async function checkApiReachable(timeoutMs = 3500): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${API_BASE_URL}/health`, {
       method: "GET",
-      signal: controller.signal
+      signal: controller.signal,
     });
     return response.ok;
   } catch {
@@ -189,10 +337,7 @@ export async function checkApiReachable(timeoutMs = 3500): Promise<boolean> {
 }
 
 export async function fetchRepAssignments(repId: string): Promise<RepAssignment[]> {
-  const response = await fetch(`${API_BASE_URL}/rep/assignments?rep_id=${encodeURIComponent(repId)}`, {
-    headers: repHeaders(repId)
-  });
-  return parseJson<RepAssignment[]>(response, "fetch assignments");
+  return apiRequest<RepAssignment[]>("GET", `/rep/assignments?rep_id=${encodeURIComponent(repId)}`);
 }
 
 export async function createRepSession(
@@ -200,159 +345,100 @@ export async function createRepSession(
   assignmentId: string | null,
   scenarioId: string
 ): Promise<{ id: string }> {
-  const response = await fetch(`${API_BASE_URL}/rep/sessions`, {
-    method: "POST",
-    headers: repHeaders(repId),
-    body: JSON.stringify({
-      assignment_id: assignmentId,
-      rep_id: repId,
-      scenario_id: scenarioId
-    })
+  return apiJsonRequest<{ id: string }>("POST", "/rep/sessions", {
+    assignment_id: assignmentId,
+    rep_id: repId,
+    scenario_id: scenarioId,
   });
-  return parseJson<{ id: string }>(response, "create session");
 }
 
-export async function fetchAllScenarios(repId: string): Promise<ScenarioBrief[]> {
-  const response = await fetch(`${API_BASE_URL}/scenarios`, {
-    headers: repHeaders(repId)
-  });
-  return parseJson<ScenarioBrief[]>(response, "fetch all scenarios");
+export async function fetchAllScenarios(_repId: string): Promise<ScenarioBrief[]> {
+  return apiRequest<ScenarioBrief[]>("GET", "/rep/scenarios");
 }
 
-export async function fetchRepScenario(repId: string, scenarioId: string): Promise<ScenarioBrief> {
-  const response = await fetch(`${API_BASE_URL}/scenarios/${encodeURIComponent(scenarioId)}`, {
-    headers: repHeaders(repId)
-  });
-  return parseJson<ScenarioBrief>(response, "fetch scenario");
+export async function fetchRepScenario(_repId: string, scenarioId: string): Promise<ScenarioBrief> {
+  return apiRequest<ScenarioBrief>("GET", `/scenarios/${encodeURIComponent(scenarioId)}`);
 }
 
-export async function fetchRepSession(repId: string, sessionId: string): Promise<RepSessionDetail> {
-  const response = await fetch(`${API_BASE_URL}/rep/sessions/${encodeURIComponent(sessionId)}`, {
-    headers: repHeaders(repId)
-  });
-  const payload = await parseJson<RawRepSessionDetail>(response, "fetch session detail");
+export async function fetchRepSession(_repId: string, sessionId: string): Promise<RepSessionDetail> {
+  const payload = await apiRequest<RawRepSessionDetail>("GET", `/rep/sessions/${encodeURIComponent(sessionId)}`);
   return normalizeRepSessionDetail(payload);
 }
 
 export async function fetchRepProgress(repId: string): Promise<RepProgress> {
-  const response = await fetch(`${API_BASE_URL}/rep/progress?rep_id=${encodeURIComponent(repId)}`, {
-    headers: repHeaders(repId)
-  });
-  const payload = await parseJson<RepProgress>(response, "fetch progress");
+  const payload = await apiRequest<RepProgress>("GET", `/rep/progress?rep_id=${encodeURIComponent(repId)}`);
   return normalizeRepProgress(payload);
 }
 
-export async function fetchRepSessionsHistory(repId: string): Promise<{ items: import("../types").RepSessionHistoryItem[] }> {
-  const response = await fetch(`${API_BASE_URL}/rep/sessions?rep_id=${encodeURIComponent(repId)}`, {
-    headers: repHeaders(repId)
-  });
-  return parseJson<{ items: import("../types").RepSessionHistoryItem[] }>(response, "fetch history");
+export async function fetchRepSessionsHistory(
+  repId: string
+): Promise<{ items: import("../types").RepSessionHistoryItem[] }> {
+  return apiRequest<{ items: import("../types").RepSessionHistoryItem[] }>(
+    "GET",
+    `/rep/sessions?rep_id=${encodeURIComponent(repId)}`
+  );
 }
 
 export async function fetchRepTrend(repId: string, sessions = 10): Promise<RepTrend> {
-  const response = await fetch(
-    `${API_BASE_URL}/rep/progress/trend?rep_id=${encodeURIComponent(repId)}&sessions=${encodeURIComponent(String(sessions))}`,
-    {
-      headers: repHeaders(repId)
-    }
+  return apiRequest<RepTrend>(
+    "GET",
+    `/rep/progress/trend?rep_id=${encodeURIComponent(repId)}&sessions=${encodeURIComponent(String(sessions))}`
   );
-  return parseJson<RepTrend>(response, "fetch trend");
 }
 
 export async function fetchRepPlan(repId: string): Promise<RepPlan> {
-  const response = await fetch(`${API_BASE_URL}/rep/plan?rep_id=${encodeURIComponent(repId)}`, {
-    headers: repHeaders(repId)
-  });
-  const payload = await parseJson<RepPlan>(response, "fetch plan");
+  const payload = await apiRequest<RepPlan>("GET", `/rep/plan?rep_id=${encodeURIComponent(repId)}`);
   return normalizeRepPlan(payload);
 }
 
-export async function lookupRepByEmail(email: string): Promise<{ rep_id: string }> {
-  const response = await fetch(`${API_BASE_URL}/rep/lookup?email=${encodeURIComponent(email)}`);
-  return parseJson<{ rep_id: string }>(response, "lookup rep");
-}
-
 export async function registerDeviceToken(
-  repId: string,
   payload: DeviceTokenRegistrationPayload
 ): Promise<RegisteredDeviceToken> {
-  const response = await fetch(`${API_BASE_URL}/rep/device-tokens`, {
-    method: "POST",
-    headers: repHeaders(repId),
-    body: JSON.stringify(payload)
-  });
-  return parseJson<RegisteredDeviceToken>(response, "register device token");
+  return apiJsonRequest<RegisteredDeviceToken>("POST", "/rep/device-tokens", payload);
 }
 
-export async function revokeDeviceToken(repId: string, tokenId: string): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/rep/device-tokens/${encodeURIComponent(tokenId)}`, {
-    method: "DELETE",
-    headers: repHeaders(repId)
-  });
-
-  if (response.status === 404) {
-    return;
-  }
-  if (!response.ok) {
-    throw new Error(`revoke device token failed (${response.status})`);
-  }
+export async function revokeDeviceToken(tokenId: string): Promise<void> {
+  await apiRequest<Record<string, unknown> | undefined>(
+    "DELETE",
+    `/rep/device-tokens/${encodeURIComponent(tokenId)}`,
+    { allowNotFound: true }
+  );
 }
 
-export async function fetchNotificationPreferences(repId: string): Promise<NotificationPreferences> {
-  const response = await fetch(`${API_BASE_URL}/rep/notification-preferences`, {
-    headers: repHeaders(repId)
-  });
-  const payload = await parseJson<Partial<NotificationPreferences>>(response, "fetch notification preferences");
+export async function fetchNotificationPreferences(): Promise<NotificationPreferences> {
+  const payload = await apiRequest<Partial<NotificationPreferences>>("GET", "/rep/notification-preferences");
   return normalizeNotificationPreferences(payload);
 }
 
 export async function updateNotificationPreferences(
-  repId: string,
   preferences: NotificationPreferences
 ): Promise<NotificationPreferences> {
-  const response = await fetch(`${API_BASE_URL}/rep/notification-preferences`, {
-    method: "PUT",
-    headers: repHeaders(repId),
-    body: JSON.stringify(preferences)
-  });
-  const payload = await parseJson<Partial<NotificationPreferences>>(response, "update notification preferences");
+  const payload = await apiJsonRequest<Partial<NotificationPreferences>>(
+    "PUT",
+    "/rep/notification-preferences",
+    preferences
+  );
   return normalizeNotificationPreferences(payload);
 }
 
-export async function uploadRepAvatar(repId: string, uri: string): Promise<{ avatar_url: string }> {
-  const ext = uri.split('.').pop() || 'jpg';
+export async function uploadRepAvatar(uri: string): Promise<{ avatar_url: string }> {
+  const ext = uri.split(".").pop() || "jpg";
   const formData = new FormData();
-  // @ts-ignore
-  formData.append('file', {
+  formData.append("file", {
     uri,
     name: `avatar.${ext}`,
-    type: `image/${ext}`
-  });
+    type: `image/${ext}`,
+  } as unknown as Blob);
 
-  const response = await fetch(`${API_BASE_URL}/rep/profile/avatar`, {
-    method: "POST",
-    headers: {
-      "x-user-id": repId,
-      "x-user-role": "rep",
-      // Do not set Content-Type, fetch will set it with boundary
-    },
-    body: formData
+  return apiRequest<{ avatar_url: string }>("POST", "/rep/profile/avatar", {
+    body: formData,
   });
-  return parseJson<{ avatar_url: string }>(response, "upload avatar");
 }
 
-export async function updateRepProfile(repId: string, name: string): Promise<{ name: string; avatar_url: string | null }> {
-  const response = await fetch(`${API_BASE_URL}/rep/profile`, {
-    method: "PATCH",
-    headers: repHeaders(repId),
-    body: JSON.stringify({ name })
-  });
-  return parseJson<{ name: string; avatar_url: string | null }>(response, "update profile");
+export async function updateRepProfile(name: string): Promise<{ name: string; avatar_url: string | null }> {
+  return apiJsonRequest<{ name: string; avatar_url: string | null }>("PATCH", "/rep/profile", { name });
 }
 
-export async function fetchRepHierarchy(repId: string): Promise<import("../types").HierarchyNode[]> {
-  const response = await fetch(`${API_BASE_URL}/rep/hierarchy`, {
-    headers: repHeaders(repId)
-  });
-  return parseJson<import("../types").HierarchyNode[]>(response, "fetch hierarchy");
+export async function fetchRepHierarchy(): Promise<import("../types").HierarchyNode[]> {
+  return apiRequest<import("../types").HierarchyNode[]>("GET", "/rep/hierarchy");
 }

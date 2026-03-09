@@ -451,6 +451,33 @@ export type ManagerTeamMember = {
   created_at?: string | null;
 };
 
+export type OrganizationProfile = {
+  id: string;
+  name: string;
+  industry: string;
+  plan_tier: string;
+};
+
+export type OnboardingStep = {
+  id: "org_profile" | "first_scenario" | "first_invite";
+  label: string;
+  is_complete: boolean;
+  cta_url: string;
+};
+
+export type OnboardingStatus = {
+  steps: OnboardingStep[];
+  is_complete: boolean;
+  onboarding_completed_at?: string | null;
+};
+
+export type ManagerInvitation = {
+  invitation_id: string;
+  email: string;
+  invite_url: string;
+  expires_at: string;
+};
+
 export type ScenarioSummary = {
   id: string;
   org_id?: string | null;

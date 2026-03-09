@@ -10,13 +10,16 @@ import { ActionsPage } from "./pages/ActionsPage";
 import { AssignmentCreatePage } from "./pages/AssignmentCreatePage";
 import { CoachingLabPage } from "./pages/CoachingLabPage";
 import { ExplorerPage } from "./pages/ExplorerPage";
+import { InviteRepPage } from "./pages/InviteRepPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LiveSessionPage } from "./pages/LiveSessionPage";
 import { KnowledgeBasePage } from "./pages/KnowledgeBasePage";
 import { ManagerReplayPage } from "./pages/ManagerReplayPage";
+import { OrganizationSettingsPage } from "./pages/OrganizationSettingsPage";
 import { RepProgressPage } from "./pages/RepProgressPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { RiskIntelligencePage } from "./pages/RiskIntelligencePage";
+import { ScenarioCreatePage } from "./pages/ScenarioCreatePage";
 import { ScenarioIntelligencePage } from "./pages/ScenarioIntelligencePage";
 
 function RootRedirect() {
@@ -86,6 +89,9 @@ export function App() {
           <Route path="/knowledge-base" element={<KnowledgeBasePage />} />
           <Route path="/manager/actions" element={<ActionsPage />} />
           <Route path="/manager/assignments/new" element={<AssignmentCreatePage />} />
+          <Route path="/settings/organization" element={<OrganizationSettingsPage />} />
+          <Route path="/scenarios/new" element={<ScenarioCreatePage />} />
+          <Route path="/reps/invite" element={<InviteRepPage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

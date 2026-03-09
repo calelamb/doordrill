@@ -166,7 +166,7 @@ function VisualizationOrb({ mode, hasError }: { mode: 'idle' | 'listening' | 'sp
 }
 
 export function SessionScreen({ route, navigation }: Props) {
-  const { sessionId } = route.params;
+  const { sessionId, isFirstSession = false } = route.params;
 
   const wsClientRef = useRef<SessionWsClient | null>(null);
   const audioCaptureRef = useRef<AudioCaptureService | null>(null);
@@ -587,7 +587,7 @@ export function SessionScreen({ route, navigation }: Props) {
     wsClientRef.current?.close();
     wsClientRef.current = null;
     await cancelAudioPlayback();
-    navigation.replace("Score", { sessionId });
+    navigation.replace("Score", { sessionId, isFirstDrill: isFirstSession });
   }
 
   async function savePartialSession() {
@@ -599,7 +599,7 @@ export function SessionScreen({ route, navigation }: Props) {
     wsClientRef.current?.close();
     wsClientRef.current = null;
     await cancelAudioPlayback();
-    navigation.replace("Score", { sessionId });
+    navigation.replace("Score", { sessionId, isFirstDrill: isFirstSession });
   }
 
   useEffect(() => {

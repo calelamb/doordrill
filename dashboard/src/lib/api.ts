@@ -15,8 +15,11 @@ import type {
   ManagerActionLog,
   ManagerAnalytics,
   ManagerAssignment,
+  ManagerInvitation,
   ManagerTeamMember,
   OneOnOnePrepResponse,
+  OnboardingStatus,
+  OrganizationProfile,
   ReplayResponse,
   RepInsightResponse,
   RepAssignment,
@@ -152,6 +155,51 @@ export async function fetchManagerTeam(managerId: string): Promise<ManagerTeamMe
   return response.items ?? [];
 }
 
+export async function fetchManagerOrganization(): Promise<OrganizationProfile> {
+  const auth = getValidStoredAuth();
+  if (!auth) {
+    throw createAuthRequiredError();
+  }
+
+  return requestJson<OrganizationProfile>(
+    "/manager/organization",
+    {},
+    { userId: auth.user.id, role: "manager" }
+  );
+}
+
+export async function updateManagerOrganization(payload: {
+  name: string;
+  industry: string;
+}): Promise<OrganizationProfile> {
+  const auth = getValidStoredAuth();
+  if (!auth) {
+    throw createAuthRequiredError();
+  }
+
+  return requestJson<OrganizationProfile>(
+    "/manager/organization",
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+    { userId: auth.user.id, role: "manager" }
+  );
+}
+
+export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
+  const auth = getValidStoredAuth();
+  if (!auth) {
+    throw createAuthRequiredError();
+  }
+
+  return requestJson<OnboardingStatus>(
+    "/manager/onboarding-status",
+    {},
+    { userId: auth.user.id, role: "manager" }
+  );
+}
+
 export async function fetchManagerSessions(managerId: string): Promise<SessionDetail[]> {
   const response = await requestJson<ManagerSessionsResponse>(
     `/manager/sessions?manager_id=${encodeURIComponent(managerId)}`,
@@ -199,6 +247,51 @@ export async function fetchScenarios(): Promise<ScenarioSummary[]> {
     throw createAuthRequiredError();
   }
   return requestJson<ScenarioSummary[]>("/scenarios", {}, { userId: auth.user.id, role: auth.user.role as "manager" | "admin" | "rep" });
+}
+
+export async function createScenario(payload: {
+  name: string;
+  industry: string;
+  difficulty: number;
+  description: string;
+  persona: Record<string, unknown>;
+  rubric: Record<string, unknown>;
+  stages: string[];
+  created_by_id: string;
+}): Promise<ScenarioSummary> {
+  const auth = getValidStoredAuth();
+  if (!auth) {
+    throw createAuthRequiredError();
+  }
+
+  return requestJson<ScenarioSummary>(
+    "/scenarios",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    { userId: auth.user.id, role: "manager" }
+  );
+}
+
+export async function createManagerInvitation(payload: {
+  email: string;
+  team_id?: string | null;
+  role?: "rep";
+}): Promise<ManagerInvitation> {
+  const auth = getValidStoredAuth();
+  if (!auth) {
+    throw createAuthRequiredError();
+  }
+
+  return requestJson<ManagerInvitation>(
+    "/manager/invitations",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    { userId: auth.user.id, role: "manager" }
+  );
 }
 
 export async function fetchManagerFeed(

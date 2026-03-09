@@ -72,7 +72,7 @@ function PulsingOrb({ isReady, isStarting }: { isReady: boolean, isStarting: boo
 }
 
 export function PreSessionScreen({ route, navigation }: Props) {
-  const { assignmentId, scenarioId } = route.params;
+  const { assignmentId, scenarioId, isFirstSession = false } = route.params;
   const { repId } = useSession();
   
   const bottomSheetRef = useRef<BottomSheet>(null);
@@ -82,12 +82,27 @@ export function PreSessionScreen({ route, navigation }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [assignment, setAssignment] = useState<RepAssignment | null>(null);
   const [scenario, setScenario] = useState<ScenarioBrief | null>(null);
+  const [tipsDismissed, setTipsDismissed] = useState(!isFirstSession);
   
   // Fake status loading stages for AirPods effect
   const [statusStage, setStatusStage] = useState(0); 
   // 0 = Establishing connection...
   // 1 = Loading persona...
   // 2 = Homeowner is ready
+
+  useEffect(() => {
+    if (!isFirstSession) {
+      setTipsDismissed(true);
+      return;
+    }
+
+    setTipsDismissed(false);
+    const timer = setTimeout(() => {
+      setTipsDismissed(true);
+    }, 4000);
+
+    return () => clearTimeout(timer);
+  }, [isFirstSession]);
 
   useEffect(() => {
     async function loadBrief() {
@@ -145,19 +160,20 @@ export function PreSessionScreen({ route, navigation }: Props) {
       bottomSheetRef.current?.close();
       
       // Delay slightly for bottom sheet close animation
-      setTimeout(() => {
-        navigation.replace("Session", {
-          assignmentId: assignmentId ?? undefined,
-          scenarioId: scenarioId,
-          sessionId: session.id,
-        });
-      }, 300);
+        setTimeout(() => {
+          navigation.replace("Session", {
+            assignmentId: assignmentId ?? undefined,
+            scenarioId: scenarioId,
+            sessionId: session.id,
+            isFirstSession,
+          });
+        }, 300);
 
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start drill");
       setStarting(false);
     }
-  }, [assignmentId, scenarioId, navigation, repId, starting]);
+  }, [assignmentId, isFirstSession, scenarioId, navigation, repId, starting]);
 
   const renderBackdrop = useCallback(
     (props: any) => (
@@ -195,6 +211,15 @@ export function PreSessionScreen({ route, navigation }: Props) {
             <Text style={styles.headerTitle}>Drill Brief</Text>
             <View style={{ width: 40 }} />
           </View>
+
+          {isFirstSession && !tipsDismissed ? (
+            <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tipsCard}>
+              <Text style={styles.tipsTitle}>A few tips:</Text>
+              <Text style={styles.tipItem}>• Speak naturally, just like a real door.</Text>
+              <Text style={styles.tipItem}>• The AI responds like a real homeowner would.</Text>
+              <Text style={styles.tipItem}>• You&apos;ll get a score and breakdown after.</Text>
+            </Animated.View>
+          ) : null}
 
           <PulsingOrb isReady={statusStage === 2} isStarting={starting} />
 
@@ -280,6 +305,27 @@ const styles = StyleSheet.create({
     height: 160,
     alignItems: "center",
     justifyContent: "center",
+  },
+  tipsCard: {
+    marginBottom: 16,
+    borderRadius: 20,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    backgroundColor: "rgba(22, 101, 52, 0.08)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(22, 101, 52, 0.18)",
+    gap: 6,
+  },
+  tipsTitle: {
+    fontSize: 14,
+    fontFamily: "Poppins_700Bold",
+    color: colors.ink,
+  },
+  tipItem: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.muted,
+    fontFamily: "Inter_400Regular",
   },
   orbWrapper: {
     width: 80,

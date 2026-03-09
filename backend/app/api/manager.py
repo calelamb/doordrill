@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import secrets
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -7,6 +8,7 @@ import json
 import os
 from statistics import pstdev
 from typing import Any
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -15,17 +17,19 @@ from sqlalchemy import and_, case, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_manager, resolve_ws_actor_with_query
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.analytics import AnalyticsFactAlert, AnalyticsFactManagerCalibration
 from app.models.assignment import Assignment
 from app.models.grading import GradingRun
+from app.models.invitation import Invitation
 from app.models.knowledge import OrgDocument
 from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, OrgDocumentFileType, OrgDocumentStatus, ReviewReason, SessionStatus, UserRole
-from app.models.user import Team, User
+from app.models.user import Organization, Team, User
 from app.schemas.adaptive_training import (
     AdaptiveAssignmentRequest,
     AdaptiveAssignmentResponse,
@@ -34,6 +38,7 @@ from app.schemas.adaptive_training import (
     TeamIntelligenceSnapshotResponse,
 )
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
+from app.schemas.invitation import InviteRepRequest, InviteRepResponse
 from app.schemas.knowledge import (
     DocumentAskRequest,
     DocumentAskResponse,
@@ -44,7 +49,9 @@ from app.schemas.knowledge import (
     OrgDocumentResponse,
 )
 from app.schemas.manager_analytics import CalibrationAnalyticsResponse, RepRiskDetailResponse
+from app.schemas.onboarding import OnboardingStatus, OnboardingStep
 from app.schemas.notification import NotificationDeliveryResponse
+from app.schemas.organization import OrganizationProfileResponse, OrganizationUpdateRequest
 from app.schemas.manager_ai import (
     ManagerChatRequest,
     ManagerChatResponse,
@@ -88,11 +95,13 @@ from app.services.management_analytics_runtime_service import ManagementAnalytic
 from app.services.manager_feed_service import ManagerFeedService
 from app.services.manager_review_service import ManagerReviewService
 from app.services.notification_service import NotificationService
+from app.services.notification_providers import build_email_provider
 from app.services.predictive_modeling_service import PredictiveModelingService
 from app.services.storage_service import StorageService
 
 router = APIRouter(prefix="/manager", tags=["manager"])
 logger = logging.getLogger(__name__)
+settings = get_settings()
 adaptive_training_service = AdaptiveTrainingService()
 feed_service = ManagerFeedService()
 storage_service = StorageService()
@@ -105,6 +114,7 @@ manager_ai_service = ManagerAiCoachingService()
 predictive_modeling_service = PredictiveModelingService()
 document_processing_service = DocumentProcessingService(storage_service=storage_service)
 document_retrieval_service = DocumentRetrievalService()
+invite_email_provider = build_email_provider(settings)
 RUBRIC_CATEGORY_KEYS = {
     "opening": "opening",
     "pitch": "pitch",
@@ -145,6 +155,15 @@ def _get_scenario_or_404(db: Session, scenario_id: str) -> Scenario:
     if scenario is None:
         raise HTTPException(status_code=404, detail="scenario not found")
     return scenario
+
+
+def _get_organization_or_404(db: Session, org_id: str | None) -> Organization:
+    if not org_id:
+        raise HTTPException(status_code=404, detail="organization not found")
+    organization = db.scalar(select(Organization).where(Organization.id == org_id))
+    if organization is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    return organization
 
 
 def _serialize_review(review: ManagerReview) -> ManagerReviewResponse:
@@ -303,6 +322,39 @@ def _parse_document_file_type(filename: str | None) -> OrgDocumentFileType:
 def _build_document_storage_key(manager: User, filename: str) -> str:
     safe_name = os.path.basename(filename or "document").replace(" ", "_")
     return f"org-documents/{manager.org_id}/{manager.id}/{uuid4().hex}/{safe_name}"
+
+
+def _build_invite_url(token: str, email: str) -> str:
+    query = urlencode({"token": token, "email": email})
+    return f"{settings.invite_deep_link_base}?{query}"
+
+
+def _build_invite_email(manager_name: str, invite_url: str, expires_at: datetime) -> str:
+    expires_label = expires_at.astimezone(timezone.utc).strftime("%b %d, %Y at %I:%M %p UTC").replace(" 0", " ")
+    return (
+        f"{manager_name} invited you to join DoorDrill.\n\n"
+        f"Create your account: {invite_url}\n\n"
+        f"This invite expires on {expires_label}.\n"
+        "If the link has expired, ask your manager to send a new invitation."
+    )
+
+
+def _send_invitation_email(*, manager_name: str, email: str, invite_url: str, expires_at: datetime) -> None:
+    subject = f"{manager_name} invited you to DoorDrill"
+    body = _build_invite_email(manager_name, invite_url, expires_at)
+    result = _run_async(invite_email_provider.send(to_email=email, subject=subject, body=body))
+    if not result.ok:
+        logger.warning(
+            "invitation_email_send_failed",
+            extra={
+                "email": email,
+                "manager_name": manager_name,
+                "invite_url": invite_url,
+                "expires_at": expires_at.isoformat(),
+                "provider_response": result.response,
+                "error": result.error,
+            },
+        )
 
 
 def _manager_chat_training_query(
@@ -682,6 +734,86 @@ def _get_live_sessions_payload(db: Session, manager_id: str, actor: Actor) -> Li
     )
 
 
+@router.post("/invitations", response_model=InviteRepResponse)
+def invite_rep(
+    payload: InviteRepRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> InviteRepResponse:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+
+    manager = _get_user_or_404(db, actor.user_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+
+    normalized_email = payload.email.lower()
+    existing_user = db.scalar(select(User).where(User.email == normalized_email))
+    if existing_user is not None:
+        raise HTTPException(status_code=409, detail="email already registered")
+
+    existing_invitation = db.scalar(
+        select(Invitation)
+        .where(
+            Invitation.org_id == manager.org_id,
+            Invitation.email == normalized_email,
+            Invitation.status == "pending",
+        )
+        .order_by(Invitation.created_at.desc())
+    )
+    if existing_invitation is not None:
+        normalized_expires_at = (
+            existing_invitation.expires_at
+            if existing_invitation.expires_at.tzinfo
+            else existing_invitation.expires_at.replace(tzinfo=timezone.utc)
+        )
+        if normalized_expires_at > datetime.now(timezone.utc):
+            raise HTTPException(status_code=409, detail="email already invited")
+        existing_invitation.status = "expired"
+        db.commit()
+
+    team_id = payload.team_id or manager.team_id
+    if team_id:
+        team = db.scalar(select(Team).where(Team.id == team_id))
+        if team is None or team.org_id != manager.org_id:
+            raise HTTPException(status_code=400, detail="team not found")
+
+    try:
+        UserRole(payload.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid role") from exc
+
+    token = secrets.token_hex(16)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.invite_ttl_days)
+    invitation = Invitation(
+        org_id=manager.org_id,
+        team_id=team_id,
+        invited_by=manager.id,
+        email=normalized_email,
+        token=token,
+        role=payload.role,
+        status="pending",
+        expires_at=expires_at,
+    )
+    db.add(invitation)
+    db.commit()
+    db.refresh(invitation)
+
+    invite_url = _build_invite_url(token=token, email=normalized_email)
+    _send_invitation_email(
+        manager_name=manager.name,
+        email=normalized_email,
+        invite_url=invite_url,
+        expires_at=expires_at,
+    )
+
+    return InviteRepResponse(
+        invitation_id=invitation.id,
+        email=normalized_email,
+        invite_url=invite_url,
+        expires_at=expires_at,
+    )
+
+
 @router.post("/documents", response_model=OrgDocumentResponse)
 async def upload_manager_document(
     background_tasks: BackgroundTasks,
@@ -853,6 +985,91 @@ def get_manager_team(
             for rep in reps
         ],
     }
+
+
+@router.get("/organization", response_model=OrganizationProfileResponse)
+def get_manager_organization(
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> Organization:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+
+    manager = _get_user_or_404(db, actor.user_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    return _get_organization_or_404(db, manager.org_id)
+
+
+@router.put("/organization", response_model=OrganizationProfileResponse)
+def update_manager_organization(
+    payload: OrganizationUpdateRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> Organization:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+
+    manager = _get_user_or_404(db, actor.user_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    organization = _get_organization_or_404(db, manager.org_id)
+    organization.name = payload.name.strip()
+    organization.industry = payload.industry.strip()
+    db.commit()
+    db.refresh(organization)
+    return organization
+
+
+@router.get("/onboarding-status", response_model=OnboardingStatus)
+def get_manager_onboarding_status(
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> OnboardingStatus:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+
+    manager = _get_user_or_404(db, actor.user_id, "manager")
+    _ensure_same_org(actor, manager.org_id)
+    organization = _get_organization_or_404(db, manager.org_id)
+
+    scenario_count = db.scalar(
+        select(func.count()).select_from(Scenario).where(Scenario.org_id == manager.org_id)
+    ) or 0
+    invite_count = db.scalar(
+        select(func.count()).select_from(Invitation).where(Invitation.org_id == manager.org_id)
+    ) or 0
+
+    steps = [
+        OnboardingStep(
+            id="org_profile",
+            label="Set up your organization",
+            is_complete=bool(organization.name.strip() and organization.industry.strip()),
+            cta_url="/settings/organization",
+        ),
+        OnboardingStep(
+            id="first_scenario",
+            label="Create your first drill scenario",
+            is_complete=scenario_count > 0,
+            cta_url="/scenarios/new",
+        ),
+        OnboardingStep(
+            id="first_invite",
+            label="Invite your first rep",
+            is_complete=invite_count > 0,
+            cta_url="/reps/invite",
+        ),
+    ]
+    is_complete = all(step.is_complete for step in steps)
+
+    if is_complete and manager.onboarding_completed_at is None:
+        manager.onboarding_completed_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(manager)
+
+    return OnboardingStatus(
+        steps=steps,
+        is_complete=is_complete,
+        onboarding_completed_at=manager.onboarding_completed_at,
+    )
 
 
 @router.get("/assignments")
