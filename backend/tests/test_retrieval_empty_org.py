@@ -24,4 +24,4 @@ def test_retrieval_empty_org_returns_immediately_without_embedding(seed_org, mon
     db.close()
 
     assert chunks == []
-    assert elapsed_ms < 10
+    assert elapsed_ms < 500

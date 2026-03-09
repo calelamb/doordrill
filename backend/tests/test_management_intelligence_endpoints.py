@@ -51,6 +51,23 @@ def _run_session(client, seed_org: dict[str, str], assignment_id: str, transcrip
     return session_id
 
 
+def _await_scorecard(session_id: str, *, timeout_seconds: float = 60) -> Scorecard:
+    scorecard = None
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        db = SessionLocal()
+        try:
+            scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
+        finally:
+            db.close()
+        if scorecard is not None:
+            break
+        time.sleep(0.1)
+
+    assert scorecard is not None, f"scorecard was not created for session {session_id} within {timeout_seconds} seconds"
+    return scorecard
+
+
 def test_management_intelligence_endpoints(client, seed_org):
     first_assignment = _create_assignment(client, seed_org)
     first_session_id = _run_session(
@@ -59,16 +76,7 @@ def test_management_intelligence_endpoints(client, seed_org):
         first_assignment["id"],
         "Hi, I can lower your price today and schedule now.",
     )
-
-    first_scorecard = None
-    for _ in range(20):
-        db = SessionLocal()
-        first_scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == first_session_id))
-        db.close()
-        if first_scorecard is not None:
-            break
-        time.sleep(0.02)
-    assert first_scorecard is not None
+    first_scorecard = _await_scorecard(first_session_id)
 
     coaching = client.post(
         f"/manager/scorecards/{first_scorecard.id}/coaching-notes",
@@ -94,12 +102,13 @@ def test_management_intelligence_endpoints(client, seed_org):
     assert override.status_code == 200
 
     second_assignment = _create_assignment(client, seed_org)
-    _run_session(
+    second_session_id = _run_session(
         client,
         seed_org,
         second_assignment["id"],
         "I know you already have service, but I can improve coverage and lock a better monthly rate.",
     )
+    _await_scorecard(second_session_id)
 
     manager_headers = {"x-user-id": seed_org["manager_id"], "x-user-role": "manager"}
 

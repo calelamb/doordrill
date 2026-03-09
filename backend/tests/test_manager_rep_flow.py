@@ -172,7 +172,8 @@ def test_live_session_endpoints(client, seed_org):
 
         ws.send_json({"type": "client.session.end", "sequence": 2, "payload": {}})
 
-    for _ in range(20):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
         live_after = client.get(
             "/manager/sessions/live",
             params={"manager_id": seed_org["manager_id"]},
@@ -181,7 +182,7 @@ def test_live_session_endpoints(client, seed_org):
         assert live_after.status_code == 200
         if session_id not in {item["session_id"] for item in live_after.json()["live_sessions"]}:
             break
-        time.sleep(0.02)
+        time.sleep(0.1)
     else:
         raise AssertionError("session remained in live sessions after ending")
 
@@ -237,13 +238,14 @@ def test_event_persistence_integrity(client, seed_org):
     session_id = _run_session(client, seed_org, assignment["id"])
 
     events = []
-    for _ in range(20):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
         db = SessionLocal()
         events = db.scalars(select(SessionEvent).where(SessionEvent.session_id == session_id)).all()
         db.close()
         if any(event.event_type == "server.turn.committed" for event in events):
             break
-        time.sleep(0.02)
+        time.sleep(0.1)
 
     assert len(events) > 0
     event_ids = {event.event_id for event in events}

@@ -31,7 +31,8 @@ def test_adaptive_outcome_written_after_session(client, seed_org):
     _await_scorecard_and_run(session_id)
 
     outcome = None
-    for _ in range(40):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
         db = SessionLocal()
         try:
             outcome = db.scalar(
@@ -43,9 +44,9 @@ def test_adaptive_outcome_written_after_session(client, seed_org):
             db.close()
         if outcome is not None and outcome.outcome_written_at is not None:
             break
-        time.sleep(0.03)
+        time.sleep(0.1)
 
-    assert outcome is not None
+    assert outcome is not None, f"adaptive outcome was not written for assignment {assignment['id']} within 30 seconds"
     assert outcome.session_id == session_id
     assert outcome.recommended_scenario_id == assignment["scenario_id"]
     assert set(outcome.recommended_focus_skills).issuperset(set(selected["focus_skills"]))

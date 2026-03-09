@@ -46,11 +46,31 @@ def configure_test_runtime() -> Iterator[None]:
     voice_ws.providers = ProviderSuite.from_settings(settings)
 
 
-@pytest.fixture(autouse=True)
-def reset_db(configure_test_runtime) -> None:
-    invalidate_objection_cache()
+@pytest.fixture(scope="session", autouse=True)
+def initialize_test_db() -> None:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+
+
+@pytest.fixture(autouse=True)
+def reset_db(configure_test_runtime, initialize_test_db) -> None:
+    invalidate_objection_cache()
+    with engine.begin() as connection:
+        if connection.dialect.name == "postgresql":
+            table_names = [table.name for table in Base.metadata.sorted_tables]
+            if table_names:
+                quoted_table_names = ", ".join(f'"{table_name}"' for table_name in table_names)
+                connection.exec_driver_sql(f"TRUNCATE TABLE {quoted_table_names} RESTART IDENTITY CASCADE")
+            return
+
+        if connection.dialect.name == "sqlite":
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        try:
+            for table in reversed(Base.metadata.sorted_tables):
+                connection.execute(table.delete())
+        finally:
+            if connection.dialect.name == "sqlite":
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
 
 
 @pytest.fixture()

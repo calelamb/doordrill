@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy import text as sql_text
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -57,8 +58,11 @@ class DocumentRetrievalService:
 
         query_vector = self._embed_query(normalized_query)
         dialect_name = db.bind.dialect.name if db.bind is not None else ""
-        if dialect_name == "postgresql":
-            rows = self._retrieve_postgres(db, org_id=org_id, query_vector=query_vector, k=k)
+        if dialect_name == "postgresql" and self._supports_postgres_vector_search(db):
+            try:
+                rows = self._retrieve_postgres(db, org_id=org_id, query_vector=query_vector, k=k)
+            except DBAPIError:
+                rows = self._retrieve_python(db, org_id=org_id, query_vector=query_vector, k=k)
         else:
             rows = self._retrieve_python(db, org_id=org_id, query_vector=query_vector, k=k)
 
@@ -168,6 +172,20 @@ class DocumentRetrievalService:
             )
             for row in rows
         ]
+
+    def _supports_postgres_vector_search(self, db: Session) -> bool:
+        bind = db.bind
+        if bind is None or bind.dialect.name != "postgresql":
+            return False
+
+        embedding_type = OrgDocumentChunk.__table__.c.embedding.type.load_dialect_impl(bind.dialect)
+        if embedding_type.__class__.__name__.lower() != "vector":
+            return False
+
+        try:
+            return bool(db.scalar(sql_text("SELECT to_regtype('vector') IS NOT NULL")))
+        except DBAPIError:
+            return False
 
     def _retrieve_python(
         self,

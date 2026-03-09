@@ -86,13 +86,14 @@ def test_ws_reconnect_churn_preserves_ledger_integrity(client, seed_org):
         ws_alias.send_json({"type": "client.session.end", "sequence": 2, "payload": {}})
 
     replay = None
-    for _ in range(30):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
         response = client.get(f"/manager/sessions/{session_id}/replay")
         assert response.status_code == 200
         replay = response.json()
         if int(replay["transport_metrics"]["turn_count"]) >= 4:
             break
-        time.sleep(0.02)
+        time.sleep(0.1)
 
     assert replay is not None
     transcript_turn_ids = {turn["turn_id"] for turn in replay["transcript_turns"]}

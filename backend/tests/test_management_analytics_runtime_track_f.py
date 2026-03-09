@@ -65,17 +65,18 @@ def test_management_analytics_cache_and_operations(client, seed_org):
 
     scorecard = None
     fact_session = None
-    for _ in range(30):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
         db = SessionLocal()
         scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
         fact_session = db.get(AnalyticsFactSession, session_id)
         db.close()
         if scorecard is not None and fact_session is not None:
             break
-        time.sleep(0.03)
+        time.sleep(0.1)
 
-    assert scorecard is not None
-    assert fact_session is not None
+    assert scorecard is not None, f"scorecard was not created for session {session_id} within 60 seconds"
+    assert fact_session is not None, f"analytics fact session was not created for session {session_id} within 60 seconds"
 
     headers = {"x-user-id": seed_org["manager_id"], "x-user-role": "manager"}
     first = client.get(

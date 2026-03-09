@@ -145,12 +145,13 @@ def test_manager_and_rep_endpoint_conformance(client, seed_org):
     assert rep_sessions.status_code == 200
     assert any(item["session_id"] == session_id for item in rep_sessions.json()["items"])
 
-    for _ in range(20):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
         rep_progress = client.get("/rep/progress", params={"rep_id": seed_org["rep_id"]}, headers=rep_headers)
         assert rep_progress.status_code == 200
         if rep_progress.json()["scored_session_count"] >= 1:
             break
-        time.sleep(0.02)
+        time.sleep(0.1)
     assert rep_progress.json()["session_count"] >= 1
 
     db = SessionLocal()

@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.postprocess_run import PostprocessRun
+from app.models.session import Session as DrillSession
+from app.models.user import User
 from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.grading_service import GradingService
 from app.services.notification_service import NotificationService
@@ -86,6 +88,27 @@ class SessionPostprocessService:
                 enrichment = self.turn_enrichment_service.enrich_session(db, session_id)
                 adaptive_outcome = self.adaptive_training_service.write_recommendation_outcome(db, session_id=session_id)
                 warehouse_write = self.warehouse_etl_service.write_session(db, session_id)
+                org_id = db.scalar(
+                    select(User.org_id).join(DrillSession, DrillSession.rep_id == User.id).where(DrillSession.id == session_id)
+                )
+                if org_id is None:
+                    logger.warning(
+                        "Skipping predictive aggregate refresh after session write; org_id could not be resolved",
+                        extra={"session_id": session_id},
+                    )
+                else:
+                    try:
+                        refresh_result = self.warehouse_etl_service.refresh_predictive_aggregates(db, org_id=org_id)
+                        logger.debug(
+                            "Predictive aggregates refreshed after session write",
+                            extra={"session_id": session_id, "org_id": org_id, "refresh_result": refresh_result},
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Predictive aggregate refresh failed after session write",
+                            exc_info=True,
+                            extra={"session_id": session_id, "org_id": org_id},
+                        )
                 payload = {
                     "scorecard_id": result.id,
                     "turn_enrichment": enrichment,

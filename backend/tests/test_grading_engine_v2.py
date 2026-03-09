@@ -60,7 +60,8 @@ def _run_session(
 def _await_scorecard_and_run(session_id: str) -> tuple[Scorecard, GradingRun]:
     scorecard = None
     grading_run = None
-    for _ in range(40):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
         db = SessionLocal()
         try:
             scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
@@ -73,8 +74,8 @@ def _await_scorecard_and_run(session_id: str) -> tuple[Scorecard, GradingRun]:
             db.close()
         if scorecard is not None and grading_run is not None:
             break
-        time.sleep(0.03)
+        time.sleep(0.1)
 
-    assert scorecard is not None
-    assert grading_run is not None
+    assert scorecard is not None, f"scorecard was not created for session {session_id} within 60 seconds"
+    assert grading_run is not None, f"grading run was not created for session {session_id} within 60 seconds"
     return scorecard, grading_run

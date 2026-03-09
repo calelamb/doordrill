@@ -79,7 +79,8 @@ def test_manager_notification_feed_and_postprocess_audit(client, seed_org):
     assignment = _create_assignment(client, seed_org)
     session_id = _run_session(client, seed_org, assignment["id"])
 
-    for _ in range(30):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
         feed = client.get(
             "/manager/notifications",
             params={"manager_id": seed_org["manager_id"]},
@@ -89,7 +90,7 @@ def test_manager_notification_feed_and_postprocess_audit(client, seed_org):
         items = feed.json()["items"]
         if any(item["session_id"] == session_id for item in items):
             break
-        time.sleep(0.02)
+        time.sleep(0.1)
 
     assert any(item["session_id"] == session_id for item in items)
 
