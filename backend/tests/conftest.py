@@ -1,28 +1,55 @@
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import inspect
 
+from app.core.config import get_settings
 from app.main import app
 from app.db.session import SessionLocal, engine
 from app.models import Base
 from app.models.scenario import Scenario
 from app.models.user import Organization, Team, User
 from app.models.types import UserRole
+from app.services.conversation_orchestrator import invalidate_objection_cache
+from app.services.provider_clients import ProviderSuite
+from app.voice import ws as voice_ws
 
 
 @pytest.fixture(autouse=True)
-def reset_db() -> None:
-    with engine.begin() as connection:
-        inspector = inspect(connection)
-        table_names = inspector.get_table_names()
-        if table_names:
-            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
-            for table_name in table_names:
-                connection.exec_driver_sql(f'DROP TABLE IF EXISTS "{table_name}"')
-            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+def configure_test_runtime() -> Iterator[None]:
+    settings = get_settings()
+    original_values = {
+        "stt_provider": settings.stt_provider,
+        "llm_provider": settings.llm_provider,
+        "tts_provider": settings.tts_provider,
+        "use_celery": settings.use_celery,
+        "whisper_cleanup_enabled": settings.whisper_cleanup_enabled,
+        "manager_notification_email_enabled": settings.manager_notification_email_enabled,
+        "manager_notification_push_enabled": settings.manager_notification_push_enabled,
+    }
+
+    settings.stt_provider = "mock"
+    settings.llm_provider = "mock"
+    settings.tts_provider = "mock"
+    settings.use_celery = False
+    settings.whisper_cleanup_enabled = False
+    settings.manager_notification_email_enabled = False
+    settings.manager_notification_push_enabled = False
+    voice_ws.providers = ProviderSuite.from_settings(settings)
+
+    yield
+
+    for key, value in original_values.items():
+        setattr(settings, key, value)
+    voice_ws.providers = ProviderSuite.from_settings(settings)
+
+
+@pytest.fixture(autouse=True)
+def reset_db(configure_test_runtime) -> None:
+    invalidate_objection_cache()
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
 

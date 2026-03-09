@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import contextlib
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.transcript import ObjectionType
 from app.models.user import User
 
 if TYPE_CHECKING:
     from app.models.scenario import Scenario
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_STAGE = "door_knock"
@@ -103,7 +110,7 @@ DISMISSIVE_PHRASES = (
     "you need to",
     "you're wrong",
 )
-OBJECTION_KEYWORDS: dict[str, tuple[str, ...]] = {
+OBJECTION_KEYWORDS_FALLBACK: dict[str, tuple[str, ...]] = {
     "price": ("price", "cost", "budget", "expensive", "cheap"),
     "trust": ("trust", "licensed", "insured", "reviews", "guarantee", "reputation"),
     "timing": ("busy", "later", "not now", "quick", "minutes", "schedule", "time"),
@@ -111,6 +118,7 @@ OBJECTION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "incumbent_provider": ("already", "provider", "switch", "current", "using", "orkin"),
     "safety_environment": ("chemical", "kids", "pet", "environment", "safe", "safety"),
 }
+_OBJECTION_KEYWORDS_CACHE: dict[str, tuple[str, ...]] | None = None
 ATTITUDE_MARKERS = (
     ("hostile", "hostile"),
     ("angry", "hostile"),
@@ -154,12 +162,36 @@ HARMFUL_SIGNALS = {
     "ignores_objection",
     "high_difficulty_backfire",
 }
+EDGE_CASE_DIRECTIVES = {
+    "no_intro": (
+        "The rep did not introduce themselves or their company. "
+        "Ask who they are with before engaging further. Do not discuss pest control until they answer."
+    ),
+    "premature_close": (
+        "The rep is trying to close before you understand the offer. "
+        "Express confusion or mild pushback: 'I don't even know what you're selling yet.'"
+    ),
+    "ignored_objection_wall": (
+        "You have raised concerns that the rep keeps ignoring. "
+        "Firmly state you need to go and do not reopen the conversation this turn."
+    ),
+    "spouse_handoff_eligible": (
+        "You are considering but not ready to decide alone. "
+        "Tell the rep your partner would need to be part of this conversation."
+    ),
+}
 OBJECTION_RESOLUTION_SIGNALS: dict[str, frozenset[str]] = {
     "price": frozenset({"acknowledges_concern", "explains_value", "reduces_pressure"}),
+    "price_per_month": frozenset({"acknowledges_concern", "explains_value", "reduces_pressure"}),
     "trust": frozenset({"acknowledges_concern", "builds_rapport", "provides_proof"}),
+    "locked_in_contract": frozenset({"acknowledges_concern", "explains_value", "invites_dialogue"}),
     "timing": frozenset({"acknowledges_concern", "reduces_pressure", "invites_dialogue"}),
+    "not_right_now": frozenset({"acknowledges_concern", "reduces_pressure", "invites_dialogue"}),
     "spouse": frozenset({"acknowledges_concern", "reduces_pressure", "invites_dialogue"}),
     "incumbent_provider": frozenset({"acknowledges_concern", "explains_value", "provides_proof"}),
+    "skeptical_of_product": frozenset({"acknowledges_concern", "provides_proof", "explains_value"}),
+    "need": frozenset({"acknowledges_concern", "explains_value", "personalizes_pitch"}),
+    "decision_authority": frozenset({"acknowledges_concern", "reduces_pressure", "invites_dialogue"}),
     "safety_environment": frozenset({"acknowledges_concern", "provides_proof", "personalizes_pitch"}),
 }
 EMOTION_RESPONSE_STYLE = {
@@ -178,6 +210,74 @@ EMOTION_TRANSITION_HINTS = {
     "annoyed": "Be short and impatient. Ignored objections or closing pressure should move you toward hostile fast.",
     "hostile": "You are close to shutting the door. Only a clear de-escalation should move you back to annoyed.",
 }
+
+
+def invalidate_objection_cache() -> None:
+    global _OBJECTION_KEYWORDS_CACHE
+    _OBJECTION_KEYWORDS_CACHE = None
+
+
+def _merge_keyword_tuples(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for group in groups:
+        for keyword in group:
+            normalized = str(keyword).strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+    return tuple(ordered)
+
+
+def _expand_keyword_terms(raw_terms: list[str]) -> tuple[str, ...]:
+    expanded: list[str] = []
+    for term in raw_terms:
+        normalized = str(term).strip().lower()
+        if not normalized:
+            continue
+        expanded.append(normalized)
+        tokens = [token for token in re.split(r"[^a-z0-9]+", normalized) if len(token) >= 4]
+        expanded.extend(tokens)
+        expanded.extend(" ".join(tokens[index:index + 2]) for index in range(len(tokens) - 1))
+    return _merge_keyword_tuples(tuple(expanded))
+
+
+def load_objection_keywords(db: Session) -> dict[str, tuple[str, ...]]:
+    global _OBJECTION_KEYWORDS_CACHE
+    if _OBJECTION_KEYWORDS_CACHE is not None:
+        return _OBJECTION_KEYWORDS_CACHE
+
+    try:
+        rows = db.scalars(
+            select(ObjectionType)
+            .where(ObjectionType.is_active.is_(True))
+            .order_by(ObjectionType.created_at.asc(), ObjectionType.slug.asc())
+        ).all()
+    except Exception:
+        logger.exception("Failed to load objection keywords from database")
+        return OBJECTION_KEYWORDS_FALLBACK
+
+    if not rows:
+        return OBJECTION_KEYWORDS_FALLBACK
+
+    keywords: dict[str, tuple[str, ...]] = {}
+    for row in rows:
+        slug = str(row.slug or "").strip()
+        if not slug:
+            continue
+        trigger_keywords = [str(item) for item in (row.trigger_keywords or []) if str(item).strip()]
+        keyword_tuple = _merge_keyword_tuples(
+            OBJECTION_KEYWORDS_FALLBACK.get(slug, ()),
+            _expand_keyword_terms(trigger_keywords),
+        )
+        keywords[slug] = _merge_keyword_tuples(keywords.get(slug, ()), keyword_tuple)
+
+    if not keywords:
+        return OBJECTION_KEYWORDS_FALLBACK
+
+    _OBJECTION_KEYWORDS_CACHE = keywords
+    return _OBJECTION_KEYWORDS_CACHE
 
 
 def _coerce_stage_sequence(stages: list[str] | None) -> list[str]:
@@ -214,9 +314,11 @@ class ConversationState:
     rep_turns: int = 0
     ai_turns: int = 0
     rapport_score: int = 0
+    persona_concerns: list[str] = field(default_factory=list)
     active_objections: list[str] = field(default_factory=list)
     queued_objections: list[str] = field(default_factory=list)
     resolved_objections: list[str] = field(default_factory=list)
+    active_edge_cases: list[str] = field(default_factory=list)
     objection_pressure: int = 0
     ignored_objection_streak: int = 0
     last_behavior_signals: list[str] = field(default_factory=list)
@@ -235,6 +337,7 @@ class RepTurnPlan:
     active_objections: list[str]
     queued_objections: list[str]
     resolved_objections: list[str]
+    active_edge_cases: list[str]
     behavioral_signals: list[str]
     objection_pressure_before: int
     objection_pressure_after: int
@@ -250,12 +353,29 @@ class HomeownerPersona:
     objection_queue: list[str]
     buy_likelihood: str
     softening_condition: str
+    household_type: str | None = None
+    home_ownership_years: int | None = None
+    pest_history: list[str] = field(default_factory=list)
+    price_sensitivity: str | None = None
+    communication_style: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "HomeownerPersona":
+        # Accepted scenario.persona keys:
+        # name, attitude, concerns, objection_queue, objections, buy_likelihood,
+        # softening_condition, household_type, home_ownership_years, pest_history,
+        # price_sensitivity, communication_style.
         data = payload or {}
         objections = data.get("objection_queue") or data.get("objections") or []
         concerns = data.get("concerns") or []
+        pest_history = data.get("pest_history") or []
+        home_ownership_years = None
+        raw_home_ownership_years = data.get("home_ownership_years")
+        if raw_home_ownership_years is not None:
+            with_value = str(raw_home_ownership_years).strip()
+            if with_value:
+                with contextlib.suppress(TypeError, ValueError):
+                    home_ownership_years = max(1, min(30, int(with_value)))
         return cls(
             name=str(data.get("name") or "Homeowner"),
             attitude=str(data.get("attitude") or "guarded"),
@@ -266,7 +386,95 @@ class HomeownerPersona:
                 data.get("softening_condition")
                 or "The rep becomes more credible when they sound specific, calm, and homeowner-focused."
             ),
+            household_type=str(data.get("household_type")).strip() if data.get("household_type") else None,
+            home_ownership_years=home_ownership_years,
+            pest_history=[str(item) for item in pest_history if str(item).strip()],
+            price_sensitivity=str(data.get("price_sensitivity")).strip().lower() if data.get("price_sensitivity") else None,
+            communication_style=str(data.get("communication_style")).strip().lower() if data.get("communication_style") else None,
         )
+
+
+class PersonaEnricher:
+    @classmethod
+    def enrich(
+        cls,
+        persona: HomeownerPersona,
+        difficulty: int,
+        scenario_description: str,
+    ) -> HomeownerPersona:
+        normalized_difficulty = max(1, min(5, int(difficulty or 1)))
+        description = scenario_description.lower()
+        updates: dict[str, Any] = {}
+
+        if persona.household_type is None:
+            updates["household_type"] = cls._default_household_type(persona, description)
+        if persona.home_ownership_years is None:
+            updates["home_ownership_years"] = cls._default_home_ownership_years(normalized_difficulty)
+        if not persona.pest_history:
+            updates["pest_history"] = cls._default_pest_history(normalized_difficulty, description)
+        if persona.price_sensitivity is None:
+            updates["price_sensitivity"] = cls._default_price_sensitivity(normalized_difficulty)
+        if persona.communication_style is None:
+            updates["communication_style"] = cls._default_communication_style(persona, normalized_difficulty, description)
+
+        if not updates:
+            return replace(persona, pest_history=list(persona.pest_history))
+        return replace(persona, **updates)
+
+    @staticmethod
+    def _default_household_type(persona: HomeownerPersona, description: str) -> str:
+        concern_text = " ".join(persona.concerns).lower()
+        combined_text = f"{persona.attitude.lower()} {description} {concern_text}"
+        if any(marker in combined_text for marker in ("kids", "family")):
+            return "family with kids"
+        if any(marker in combined_text for marker in ("retired", "senior")):
+            return "retired couple"
+        if "single" in combined_text:
+            return "single homeowner"
+        return "homeowner"
+
+    @staticmethod
+    def _default_home_ownership_years(difficulty: int) -> int:
+        if difficulty <= 1:
+            return 12
+        if difficulty == 2:
+            return 10
+        if difficulty == 3:
+            return 7
+        if difficulty == 4:
+            return 4
+        return 2
+
+    @staticmethod
+    def _default_pest_history(difficulty: int, description: str) -> list[str]:
+        pest_topic = PersonaEnricher._infer_pest_topic(description)
+        if difficulty <= 2:
+            return [f"rarely notices {pest_topic} issues around the home"]
+        if difficulty == 3:
+            return [f"had {pest_topic} last summer"]
+        return [f"has dealt with recurring {pest_topic} recently", "has tried DIY fixes before"]
+
+    @staticmethod
+    def _default_price_sensitivity(difficulty: int) -> str:
+        return "high" if difficulty >= 4 else "medium"
+
+    @staticmethod
+    def _default_communication_style(persona: HomeownerPersona, difficulty: int, description: str) -> str:
+        combined_text = f"{persona.attitude.lower()} {description}"
+        if difficulty <= 2:
+            return "terse"
+        if difficulty == 3:
+            return "chatty"
+        if any(marker in combined_text for marker in ("hostile", "angry", "annoyed", "irritated")):
+            return "confrontational"
+        return "analytical"
+
+    @staticmethod
+    def _infer_pest_topic(description: str) -> str:
+        for keyword in ("ants", "spiders", "rodents", "mice", "rats", "termites", "wasps", "bugs", "pests"):
+            if keyword in description:
+                return keyword
+        return "pest"
 
 
 @dataclass
@@ -324,10 +532,11 @@ class PromptBuilder:
     def template_blueprint(cls) -> str:
         return (
             "Layer 1: hardcoded homeowner immersion contract.\n"
-            "Layer 2: persona fields: name, attitude, concerns, objection_queue, buy_likelihood, softening_condition.\n"
+            "Layer 2: persona fields: name, attitude, concerns, objection_queue, buy_likelihood, softening_condition, household_type, home_ownership_years, pest_history, price_sensitivity, communication_style.\n"
             "Layer 3: stage-aware instructions covering DOOR_OPEN, LISTENING, OBJECTING, CONSIDERING, CLOSE_WINDOW, ENDED.\n"
             "Layer 3B: emotional state machine framing with resistance level, objection pressure, active objections, and latent objections.\n"
-            "Layer 4: anti-pattern guards for aggressive reps, off-topic reps, and reps asking for hints or coaching."
+            "Layer 4: anti-pattern guards for aggressive reps, off-topic reps, and reps asking for hints or coaching.\n"
+            "Layer 4B: edge case directives for missing intros, premature close attempts, repeated objection neglect, and spouse handoff moments."
         )
 
     def build(
@@ -344,6 +553,7 @@ class PromptBuilder:
         active_objections: list[str] | None = None,
         queued_objections: list[str] | None = None,
         resolved_objections: list[str] | None = None,
+        active_edge_cases: list[str] | None = None,
         behavioral_signals: list[str] | None = None,
     ) -> str:
         snapshot = scenario_snapshot or ScenarioSnapshot.from_scenario(scenario)
@@ -361,33 +571,53 @@ class PromptBuilder:
         unresolved_objections = active_objections or []
         latent_objections = queued_objections or []
         cleared_objections = resolved_objections or []
+        triggered_edge_cases = active_edge_cases or []
         observed_signals = behavioral_signals or []
         emotional_guidance = EMOTION_RESPONSE_STYLE.get(emotional_state, EMOTION_RESPONSE_STYLE["neutral"])
         transition_hint = EMOTION_TRANSITION_HINTS.get(emotional_state, EMOTION_TRANSITION_HINTS["neutral"])
+        response_cap = self._response_cap_rule(canonical_stage)
+        internal_rule = self._internal_thought_rule(canonical_stage)
+        hard_rule = (
+            f"RULE: Respond in ONE sentence only. {response_cap} "
+            "You are a busy homeowner at your front door. Be blunt and brief."
+        )
 
         layer_one = (
             "LAYER 1 - IMMERSION CONTRACT\n"
             "You are a real homeowner in a live door-to-door roleplay.\n"
             "Never break character.\n"
-            "Respond in 1-3 short sentences only. You are a real person at your front door - busy, brief, and realistic.\n"
-            "Never write more than 2-3 sentences per response.\n"
+            "Respond in one sentence only.\n"
+            f"{response_cap}\n"
             "React only to what the rep actually says.\n"
             "Do not volunteer extra information the rep has not earned.\n"
-            "Do not narrate internal thoughts, coaching notes, scoring, or model behavior."
+            f"{internal_rule}"
         )
-        layer_two = (
-            "LAYER 2 - PERSONA PROFILE\n"
-            f"Scenario: {scenario_name}\n"
-            f"Scenario difficulty: {difficulty}\n"
-            f"Scenario description: {scenario_description}\n"
-            f"Scenario stages: {scenario_stages}\n"
-            f"Name: {persona.name}\n"
-            f"Attitude: {persona.attitude}\n"
-            f"Concerns: {', '.join(persona.concerns) or 'none listed'}\n"
-            f"Objection queue: {', '.join(persona.objection_queue) or 'none listed'}\n"
-            f"Buy likelihood: {persona.buy_likelihood}\n"
-            f"Softening condition: {persona.softening_condition}"
-        )
+        layer_two_lines = [
+            "LAYER 2 - PERSONA PROFILE",
+            f"Scenario: {scenario_name}",
+            f"Scenario difficulty: {difficulty}",
+            f"Scenario description: {scenario_description}",
+            f"Scenario stages: {scenario_stages}",
+            f"Name: {persona.name}",
+            f"Attitude: {persona.attitude}",
+            f"Concerns: {', '.join(persona.concerns) or 'none listed'}",
+            f"Objection queue: {', '.join(persona.objection_queue) or 'none listed'}",
+            f"Buy likelihood: {persona.buy_likelihood}",
+            f"Softening condition: {persona.softening_condition}",
+        ]
+        if persona.household_type:
+            layer_two_lines.append(f"Household: {persona.household_type}")
+        if persona.home_ownership_years is not None:
+            layer_two_lines.append(f"Owned home for: {persona.home_ownership_years} years")
+        if persona.pest_history:
+            layer_two_lines.append(f"Pest history: {', '.join(persona.pest_history)}")
+        if persona.price_sensitivity:
+            layer_two_lines.append(f"Price sensitivity: {persona.price_sensitivity}")
+        if persona.communication_style:
+            layer_two_lines.append(
+                f"Communication style: {persona.communication_style} - respond accordingly."
+            )
+        layer_two = "\n".join(layer_two_lines)
         layer_three = (
             "LAYER 3 - STAGE INSTRUCTIONS\n"
             f"Current stage: {canonical_stage}\n"
@@ -418,12 +648,28 @@ class PromptBuilder:
             "If the rep says something unrealistic or false, challenge it like a real homeowner.\n"
             "Do not compliment the rep for technique. Do not expose scoring criteria."
         )
+        layer_four_b = None
+        if triggered_edge_cases:
+            directives = [
+                EDGE_CASE_DIRECTIVES[tag]
+                for tag in triggered_edge_cases
+                if tag in EDGE_CASE_DIRECTIVES
+            ]
+            if directives:
+                layer_four_b = "LAYER 4B - EDGE CASE DIRECTIVES\n" + "\n".join(directives)
         version_line = f"Prompt version: {prompt_version or 'conversation_v1'}"
-        return "\n\n".join([version_line, layer_one, layer_two, layer_three, layer_three_b, layer_four])
+        parts = [hard_rule, version_line, layer_one, layer_two, layer_three, layer_three_b, layer_four]
+        if layer_four_b:
+            parts.append(layer_four_b)
+        return "\n\n".join(parts)
 
     def build_from_scenario(self, scenario: "Scenario | None", stage: str, prompt_version: str | None = None) -> str:
         snapshot = ScenarioSnapshot.from_scenario(scenario)
-        persona = HomeownerPersona.from_payload(snapshot.persona_payload)
+        persona = PersonaEnricher.enrich(
+            HomeownerPersona.from_payload(snapshot.persona_payload),
+            snapshot.difficulty,
+            snapshot.description,
+        )
         return self.build(
             scenario=scenario,
             scenario_snapshot=snapshot,
@@ -439,6 +685,18 @@ class PromptBuilder:
         if upper in self.STAGE_GUIDANCE:
             return upper
         return self.INTERNAL_STAGE_MAP.get(stage, "LISTENING")
+
+    def _response_cap_rule(self, canonical_stage: str) -> str:
+        if canonical_stage in {"DOOR_OPEN", "ENDED"}:
+            return "Maximum 10 words."
+        if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW"}:
+            return "Maximum 30 words. You may think out loud briefly."
+        return "Maximum 20 words."
+
+    def _internal_thought_rule(self, canonical_stage: str) -> str:
+        if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW"}:
+            return "Brief natural thinking out loud is allowed. Do not expose coaching notes, scoring, or model behavior."
+        return "Do not narrate internal thoughts, coaching notes, scoring, or model behavior."
 
 
 class ConversationOrchestrator:
@@ -476,6 +734,7 @@ class ConversationOrchestrator:
             org_id=org_id,
             territory_context=territory_context,
         )
+        context.persona = self._enrich_persona(context.persona, context.scenario_snapshot)
         self._contexts[session_id] = context
 
         state = self._states.get(session_id)
@@ -531,10 +790,15 @@ class ConversationOrchestrator:
             prompt_version=prompt_version,
             org_id=resolved_org_id,
         )
+        context.persona = self._enrich_persona(context.persona, context.scenario_snapshot)
         self._contexts[session_id] = context
 
         if session_id not in self._states:
             self._states[session_id] = self._initialize_state_from_context(context)
+            return
+
+        state = self._states[session_id]
+        state.persona_concerns = list(context.persona.concerns)
 
     def clear_session_context(self, session_id: str) -> None:
         self._contexts.pop(session_id, None)
@@ -543,16 +807,19 @@ class ConversationOrchestrator:
     def end_session(self, session_id: str) -> None:
         self.clear_session_context(session_id)
 
-    def prepare_rep_turn(self, session_id: str, rep_text: str) -> RepTurnPlan:
+    def prepare_rep_turn(self, session_id: str, rep_text: str, db: Session | None = None) -> RepTurnPlan:
         state = self.get_state(session_id)
         context = self._contexts.get(session_id)
 
         stage_before = state.stage
         emotion_before = state.emotion
         objection_pressure_before = state.objection_pressure
+        turn_number = state.rep_turns + 1
+        active_edge_cases = self._detect_edge_cases(rep_text, state, turn_number)
+        state.active_edge_cases = list(active_edge_cases)
 
-        objection_tags = self._extract_objection_tags(rep_text)
-        stage_after = self._detect_stage(rep_text, state, context)
+        objection_tags = self._extract_objection_tags(rep_text, db=db)
+        stage_after = self._detect_stage(rep_text, state, context, objection_tags=objection_tags)
         assessment = self._evaluate_rep_behavior(rep_text, state, objection_tags, context)
 
         state.rep_turns += 1
@@ -597,6 +864,7 @@ class ConversationOrchestrator:
             active_objections=list(state.active_objections),
             queued_objections=list(state.queued_objections),
             resolved_objections=list(resolved_objections),
+            active_edge_cases=list(state.active_edge_cases),
             behavioral_signals=assessment.signals,
             objection_pressure_before=objection_pressure_before,
             objection_pressure_after=state.objection_pressure,
@@ -610,6 +878,7 @@ class ConversationOrchestrator:
         state.last_updated = datetime.now(timezone.utc)
 
     def _initialize_state_from_context(self, context: SessionPromptContext) -> ConversationState:
+        context.persona = self._enrich_persona(context.persona, context.scenario_snapshot)
         starting_emotion = self._determine_starting_emotion(context.scenario_snapshot)
         seeded_objections = self._seed_objections(
             context.scenario_snapshot.persona_payload,
@@ -627,6 +896,7 @@ class ConversationOrchestrator:
             stage=stage,
             emotion=starting_emotion,
             resistance_level=self._emotion_to_resistance(starting_emotion),
+            persona_concerns=list(context.persona.concerns),
             active_objections=active_objections,
             queued_objections=queued_objections,
             resolved_objections=[],
@@ -650,12 +920,16 @@ class ConversationOrchestrator:
                 active_objections=list(state.active_objections) if state is not None else [],
                 queued_objections=list(state.queued_objections) if state is not None else [],
                 resolved_objections=list(state.resolved_objections) if state is not None else [],
+                active_edge_cases=list(state.active_edge_cases) if state is not None else [],
                 behavioral_signals=list(state.last_behavior_signals) if state is not None else [],
             )
             return prompt
 
         fallback_snapshot = ScenarioSnapshot()
-        fallback_persona = HomeownerPersona.from_payload(fallback_snapshot.persona_payload)
+        fallback_persona = self._enrich_persona(
+            HomeownerPersona.from_payload(fallback_snapshot.persona_payload),
+            fallback_snapshot,
+        )
         return self._prompt_builder.build(
             scenario=None,
             scenario_snapshot=fallback_snapshot,
@@ -668,14 +942,43 @@ class ConversationOrchestrator:
             active_objections=list(state.active_objections) if state is not None else [],
             queued_objections=list(state.queued_objections) if state is not None else [],
             resolved_objections=list(state.resolved_objections) if state is not None else [],
+            active_edge_cases=list(state.active_edge_cases) if state is not None else [],
             behavioral_signals=list(state.last_behavior_signals) if state is not None else [],
         )
+
+    def _enrich_persona(self, persona: HomeownerPersona, snapshot: ScenarioSnapshot) -> HomeownerPersona:
+        return PersonaEnricher.enrich(persona, snapshot.difficulty, snapshot.description)
+
+    def _detect_edge_cases(self, rep_text: str, state: ConversationState, turn_number: int) -> list[str]:
+        text = rep_text.lower()
+        edge_cases: list[str] = []
+
+        if turn_number == 1 and not any(phrase in text for phrase in ("my name", "i'm", "i am", "with")):
+            edge_cases.append("no_intro")
+
+        if any(phrase in text for phrase in ("sign", "schedule", "appointment", "set up")) and self._is_pre_objection_stage(state.stage):
+            edge_cases.append("premature_close")
+
+        if state.ignored_objection_streak >= 3:
+            edge_cases.append("ignored_objection_wall")
+
+        concerns_text = " ".join(state.persona_concerns).lower()
+        if (
+            state.stage == "considering"
+            and state.objection_pressure <= 2
+            and any(marker in concerns_text for marker in ("husband", "wife", "partner", "spouse"))
+        ):
+            edge_cases.append("spouse_handoff_eligible")
+
+        return edge_cases
 
     def _detect_stage(
         self,
         rep_text: str,
         state: ConversationState,
         context: SessionPromptContext | None,
+        *,
+        objection_tags: list[str] | None = None,
     ) -> str:
         text = rep_text.lower()
         stages = context.scenario_snapshot.stages if context is not None else list(DEFAULT_STAGE_SEQUENCE)
@@ -694,7 +997,7 @@ class ConversationOrchestrator:
             phrase in text for phrase in ("fair", "would it make sense", "if i could", "what if", "so the idea", "based on that")
         ):
             return considering_stage
-        if any(keyword in text for keywords in OBJECTION_KEYWORDS.values() for keyword in keywords):
+        if objection_tags:
             return objection_stage
         if state.stage == first_stage and any(word in text for word in ("name", "company", "hi", "hello")):
             return pitch_stage
@@ -825,16 +1128,17 @@ class ConversationOrchestrator:
                     seeded.append(normalized)
 
         text = description.lower()
-        for tag, keywords in OBJECTION_KEYWORDS.items():
+        for tag, keywords in OBJECTION_KEYWORDS_FALLBACK.items():
             if any(keyword in text for keyword in keywords) and tag not in seeded:
                 seeded.append(tag)
 
         return seeded
 
-    def _extract_objection_tags(self, rep_text: str) -> list[str]:
+    def _extract_objection_tags(self, rep_text: str, db: Session | None = None) -> list[str]:
         text = rep_text.lower()
+        objection_keywords = load_objection_keywords(db) if db is not None else OBJECTION_KEYWORDS_FALLBACK
         tags: list[str] = []
-        for tag, keywords in OBJECTION_KEYWORDS.items():
+        for tag, keywords in objection_keywords.items():
             if any(keyword in text for keyword in keywords):
                 tags.append(tag)
         return tags
@@ -843,18 +1147,30 @@ class ConversationOrchestrator:
         normalized = value.strip().lower().replace(" ", "_")
         if not normalized:
             return None
-        if normalized in OBJECTION_KEYWORDS:
+        if normalized in OBJECTION_KEYWORDS_FALLBACK:
             return normalized
+        if normalized in {"monthly_bill", "monthly_cost", "per_month", "price_per_month"}:
+            return "price_per_month"
+        if normalized in {"contract", "under_contract", "locked_in_contract"}:
+            return "locked_in_contract"
         if normalized in {"busy", "later", "not_now", "schedule", "timing"}:
             return "timing"
+        if normalized in {"not_right_now", "come_back_later"}:
+            return "not_right_now"
         if normalized in {"wife", "husband", "partner", "family", "spouse"}:
             return "spouse"
         if normalized in {"provider", "already", "current_service", "current_provider", "incumbent"}:
             return "incumbent_provider"
+        if normalized in {"product_claims", "too_good_to_be_true", "skeptical_of_product"}:
+            return "skeptical_of_product"
         if normalized in {"kids", "kid", "pet", "pets", "environment", "chemical", "safety"}:
             return "safety_environment"
         if normalized in {"value", "hidden_fees", "wasted_money", "risk"}:
             return "price"
+        if normalized in {"need", "no_need", "dont_need", "don't_need"}:
+            return "need"
+        if normalized in {"landlord", "decision_maker", "decision_authority"}:
+            return "decision_authority"
         return normalized
 
     def _find_stage(self, stages: list[str], markers: tuple[str, ...], *, fallback: str) -> str:
@@ -863,6 +1179,12 @@ class ConversationOrchestrator:
             if any(marker in lowered for marker in markers):
                 return stage
         return fallback
+
+    def _is_pre_objection_stage(self, stage: str) -> bool:
+        lowered = stage.lower()
+        if any(marker in lowered for marker in ("objection", "consider", "close", "end")):
+            return False
+        return True
 
     def _initial_active_objection_count(self, *, starting_emotion: str, difficulty: int, seeded_objection_count: int) -> int:
         if seeded_objection_count == 0:

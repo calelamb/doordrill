@@ -55,10 +55,21 @@ storage_service = StorageService()
 
 SILENCE_FILLER_SECONDS = 4.0
 MAX_RUNTIME_PAUSE_MS = 60
-HOMEOWNER_MAX_TOKENS = 30
 TTS_STREAM_TIMEOUT_SECONDS = 6
 WS_KEEPALIVE_TIMEOUT_SECONDS = 120
 WS_KEEPALIVE_INTERVAL_SECONDS = 30
+
+
+def homeowner_token_budget(stage: str) -> int:
+    stage_budgets = {
+        "door_knock": 15,
+        "initial_pitch": 28,
+        "objection_handling": 30,
+        "considering": 45,
+        "close_attempt": 40,
+        "ended": 12,
+    }
+    return stage_budgets.get(stage, 28)
 
 
 def _normalize_ts(value: datetime) -> datetime:
@@ -614,7 +625,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 rep_text=prompt_text,
                 stage=stage,
                 system_prompt=system_prompt,
-                max_tokens=HOMEOWNER_MAX_TOKENS,
+                max_tokens=homeowner_token_budget(stage),
             ):
                 if interrupt_signal_at is not None:
                     ai_interrupted = True
@@ -875,7 +886,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 )
                 continue
 
-            plan = orchestrator.prepare_rep_turn(session_id=session_id, rep_text=rep_text)
+            plan = orchestrator.prepare_rep_turn(session_id=session_id, rep_text=rep_text, db=db)
+            if plan.active_edge_cases:
+                await emit_server_event("server.edge_case.triggered", {"tags": plan.active_edge_cases})
+                await maybe_flush()
             next_turn_index = _next_turn_index()
             rep_started_at, rep_ended_at = _derive_rep_turn_window(msg)
 

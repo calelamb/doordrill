@@ -750,7 +750,7 @@ def delete_manager_document(
         raise HTTPException(status_code=404, detail="document not found")
 
     storage_key = document.storage_key
-    db.execute(delete(OrgDocument).where(OrgDocument.id == document.id))
+    db.delete(document)
     db.commit()
     storage_service.delete_object(storage_key)
     return DocumentDeleteResponse(document_id=document_id)

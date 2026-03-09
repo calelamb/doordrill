@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from app.models.base import Base, TimestampMixin
 
@@ -55,3 +55,8 @@ class ObjectionType(Base, TimestampMixin):
     resolution_techniques: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     version: Mapped[str] = mapped_column(String(16), nullable=False, default="1.0")
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # Compatibility aliases for the newer taxonomy bridge naming.
+    slug = synonym("tag")
+    trigger_keywords = synonym("typical_phrases")
+    is_active = synonym("active")
