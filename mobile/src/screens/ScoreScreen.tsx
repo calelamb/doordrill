@@ -13,7 +13,8 @@ import {
   View,
   ViewStyle,
 } from "react-native";
-import { ArrowRight, ChevronDown, ChevronUp, FileText, Share2, UserCircle } from "lucide-react-native";
+import * as Haptics from "expo-haptics";
+import { ArrowRight, ChevronDown, ChevronUp, FileText, Share2, Star, TrendingUp, UserCircle } from "lucide-react-native";
 import Animated, {
   FadeInDown,
   interpolate,
@@ -27,10 +28,10 @@ import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 
 import { RootStackParamList } from "../navigation/types";
-import { fetchRepPlan, fetchRepScenario, fetchRepSession } from "../services/api";
+import { fetchRepPlan, fetchRepProgress, fetchRepScenario, fetchRepSession } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { CategoryScoreDetail, RepPlan, RepSessionDetail, ScenarioBrief, TranscriptTurn } from "../types";
+import { CategoryScoreDetail, RepPlan, RepProgress, RepSessionDetail, ScenarioBrief, TranscriptTurn } from "../types";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Score">;
 
@@ -58,6 +59,14 @@ const CATEGORY_INITIALS: Record<CategoryKey, string> = {
   objection_handling: "OH",
   closing_technique: "C",
   professionalism: "PR",
+};
+
+const CATEGORY_LABELS: Record<CategoryKey, string> = {
+  opening: "Opening",
+  pitch_delivery: "Pitch",
+  objection_handling: "Objection Handling",
+  closing_technique: "Closing",
+  professionalism: "Professionalism",
 };
 
 const POSITIVE_SIGNALS = new Set([
@@ -504,6 +513,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   const { sessionId } = route.params;
   const [data, setData] = useState<RepSessionDetail | null>(null);
   const [plan, setPlan] = useState<RepPlan | null>(null);
+  const [progress, setProgress] = useState<RepProgress | null>(null);
   const [scenario, setScenario] = useState<ScenarioBrief | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -516,6 +526,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   const [tabSwitcherWidth, setTabSwitcherWidth] = useState(0);
 
   const heroBarAnim = useRef(new RNAnimated.Value(0)).current;
+  const celebratedPersonalBestRef = useRef<string | null>(null);
   const transcriptScrollRef = useRef<ScrollView | null>(null);
   const transcriptTurnOffsetsRef = useRef<Record<string, number>>({});
 
@@ -581,6 +592,15 @@ export function ScoreScreen({ route, navigation }: Props) {
   const weaknessTags = scorecard?.weakness_tags ?? [];
   const nextScenarioSuggestion = plan?.next_scenario_suggestion ?? null;
   const focusSkills = plan?.focus_skills ?? [];
+  const personalBestScore = progress?.personal_best ?? null;
+  const showPersonalBestBanner = Boolean(scorecard && progress && (personalBestScore === null || overallScore >= personalBestScore));
+  const mostImprovedBadge =
+    progress?.most_improved_category && typeof progress.most_improved_delta === "number" && progress.most_improved_delta > 1
+      ? {
+          label: CATEGORY_LABELS[progress.most_improved_category as CategoryKey] ?? titleCase(progress.most_improved_category),
+          delta: progress.most_improved_delta,
+        }
+      : null;
 
   const readinessHint = useMemo(() => {
     if (!plan) {
@@ -643,6 +663,42 @@ export function ScoreScreen({ route, navigation }: Props) {
       cancelled = true;
     };
   }, [repId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadProgress() {
+      if (!repId) {
+        return;
+      }
+
+      try {
+        const result = await fetchRepProgress(repId);
+        if (!cancelled) {
+          setProgress(result);
+        }
+      } catch {
+        if (!cancelled) {
+          setProgress(null);
+        }
+      }
+    }
+
+    void loadProgress();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [repId]);
+
+  useEffect(() => {
+    if (!showPersonalBestBanner || !scorecard?.id || celebratedPersonalBestRef.current === scorecard.id) {
+      return;
+    }
+
+    celebratedPersonalBestRef.current = scorecard.id;
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+  }, [scorecard?.id, showPersonalBestBanner]);
 
   useEffect(() => {
     const width = Math.max(0, (tabSwitcherWidth - 8) / 2);
@@ -771,6 +827,16 @@ export function ScoreScreen({ route, navigation }: Props) {
     return (
       <>
         <Text style={styles.sectionTitle}>PERFORMANCE BREAKDOWN</Text>
+        {mostImprovedBadge ? (
+          <Animated.View entering={FadeInDown.delay(300).springify()} style={styles.mostImprovedBadgeWrap}>
+            <View style={styles.mostImprovedBadge}>
+              <TrendingUp size={14} color={colors.accent} />
+              <Text style={styles.mostImprovedBadgeText}>
+                {`Most improved: ${mostImprovedBadge.label} +${mostImprovedBadge.delta.toFixed(1)} vs your first sessions`}
+              </Text>
+            </View>
+          </Animated.View>
+        ) : null}
         <BlurView intensity={40} tint="light" style={styles.categoriesContainer}>
           {categories.map((category, index) => (
             <ExpandableCategoryBar
@@ -1034,6 +1100,14 @@ export function ScoreScreen({ route, navigation }: Props) {
                 <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
                 <Text style={styles.heroLabel}>Overall Score</Text>
               </Animated.View>
+              {showPersonalBestBanner ? (
+                <Animated.View entering={FadeInDown.delay(180).springify()} style={styles.personalBestBannerWrap}>
+                  <LinearGradient colors={["#FDE68A", "#F59E0B"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.personalBestBanner}>
+                    <Star size={14} color="#7C2D12" fill="#FDE68A" />
+                    <Text style={styles.personalBestBannerText}>NEW PERSONAL BEST</Text>
+                  </LinearGradient>
+                </Animated.View>
+              ) : null}
               <View style={styles.heroBarTrack}>
                 <RNAnimated.View
                   style={[
@@ -1193,6 +1267,28 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     marginTop: 4,
   },
+  personalBestBannerWrap: {
+    marginBottom: 10,
+  },
+  personalBestBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    shadowColor: "#F59E0B",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    elevation: 4,
+  },
+  personalBestBannerText: {
+    fontSize: 12,
+    color: "#7C2D12",
+    fontFamily: "Poppins_800ExtraBold",
+    letterSpacing: 0.6,
+  },
   heroBarTrack: {
     width: "100%",
     height: 4,
@@ -1259,6 +1355,26 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginTop: 28,
     marginBottom: 8,
+  },
+  mostImprovedBadgeWrap: {
+    marginBottom: 10,
+  },
+  mostImprovedBadge: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: colors.accentSoft,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(22, 101, 52, 0.2)",
+  },
+  mostImprovedBadgeText: {
+    fontSize: 12,
+    color: colors.accent,
+    fontFamily: "Poppins_600SemiBold",
   },
   sectionTitleCompact: {
     fontSize: 12,

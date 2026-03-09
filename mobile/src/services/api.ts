@@ -116,6 +116,27 @@ function normalizeRepPlan(plan: RepPlan): RepPlan {
   };
 }
 
+function normalizeRepProgress(progress: RepProgress): RepProgress {
+  return {
+    ...progress,
+    session_count: typeof progress.session_count === "number" ? progress.session_count : 0,
+    scored_session_count: typeof progress.scored_session_count === "number" ? progress.scored_session_count : 0,
+    completed_drills:
+      typeof progress.completed_drills === "number"
+        ? progress.completed_drills
+        : typeof progress.scored_session_count === "number"
+          ? progress.scored_session_count
+          : 0,
+    average_score: typeof progress.average_score === "number" ? progress.average_score : null,
+    streak_days: typeof progress.streak_days === "number" ? progress.streak_days : 0,
+    personal_best: typeof progress.personal_best === "number" ? progress.personal_best : null,
+    personal_best_session_id: progress.personal_best_session_id ?? null,
+    most_improved_category: progress.most_improved_category ?? null,
+    most_improved_delta: typeof progress.most_improved_delta === "number" ? progress.most_improved_delta : null,
+    last_scored_session_at: progress.last_scored_session_at ?? null,
+  };
+}
+
 export async function checkApiReachable(timeoutMs = 3500): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -182,7 +203,8 @@ export async function fetchRepProgress(repId: string): Promise<RepProgress> {
   const response = await fetch(`${API_BASE_URL}/rep/progress?rep_id=${encodeURIComponent(repId)}`, {
     headers: repHeaders(repId)
   });
-  return parseJson<RepProgress>(response, "fetch progress");
+  const payload = await parseJson<RepProgress>(response, "fetch progress");
+  return normalizeRepProgress(payload);
 }
 
 export async function fetchRepSessionsHistory(repId: string): Promise<{ items: import("../types").RepSessionHistoryItem[] }> {

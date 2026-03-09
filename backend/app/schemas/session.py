@@ -63,6 +63,23 @@ class RepSessionFeedbackResponse(BaseModel):
     improvement_targets: list[RepSessionImprovementTargetResponse] = Field(default_factory=list)
 
 
+class RepProgressResponse(BaseModel):
+    rep_id: str
+    rep_name: str | None = None
+    rep_email: str | None = None
+    rep_avatar_url: str | None = None
+    session_count: int = 0
+    scored_session_count: int = 0
+    completed_drills: int = 0
+    average_score: float | None = None
+    streak_days: int = 0
+    personal_best: float | None = None
+    personal_best_session_id: str | None = None
+    most_improved_category: str | None = None
+    most_improved_delta: float | None = None
+    last_scored_session_at: str | None = None
+
+
 class RepProgressTrendSessionResponse(BaseModel):
     session_id: str
     started_at: str | None = None

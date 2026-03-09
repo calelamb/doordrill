@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View, ActivityIndicator, RefreshControl } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { ClipboardList, BookOpenCheck, TreePine, Bell, Zap, TrendingUp } from "lucide-react-native";
+import Animated, { FadeInDown } from "react-native-reanimated";
 import { BlurView } from "expo-blur";
 
 import { AssignmentCard } from "../components/AssignmentCard";
@@ -33,6 +34,19 @@ function isPastDue(dueAt: string | null): boolean {
   const dueMs = new Date(dueAt).getTime();
   if (Number.isNaN(dueMs)) return false;
   return dueMs < Date.now();
+}
+
+function wasYesterday(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const target = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  return target.getTime() === yesterday.getTime();
 }
 
 export function AssignmentsScreen({ navigation }: Props) {
@@ -105,6 +119,29 @@ export function AssignmentsScreen({ navigation }: Props) {
     return { open, completed };
   }, [assignments]);
 
+  const streakBanner = useMemo(() => {
+    const streakDays = progress?.streak_days ?? 0;
+    if (streakDays >= 7) {
+      return {
+        tone: "hot" as const,
+        text: `🔥 ${streakDays}-day streak — you're on fire!`,
+      };
+    }
+    if (streakDays >= 2) {
+      return {
+        tone: "warm" as const,
+        text: `🔥 ${streakDays}-day streak — keep it going!`,
+      };
+    }
+    if (streakDays === 0 && wasYesterday(progress?.last_scored_session_at)) {
+      return {
+        tone: "nudge" as const,
+        text: "Drill today to start a streak",
+      };
+    }
+    return null;
+  }, [progress?.last_scored_session_at, progress?.streak_days]);
+
   return (
     <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
@@ -120,6 +157,28 @@ export function AssignmentsScreen({ navigation }: Props) {
               <Bell size={24} color={colors.ink} />
             </Pressable>
           </View>
+
+          {streakBanner ? (
+            <Animated.View entering={FadeInDown.delay(120).springify()} style={styles.streakBannerWrap}>
+              <View
+                style={[
+                  styles.streakBanner,
+                  streakBanner.tone === "hot" ? styles.streakBannerHot : null,
+                  streakBanner.tone === "nudge" ? styles.streakBannerNudge : null,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.streakBannerText,
+                    streakBanner.tone === "hot" ? styles.streakBannerTextHot : null,
+                    streakBanner.tone === "nudge" ? styles.streakBannerTextNudge : null,
+                  ]}
+                >
+                  {streakBanner.text}
+                </Text>
+              </View>
+            </Animated.View>
+          ) : null}
 
           {error ? (
             <View style={styles.errorContainer}>
@@ -267,6 +326,37 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line,
+  },
+  streakBannerWrap: {
+    marginBottom: 4,
+  },
+  streakBanner: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: colors.warningSoft,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(180, 83, 9, 0.24)",
+  },
+  streakBannerHot: {
+    backgroundColor: "rgba(245, 158, 11, 0.18)",
+    borderColor: "rgba(245, 158, 11, 0.32)",
+  },
+  streakBannerNudge: {
+    backgroundColor: "rgba(180, 83, 9, 0.08)",
+    borderColor: "rgba(180, 83, 9, 0.18)",
+  },
+  streakBannerText: {
+    color: colors.warning,
+    fontSize: 13,
+    fontFamily: "Poppins_700Bold",
+  },
+  streakBannerTextHot: {
+    color: "#9A3412",
+  },
+  streakBannerTextNudge: {
+    color: colors.muted,
   },
   statsRow: {
     flexDirection: "row",

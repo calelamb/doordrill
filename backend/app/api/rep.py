@@ -2,7 +2,8 @@ import os
 import shutil
 import uuid
 from typing import Any
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
@@ -25,6 +26,7 @@ from app.schemas.notification import DeviceTokenCreateRequest, DeviceTokenRespon
 from app.schemas.profile import ProfileUpdateRequest, HierarchyNode
 from app.schemas.scorecard import CategoryScoreV2, ManagerCoachingNoteResponse
 from app.schemas.session import (
+    RepProgressResponse,
     RepProgressTrendResponse,
     RepSessionFeedbackResponse,
     SessionCreateRequest,
@@ -59,6 +61,7 @@ IMPROVEMENT_TARGET_LABELS = {
     "closing_technique": "Closing",
     "professionalism": "Professionalism",
 }
+REP_PROGRESS_TIMEZONE = ZoneInfo("America/Denver")
 notification_service = NotificationService()
 review_service = ManagerReviewService()
 predictive_modeling_service = PredictiveModelingService()
@@ -107,6 +110,74 @@ def _linear_regression_slope(scores: list[float]) -> float | None:
     if denominator <= 0:
         return None
     return numerator / denominator
+
+
+def _session_completed_at(session: DrillSession) -> datetime | None:
+    completed_at = session.ended_at or session.started_at or getattr(session, "created_at", None)
+    if completed_at is None:
+        return None
+    if completed_at.tzinfo is None:
+        return completed_at.replace(tzinfo=timezone.utc)
+    return completed_at.astimezone(timezone.utc)
+
+
+def _session_local_date(session: DrillSession) -> date | None:
+    completed_at = _session_completed_at(session)
+    if completed_at is None:
+        return None
+    return completed_at.astimezone(REP_PROGRESS_TIMEZONE).date()
+
+
+def _calculate_streak_days(scored_sessions: list[DrillSession]) -> int:
+    completed_days = {local_date for session in scored_sessions if (local_date := _session_local_date(session)) is not None}
+    if not completed_days:
+        return 0
+
+    today_local = datetime.now(timezone.utc).astimezone(REP_PROGRESS_TIMEZONE).date()
+    if today_local not in completed_days:
+        return 0
+
+    streak_days = 0
+    cursor = today_local
+    while cursor in completed_days:
+        streak_days += 1
+        cursor -= timedelta(days=1)
+    return streak_days
+
+
+def _calculate_most_improved_category(scored_rows: list[tuple[DrillSession, Scorecard]]) -> tuple[str | None, float | None]:
+    if len(scored_rows) < 6:
+        return None, None
+
+    first_window = scored_rows[:3]
+    last_window = scored_rows[-3:]
+    best_category: str | None = None
+    best_delta = 0.0
+
+    for category_key in REP_CATEGORY_ORDER:
+        first_values = [
+            normalized[category_key]
+            for _, scorecard in first_window
+            if category_key in (normalized := _normalize_category_scores(scorecard.category_scores))
+        ]
+        last_values = [
+            normalized[category_key]
+            for _, scorecard in last_window
+            if category_key in (normalized := _normalize_category_scores(scorecard.category_scores))
+        ]
+
+        if not first_values or not last_values:
+            continue
+
+        delta = (sum(last_values) / len(last_values)) - (sum(first_values) / len(first_values))
+        if delta > best_delta:
+            best_category = category_key
+            best_delta = delta
+
+    if best_category is None or best_delta <= 0:
+        return None, None
+
+    return best_category, round(best_delta, 2)
 
 
 def _serialize_transcript(turns: list[SessionTurn]) -> list[dict[str, Any]]:
@@ -385,7 +456,7 @@ def list_rep_sessions(
     }
 
 
-@router.get("/progress")
+@router.get("/progress", response_model=RepProgressResponse)
 def get_rep_progress(
     rep_id: str = Query(...),
     actor: Actor = Depends(require_rep_or_manager),
@@ -398,15 +469,42 @@ def get_rep_progress(
     _ensure_same_org(actor, rep_user.org_id)
 
     sessions_count = db.scalar(select(func.count(DrillSession.id)).where(DrillSession.rep_id == rep_id)) or 0
-    scored_count = (
-        db.scalar(
-            select(func.count(Scorecard.id)).join(DrillSession, DrillSession.id == Scorecard.session_id).where(DrillSession.rep_id == rep_id)
+    scored_rows = (
+        db.execute(
+            select(DrillSession, Scorecard)
+            .join(Scorecard, Scorecard.session_id == DrillSession.id)
+            .where(DrillSession.rep_id == rep_id)
+            .order_by(DrillSession.started_at.asc(), DrillSession.created_at.asc())
         )
-        or 0
+        .all()
     )
-    avg_score = db.scalar(
-        select(func.avg(Scorecard.overall_score)).join(DrillSession, DrillSession.id == Scorecard.session_id).where(DrillSession.rep_id == rep_id)
+    scored_sessions = [session for session, _ in scored_rows]
+    scored_count = len(scored_rows)
+    avg_score = (
+        round(sum(float(scorecard.overall_score) for _, scorecard in scored_rows) / scored_count, 2)
+        if scored_count > 0
+        else None
     )
+    best_row = (
+        max(
+            scored_rows,
+            key=lambda row: (
+                float(row[1].overall_score),
+                (_session_completed_at(row[0]) or datetime.min.replace(tzinfo=timezone.utc)),
+            ),
+        )
+        if scored_rows
+        else None
+    )
+    last_scored_session_at = (
+        max(
+            (_session_completed_at(session) for session in scored_sessions if _session_completed_at(session) is not None),
+            default=None,
+        )
+    )
+    streak_days = _calculate_streak_days(scored_sessions)
+    most_improved_category, most_improved_delta = _calculate_most_improved_category(scored_rows)
+
     return {
         "rep_id": rep_id,
         "rep_name": rep_user.name,
@@ -414,7 +512,14 @@ def get_rep_progress(
         "rep_avatar_url": getattr(rep_user, "avatar_url", None),
         "session_count": int(sessions_count),
         "scored_session_count": int(scored_count),
-        "average_score": round(float(avg_score), 2) if avg_score is not None else None,
+        "completed_drills": int(scored_count),
+        "average_score": avg_score,
+        "streak_days": streak_days,
+        "personal_best": round(float(best_row[1].overall_score), 2) if best_row else None,
+        "personal_best_session_id": best_row[0].id if best_row else None,
+        "most_improved_category": most_improved_category,
+        "most_improved_delta": most_improved_delta,
+        "last_scored_session_at": last_scored_session_at.isoformat() if last_scored_session_at else None,
     }
 
 

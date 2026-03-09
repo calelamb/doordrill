@@ -1,7 +1,7 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View, TextInput, Image, ScrollView } from "react-native";
-import { Award, Target, Zap, LogOut, Edit2, Check, X, Camera } from "lucide-react-native";
+import { Award, Camera, Check, Edit2, Flame, LogOut, Star, Target, TrendingUp, X, Zap } from "lucide-react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 import * as ImagePicker from "expo-image-picker";
@@ -19,6 +19,14 @@ type Props = CompositeScreenProps<
   BottomTabScreenProps<BottomTabParamList, "ProfileTab">,
   NativeStackScreenProps<RootStackParamList>
 >;
+
+const CATEGORY_LABELS: Record<string, string> = {
+  opening: "Opening",
+  pitch_delivery: "Pitch",
+  objection_handling: "Objection Handling",
+  closing_technique: "Closing",
+  professionalism: "Professionalism",
+};
 
 export function ProfileScreen({ navigation }: Props) {
   const { repId, clearSession } = useSession();
@@ -97,6 +105,9 @@ export function ProfileScreen({ navigation }: Props) {
     : "SR";
   const displayRole = progress?.rep_email || "rep@doordrill.com";
   const avatarUrl = progress?.rep_avatar_url ? `${API_BASE_URL}${progress.rep_avatar_url}` : null;
+  const mostImprovedLabel = progress?.most_improved_category
+    ? CATEGORY_LABELS[progress.most_improved_category] ?? progress.most_improved_category.replace(/_/g, " ")
+    : "—";
 
   return (
     <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
@@ -152,6 +163,31 @@ export function ProfileScreen({ navigation }: Props) {
               </>
             )}
           </BlurView>
+
+          {progress ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.profileStatsRow}
+            >
+              <BlurView intensity={40} tint="light" style={styles.profileStatChip}>
+                <Star size={16} color={colors.warning} />
+                <Text style={styles.profileStatText}>
+                  {`Best Score: ${progress.personal_best !== null && progress.personal_best !== undefined ? progress.personal_best.toFixed(1) : "—"}`}
+                </Text>
+              </BlurView>
+
+              <BlurView intensity={40} tint="light" style={styles.profileStatChip}>
+                <Flame size={16} color={colors.warning} />
+                <Text style={styles.profileStatText}>{`${progress.streak_days ?? 0}-day streak`}</Text>
+              </BlurView>
+
+              <BlurView intensity={40} tint="light" style={styles.profileStatChip}>
+                <TrendingUp size={16} color={colors.accent} />
+                <Text style={styles.profileStatText}>{`Most Improved: ${mostImprovedLabel}`}</Text>
+              </BlurView>
+            </ScrollView>
+          ) : null}
 
           {loading && !progress ? (
             <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
@@ -282,6 +318,28 @@ const styles = StyleSheet.create({
   avatarText: { fontSize: 36, fontWeight: "800", color: colors.accent },
   name: { fontSize: 26, fontFamily: "Poppins_800ExtraBold", color: colors.ink, marginBottom: 6 },
   role: { fontSize: 15, color: colors.muted },
+  profileStatsRow: {
+    gap: 10,
+    paddingRight: 20,
+    marginBottom: 24,
+  },
+  profileStatChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 18,
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    overflow: "hidden",
+  },
+  profileStatText: {
+    fontSize: 13,
+    color: colors.ink,
+    fontFamily: "Poppins_600SemiBold",
+  },
   errorContainer: {
     backgroundColor: "#FEE2E2",
     borderWidth: 1,

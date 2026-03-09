@@ -128,6 +128,12 @@ export type RepProgress = {
   scored_session_count: number;
   average_score: number | null;
   completed_drills?: number | null;
+  streak_days?: number | null;
+  personal_best?: number | null;
+  personal_best_session_id?: string | null;
+  most_improved_category?: string | null;
+  most_improved_delta?: number | null;
+  last_scored_session_at?: string | null;
 };
 
 export type HierarchyNode = {
