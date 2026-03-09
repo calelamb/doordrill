@@ -154,6 +154,11 @@ class ManagerAiCoachingService:
             ttl_seconds=6 * 3600,
             max_entries=cache_size,
         )
+        self.company_training_context_cache = ManagementCacheService(
+            redis_url=self.settings.redis_url,
+            ttl_seconds=30 * 60,
+            max_entries=cache_size,
+        )
         self.session_annotations_cache = ManagementCacheService(
             redis_url=self.settings.redis_url,
             ttl_seconds=4 * 3600,
@@ -287,6 +292,21 @@ Respond with JSON only:
     ) -> str | None:
         if not org_id:
             return None
+        cache_key = self.company_training_context_cache.make_key(
+            "company-training-context",
+            {
+                "org_id": org_id,
+                "topic": topic,
+                "context_hint": context_hint,
+                "k": k,
+                "min_score": min_score,
+                "max_tokens": max_tokens,
+            },
+        )
+        cached = self.company_training_context_cache.get_json(cache_key)
+        if cached is not None:
+            return cached.get("formatted_context")
+
         chunks = self.document_retrieval_service.retrieve_for_topic(
             db,
             org_id=org_id,
@@ -296,9 +316,12 @@ Respond with JSON only:
             min_score=min_score,
         )
         if not chunks:
+            self.company_training_context_cache.set_json(cache_key, {"formatted_context": None})
             return None
         formatted = self.document_retrieval_service.format_for_prompt(chunks, max_tokens=max_tokens)
-        return formatted or None
+        result = formatted or None
+        self.company_training_context_cache.set_json(cache_key, {"formatted_context": result})
+        return result
 
     def generate_rep_insight(self, db: Session, *, rep: User, period_days: int) -> RepInsightResponse:
         cache_key = f"rep_insight:{rep.id}:{period_days}"
@@ -959,6 +982,10 @@ Requirements:
             org_id=manager.org_id,
             min_risk_level="medium",
         )
+        manager_coaching_effectiveness = self.predictive_modeling_service.get_manager_impact_summary(
+            db,
+            manager_id=manager.id,
+        )
         at_risk_by_rep_id = {item["rep_id"]: item for item in at_risk_reps}
         for brief in rep_briefs:
             risk = at_risk_by_rep_id.get(brief["rep_id"])
@@ -985,6 +1012,7 @@ Team data for the last 7 days:
 - Team average score: {team_average_score}
 - Most common weakness tag: {shared_weakness}
 - At-risk reps from predictive scoring: {json.dumps(at_risk_reps[:3], default=str)}
+- Your recent coaching interventions show {((manager_coaching_effectiveness.get('avg_score_delta') or 0.0)):+.2f} avg score delta with {(manager_coaching_effectiveness.get('positive_impact_rate') or 0.0):.0%} positive impact rate.
 
 Return JSON in this exact shape:
 {{
@@ -1037,6 +1065,10 @@ Requirements:
                     "team_average_score": team_average_score,
                     "most_common_weakness_tag": shared_weakness,
                     "at_risk_reps": at_risk_reps[:5],
+                    "manager_coaching_effectiveness": {
+                        "avg_score_delta": manager_coaching_effectiveness.get("avg_score_delta"),
+                        "positive_impact_rate": manager_coaching_effectiveness.get("positive_impact_rate"),
+                    },
                     "rep_summaries": rep_briefs,
                 },
                 **content_payload,

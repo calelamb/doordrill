@@ -8,7 +8,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.user import User
-from app.services.document_retrieval_service import DocumentRetrievalService
 
 if TYPE_CHECKING:
     from app.models.scenario import Scenario
@@ -370,7 +369,8 @@ class PromptBuilder:
             "LAYER 1 - IMMERSION CONTRACT\n"
             "You are a real homeowner in a live door-to-door roleplay.\n"
             "Never break character.\n"
-            "Respond in 1-4 sentences.\n"
+            "Respond in 1-3 short sentences only. You are a real person at your front door - busy, brief, and realistic.\n"
+            "Never write more than 2-3 sentences per response.\n"
             "React only to what the rep actually says.\n"
             "Do not volunteer extra information the rep has not earned.\n"
             "Do not narrate internal thoughts, coaching notes, scoring, or model behavior."
@@ -448,7 +448,6 @@ class ConversationOrchestrator:
         self._states: dict[str, ConversationState] = {}
         self._contexts: dict[str, SessionPromptContext] = {}
         self._prompt_builder = PromptBuilder()
-        self._document_retrieval_service = DocumentRetrievalService()
 
     def initialize_session(
         self,
@@ -531,12 +530,6 @@ class ConversationOrchestrator:
             persona=HomeownerPersona.from_payload(snapshot.persona_payload),
             prompt_version=prompt_version,
             org_id=resolved_org_id,
-            territory_context=self._build_territory_context(
-                db,
-                scenario=scenario,
-                scenario_snapshot=snapshot,
-                org_id=resolved_org_id,
-            ),
         )
         self._contexts[session_id] = context
 
@@ -659,15 +652,6 @@ class ConversationOrchestrator:
                 resolved_objections=list(state.resolved_objections) if state is not None else [],
                 behavioral_signals=list(state.last_behavior_signals) if state is not None else [],
             )
-            if context.territory_context:
-                prompt = (
-                    f"{prompt}\n\n"
-                    "=== Territory & Objection Context (from your company's training materials) ===\n"
-                    f"{context.territory_context}\n\n"
-                    "Draw on the above when deciding how to respond to the rep's pitch. These are real\n"
-                    "objections and concerns from your specific market — use them to make the simulation\n"
-                    "more realistic and representative."
-                )
             return prompt
 
         fallback_snapshot = ScenarioSnapshot()
@@ -686,41 +670,6 @@ class ConversationOrchestrator:
             resolved_objections=list(state.resolved_objections) if state is not None else [],
             behavioral_signals=list(state.last_behavior_signals) if state is not None else [],
         )
-
-    def _build_territory_context(
-        self,
-        db: Session | None,
-        *,
-        scenario: "Scenario | None" = None,
-        scenario_snapshot: ScenarioSnapshot,
-        org_id: str | None,
-    ) -> str | None:
-        if db is None or not org_id:
-            return None
-        concerns = scenario_snapshot.persona_payload.get("concerns") or []
-        industry = str(getattr(scenario, "industry", "") or scenario_snapshot.persona_payload.get("industry") or "").strip()
-        context_hint = (
-            f"{scenario_snapshot.persona_payload.get('attitude', '')} homeowner "
-            f"{industry} "
-            f"{' '.join(str(item) for item in concerns if str(item).strip())}"
-        ).strip()
-        if not context_hint:
-            context_hint = f"homeowner {industry}".strip()
-        elif industry and industry not in context_hint:
-            context_hint = f"{context_hint} {industry}".strip()
-
-        chunks = self._document_retrieval_service.retrieve_for_topic(
-            db,
-            org_id=org_id,
-            topic="homeowner objections territory D2D door to door sales typical concerns",
-            context_hint=context_hint,
-            k=3,
-            min_score=0.70,
-        )
-        if not chunks:
-            return None
-        formatted = self._document_retrieval_service.format_for_prompt(chunks)
-        return formatted or None
 
     def _detect_stage(
         self,

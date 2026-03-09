@@ -38,6 +38,7 @@ from app.models.session import SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, TurnSpeaker, UserRole
 from app.models.user import Team, User
 from app.services.management_analytics_service import ManagementAnalyticsService
+from app.services.predictive_modeling_service import PredictiveModelingService
 from app.services.warehouse_etl_service import WarehouseEtlService
 
 METRIC_DEFINITIONS = [
@@ -175,6 +176,7 @@ def _score_value(value: Any) -> float | None:
 class AnalyticsRefreshService:
     def __init__(self) -> None:
         self.management_analytics = ManagementAnalyticsService(prefer_materialized_views=False)
+        self.predictive_modeling_service = PredictiveModelingService()
         self.warehouse_etl_service = WarehouseEtlService()
 
     def ensure_metric_definitions(self, db: Session) -> int:
@@ -1291,6 +1293,7 @@ class AnalyticsRefreshService:
         run = self._start_run(db, scope_type="manager", scope_id=manager_id)
         row_counts: dict[str, Any] = {"refreshed_sessions": 0}
         try:
+            manager = db.scalar(select(User).where(User.id == manager_id))
             session_ids = db.scalars(
                 select(DrillSession.id)
                 .join(Assignment, Assignment.id == DrillSession.assignment_id)
@@ -1303,6 +1306,12 @@ class AnalyticsRefreshService:
             row_counts.update(self._refresh_alert_facts(db, manager_id=manager_id))
             row_counts.update(self.ensure_partition_windows(db))
             row_counts.update(self._refresh_materialized_views(db, manager_id=manager_id, run_id=run.id))
+            if manager is not None:
+                row_counts["manager_coaching_impact_rows"] = self.predictive_modeling_service.compute_coaching_impact(
+                    db,
+                    manager_id=manager_id,
+                    org_id=manager.org_id,
+                )
             self._finish_run(db, run=run, status="completed", row_counts=row_counts)
             return {"status": "completed", "run_id": run.id, **row_counts}
         except Exception as exc:

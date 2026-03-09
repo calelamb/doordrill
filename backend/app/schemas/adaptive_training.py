@@ -76,6 +76,48 @@ class TeamForecastResponse(BaseModel):
     rep_summaries: list[TeamForecastSummaryResponse] = Field(default_factory=list)
 
 
+class TeamIntelligenceAtRiskRepResponse(BaseModel):
+    rep_id: str
+    name: str
+    risk_level: str
+    triggered_alerts: list[str] = Field(default_factory=list)
+    days_since_last_session: int | None = None
+
+
+class TeamIntelligenceCohortComparisonResponse(BaseModel):
+    reps_above_cohort_median: int = 0
+    reps_below_cohort_median: int = 0
+
+
+class TeamIntelligenceCoachingEffectivenessResponse(BaseModel):
+    avg_score_delta: float = 0.0
+    positive_impact_rate: float = 0.0
+
+
+class TeamIntelligenceProjectionWindowResponse(BaseModel):
+    projected_avg_score: float = 0.0
+    reps_reaching_readiness: int = 0
+
+
+class TeamIntelligenceSnapshotResponse(BaseModel):
+    manager_id: str
+    org_id: str
+    snapshot_at: datetime
+    team_size: int = 0
+    avg_readiness_score: float = 0.0
+    reps_ready: int = 0
+    reps_on_track: int = 0
+    reps_at_risk: int = 0
+    projected_team_readiness_in_sessions: float = 0.0
+    team_skill_averages: dict[str, float] = Field(default_factory=dict)
+    weakest_team_skill: str | None = None
+    strongest_team_skill: str | None = None
+    at_risk_reps: list[TeamIntelligenceAtRiskRepResponse] = Field(default_factory=list)
+    cohort_comparison: TeamIntelligenceCohortComparisonResponse
+    coaching_effectiveness: TeamIntelligenceCoachingEffectivenessResponse
+    projection: dict[str, TeamIntelligenceProjectionWindowResponse] = Field(default_factory=dict)
+
+
 class SkillEdgeResponse(BaseModel):
     from_skill: str
     to_skill: str

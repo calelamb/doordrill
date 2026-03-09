@@ -30,6 +30,7 @@ from app.schemas.adaptive_training import (
     AdaptiveAssignmentResponse,
     AdaptiveTrainingPlanResponse,
     TeamForecastResponse,
+    TeamIntelligenceSnapshotResponse,
 )
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
 from app.schemas.knowledge import (
@@ -2546,6 +2547,40 @@ def get_team_forecast(
         "manager can only access their own team forecast",
     )
     return predictive_modeling_service.get_team_forecast(
+        db,
+        manager_id=manager_id,
+        org_id=manager.org_id,
+    )
+
+
+@router.get("/{manager_id}/coaching-impact")
+def get_manager_coaching_impact(
+    manager_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    _get_authorized_manager(
+        db,
+        actor,
+        manager_id,
+        "manager can only access their own coaching impact",
+    )
+    return predictive_modeling_service.get_manager_impact_summary(db, manager_id=manager_id)
+
+
+@router.get("/{manager_id}/team-intelligence", response_model=TeamIntelligenceSnapshotResponse)
+def get_team_intelligence_snapshot(
+    manager_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    manager = _get_authorized_manager(
+        db,
+        actor,
+        manager_id,
+        "manager can only access their own team intelligence",
+    )
+    return predictive_modeling_service.get_team_intelligence_snapshot(
         db,
         manager_id=manager_id,
         org_id=manager.org_id,

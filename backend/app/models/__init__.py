@@ -27,7 +27,7 @@ from app.models.knowledge import OrgDocument, OrgDocumentChunk
 from app.models.manager_action import ManagerActionLog
 from app.models.notification_delivery import NotificationDelivery
 from app.models.postprocess_run import PostprocessRun
-from app.models.predictive import RepCohortBenchmark, RepRiskScore, RepSkillForecast, ScenarioOutcomeAggregate
+from app.models.predictive import ManagerCoachingImpact, RepCohortBenchmark, RepRiskScore, RepSkillForecast, ScenarioOutcomeAggregate
 from app.models.prompt_version import PromptVersion
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.scenario import Scenario
@@ -80,6 +80,7 @@ __all__ = [
     "PromptExperiment",
     "PostprocessRun",
     "PromptVersion",
+    "ManagerCoachingImpact",
     "RepCohortBenchmark",
     "RepRiskScore",
     "RepSkillForecast",

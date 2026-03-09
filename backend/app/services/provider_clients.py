@@ -30,7 +30,7 @@ class BaseSttClient:
 class BaseLlmClient:
     provider_name = "base"
 
-    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str) -> AsyncIterator[str]:
+    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80) -> AsyncIterator[str]:
         raise NotImplementedError
 
 
@@ -235,7 +235,7 @@ class DeepgramSttClient(BaseSttClient):
 class MockLlmClient(BaseLlmClient):
     provider_name = "mock_llm"
 
-    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str) -> AsyncIterator[str]:
+    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80) -> AsyncIterator[str]:
         starter = "I hear you. "
         if "price" in rep_text.lower():
             body = "That sounds expensive for us right now."
@@ -263,9 +263,14 @@ class OpenAiLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
         self.timeout_seconds = timeout_seconds
         self._fallback = MockLlmClient()
 
-    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str) -> AsyncIterator[str]:
+    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80) -> AsyncIterator[str]:
         if not self.api_key:
-            async for chunk in self._fallback.stream_reply(rep_text=rep_text, stage=stage, system_prompt=system_prompt):
+            async for chunk in self._fallback.stream_reply(
+                rep_text=rep_text,
+                stage=stage,
+                system_prompt=system_prompt,
+                max_tokens=max_tokens,
+            ):
                 yield chunk
             return
 
@@ -278,7 +283,7 @@ class OpenAiLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
             "model": self.model,
             "stream": True,
             "temperature": 0.4,
-            "max_tokens": 180,
+            "max_tokens": max_tokens,
             "stream_options": {"include_usage": True},
             "messages": [{"role": "system", "content": system_prompt}, *self._history_for_current_task(), {"role": "user", "content": rep_text}],
         }
@@ -314,7 +319,12 @@ class OpenAiLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
             self._remember_exchange(user_text=rep_text, assistant_text="".join(emitted_parts))
 
         if not emitted:
-            async for chunk in self._fallback.stream_reply(rep_text=rep_text, stage=stage, system_prompt=system_prompt):
+            async for chunk in self._fallback.stream_reply(
+                rep_text=rep_text,
+                stage=stage,
+                system_prompt=system_prompt,
+                max_tokens=max_tokens,
+            ):
                 yield chunk
 
 
@@ -329,9 +339,14 @@ class AnthropicLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
         self.timeout_seconds = timeout_seconds
         self._fallback = MockLlmClient()
 
-    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str) -> AsyncIterator[str]:
+    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80) -> AsyncIterator[str]:
         if not self.api_key:
-            async for chunk in self._fallback.stream_reply(rep_text=rep_text, stage=stage, system_prompt=system_prompt):
+            async for chunk in self._fallback.stream_reply(
+                rep_text=rep_text,
+                stage=stage,
+                system_prompt=system_prompt,
+                max_tokens=max_tokens,
+            ):
                 yield chunk
             return
 
@@ -344,7 +359,7 @@ class AnthropicLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
         }
         payload = {
             "model": self.model,
-            "max_tokens": 220,
+            "max_tokens": max_tokens,
             "temperature": 0.4,
             "stream": True,
             "system": system_prompt,
@@ -381,7 +396,12 @@ class AnthropicLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
             self._remember_exchange(user_text=rep_text, assistant_text="".join(emitted_parts).strip())
 
         if not emitted:
-            async for chunk in self._fallback.stream_reply(rep_text=rep_text, stage=stage, system_prompt=system_prompt):
+            async for chunk in self._fallback.stream_reply(
+                rep_text=rep_text,
+                stage=stage,
+                system_prompt=system_prompt,
+                max_tokens=max_tokens,
+            ):
                 yield chunk
 
 

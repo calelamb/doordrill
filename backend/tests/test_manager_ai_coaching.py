@@ -11,12 +11,15 @@ from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionTurn
 from app.models.types import AssignmentStatus, SessionStatus, TurnSpeaker
+from app.schemas.knowledge import RetrievedChunk
 from app.schemas.manager_ai import ManagerChatAnswerContent, ManagerChatClassification
+from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.manager_ai_coaching_service import AiCoachingUnavailableError
 
 
 @pytest.fixture(autouse=True)
 def clear_ai_caches() -> None:
+    manager_api.manager_ai_service.company_training_context_cache.clear()
     manager_api.manager_ai_service.rep_insight_cache.clear()
     manager_api.manager_ai_service.session_annotations_cache.clear()
 
@@ -269,6 +272,53 @@ def test_ai_team_coaching_summary_endpoint_returns_summary(client, seed_org, mon
     assert body["manager_id"] == seed_org["manager_id"]
     assert "Objection handling is still the main coaching gap" in body["summary"]
     assert body["data_summary"]["summary"]["coaching_note_count"] == 6
+
+
+def test_company_training_context_reuses_cached_retrieval(seed_org, monkeypatch):
+    call_count = {"value": 0}
+
+    def fake_retrieve_for_topic(self, db, *, org_id: str, topic: str, context_hint: str = "", k: int = 5, min_score: float = 0.70):
+        call_count["value"] += 1
+        assert org_id == seed_org["org_id"]
+        return [
+            RetrievedChunk(
+                chunk_id="chunk-manager-cache-1",
+                document_id="document-manager-cache-1",
+                document_name="Closing Playbook",
+                text="Use a low-pressure next step and confirm homeowner concerns before asking for commitment.",
+                similarity_score=0.95,
+            )
+        ]
+
+    monkeypatch.setattr(DocumentRetrievalService, "retrieve_for_topic", fake_retrieve_for_topic)
+
+    db = SessionLocal()
+    try:
+        first = manager_api.manager_ai_service._get_company_training_context(
+            db,
+            org_id=seed_org["org_id"],
+            topic="coaching closing technique improvement",
+            context_hint="rep Ray Rep weak areas closing",
+            k=3,
+            min_score=0.68,
+            max_tokens=900,
+        )
+        second = manager_api.manager_ai_service._get_company_training_context(
+            db,
+            org_id=seed_org["org_id"],
+            topic="coaching closing technique improvement",
+            context_hint="rep Ray Rep weak areas closing",
+            k=3,
+            min_score=0.68,
+            max_tokens=900,
+        )
+    finally:
+        db.close()
+
+    assert call_count["value"] == 1
+    assert first == second
+    assert first is not None
+    assert "Closing Playbook" in first
 
 
 def test_ai_endpoints_return_503_when_claude_is_unavailable(client, seed_org, monkeypatch):

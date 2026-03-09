@@ -18,14 +18,15 @@ except ImportError:  # pragma: no cover - fallback stays deterministic when scip
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.predictive import RepCohortBenchmark, RepRiskScore, RepSkillForecast
+from app.models.predictive import ManagerCoachingImpact, RepCohortBenchmark, RepRiskScore, RepSkillForecast
 from app.models.predictive import ScenarioOutcomeAggregate
+from app.models.scorecard import ManagerCoachingNote, Scorecard
 from app.models.session import Session as DrillSession
-from app.models.training import AdaptiveRecommendationOutcome
+from app.models.training import AdaptiveRecommendationOutcome, OverrideLabel
 from app.models.types import UserRole
 from app.models.user import Team, User
 from app.models.assignment import Assignment
-from app.models.warehouse import DimRep, FactRepDaily
+from app.models.warehouse import DimRep, FactRepDaily, FactSession
 
 
 class PredictiveModelingService:
@@ -33,6 +34,19 @@ class PredictiveModelingService:
     MIN_SESSIONS_FOR_REGRESSION = 3
     RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
     BENCHMARK_SKILLS = ["overall", "opening", "rapport", "pitch_clarity", "objection_handling", "closing"]
+    IMPACT_WINDOW_DAYS = 14
+
+    def _get_manager_reps(self, db: Session, *, manager_id: str, org_id: str) -> list[User]:
+        return db.execute(
+            select(User)
+            .join(Team, Team.id == User.team_id)
+            .where(
+                User.org_id == org_id,
+                User.role == UserRole.REP,
+                Team.manager_id == manager_id,
+            )
+            .order_by(User.name.asc(), User.created_at.asc())
+        ).scalars().all()
 
     def compute_and_persist_forecast(
         self,
@@ -222,16 +236,7 @@ class PredictiveModelingService:
         }
 
     def get_team_forecast(self, db: Session, *, manager_id: str, org_id: str) -> dict[str, Any]:
-        reps = db.execute(
-            select(User)
-            .join(Team, Team.id == User.team_id)
-            .where(
-                User.org_id == org_id,
-                User.role == UserRole.REP,
-                Team.manager_id == manager_id,
-            )
-            .order_by(User.name.asc(), User.created_at.asc())
-        ).scalars().all()
+        reps = self._get_manager_reps(db, manager_id=manager_id, org_id=org_id)
 
         rep_summaries: list[dict[str, Any]] = []
         readiness_sessions: list[int] = []
@@ -288,6 +293,141 @@ class PredictiveModelingService:
             "reps_on_track": reps_on_track,
             "reps_at_risk": reps_at_risk,
             "rep_summaries": rep_summaries,
+        }
+
+    def get_team_intelligence_snapshot(self, db: Session, *, manager_id: str, org_id: str) -> dict[str, Any]:
+        snapshot_at = datetime.now(timezone.utc)
+        team_forecast = self.get_team_forecast(db, manager_id=manager_id, org_id=org_id)
+        at_risk_rows = self.get_at_risk_reps(
+            db,
+            manager_id=manager_id,
+            org_id=org_id,
+            min_risk_level="medium",
+        )
+        impact_summary = self.get_manager_impact_summary(db, manager_id=manager_id)
+
+        rep_summaries = list(team_forecast.get("rep_summaries") or [])
+        rep_ids = [str(summary["rep_id"]) for summary in rep_summaries if summary.get("rep_id")]
+        rep_names = {
+            str(summary["rep_id"]): str(summary.get("name") or summary["rep_id"])
+            for summary in rep_summaries
+            if summary.get("rep_id")
+        }
+
+        forecast_rows = db.scalars(
+            select(RepSkillForecast)
+            .where(RepSkillForecast.rep_id.in_(rep_ids))
+            .order_by(RepSkillForecast.skill.asc())
+        ).all() if rep_ids else []
+        risk_models = db.scalars(
+            select(RepRiskScore)
+            .where(RepRiskScore.rep_id.in_(rep_ids))
+            .order_by(RepRiskScore.risk_computed_at.desc())
+        ).all() if rep_ids else []
+        cohort_rows = db.scalars(
+            select(RepCohortBenchmark)
+            .where(
+                RepCohortBenchmark.rep_id.in_(rep_ids),
+                RepCohortBenchmark.skill == "overall",
+            )
+        ).all() if rep_ids else []
+
+        skill_scores: dict[str, list[float]] = defaultdict(list)
+        for row in forecast_rows:
+            if row.current_score is not None:
+                skill_scores[row.skill].append(float(row.current_score))
+        team_skill_averages = {
+            skill: round(mean(scores), 2)
+            for skill, scores in sorted(skill_scores.items())
+            if scores
+        }
+
+        weakest_team_skill = None
+        strongest_team_skill = None
+        if team_skill_averages:
+            weakest_team_skill = min(team_skill_averages.items(), key=lambda item: (item[1], item[0]))[0]
+            strongest_team_skill = max(team_skill_averages.items(), key=lambda item: (item[1], item[0]))[0]
+
+        latest_risk_by_rep: dict[str, RepRiskScore] = {}
+        for row in risk_models:
+            if row.rep_id not in latest_risk_by_rep:
+                latest_risk_by_rep[row.rep_id] = row
+
+        avg_readiness_values = [
+            readiness_score
+            for readiness_score in (
+                self._safe_float(summary.get("readiness_score"))
+                for summary in rep_summaries
+            )
+            if readiness_score is not None
+        ]
+        median_sessions = self._safe_float(team_forecast.get("median_sessions_to_readiness"))
+        cohort_percentiles = [
+            float(row.percentile_in_cohort)
+            for row in cohort_rows
+            if row.percentile_in_cohort is not None
+        ]
+
+        projection: dict[str, dict[str, Any]] = {}
+        for horizon_days in (30, 60, 90):
+            projected_scores: list[float] = []
+            reps_reaching_readiness = 0
+            for summary in rep_summaries:
+                rep_id = str(summary["rep_id"])
+                current_score = self._safe_float(summary.get("readiness_score"))
+                if current_score is None:
+                    continue
+                velocity = self._safe_float(summary.get("velocity"))
+                risk_row = latest_risk_by_rep.get(rep_id)
+                session_frequency_7d = (
+                    self._safe_float(risk_row.session_frequency_7d)
+                    if risk_row is not None
+                    else None
+                )
+                sessions_per_day = (session_frequency_7d / 7) if session_frequency_7d is not None else 0.5
+                projected_score = current_score
+                if velocity is not None:
+                    projected_score += velocity * (sessions_per_day * horizon_days)
+                projected_scores.append(projected_score)
+                if projected_score >= self.READINESS_THRESHOLD:
+                    reps_reaching_readiness += 1
+            projection[f"{horizon_days}d"] = {
+                "projected_avg_score": round(mean(projected_scores), 2) if projected_scores else 0.0,
+                "reps_reaching_readiness": reps_reaching_readiness,
+            }
+
+        return {
+            "manager_id": manager_id,
+            "org_id": org_id,
+            "snapshot_at": snapshot_at.isoformat(),
+            "team_size": team_forecast.get("team_size", 0),
+            "avg_readiness_score": round(mean(avg_readiness_values), 2) if avg_readiness_values else 0.0,
+            "reps_ready": team_forecast.get("reps_already_ready", 0),
+            "reps_on_track": team_forecast.get("reps_on_track", 0),
+            "reps_at_risk": team_forecast.get("reps_at_risk", 0),
+            "projected_team_readiness_in_sessions": round(median_sessions, 2) if median_sessions is not None else 0.0,
+            "team_skill_averages": team_skill_averages,
+            "weakest_team_skill": weakest_team_skill,
+            "strongest_team_skill": strongest_team_skill,
+            "at_risk_reps": [
+                {
+                    "rep_id": row["rep_id"],
+                    "name": rep_names.get(row["rep_id"], row["rep_id"]),
+                    "risk_level": row["risk_level"],
+                    "triggered_alerts": list(row.get("triggered_alerts") or []),
+                    "days_since_last_session": row.get("days_since_last_session"),
+                }
+                for row in at_risk_rows
+            ],
+            "cohort_comparison": {
+                "reps_above_cohort_median": sum(1 for percentile in cohort_percentiles if percentile >= 50),
+                "reps_below_cohort_median": sum(1 for percentile in cohort_percentiles if percentile < 50),
+            },
+            "coaching_effectiveness": {
+                "avg_score_delta": round(self._safe_float(impact_summary.get("avg_score_delta")) or 0.0, 4),
+                "positive_impact_rate": round(self._safe_float(impact_summary.get("positive_impact_rate")) or 0.0, 4),
+            },
+            "projection": projection,
         }
 
     def compute_and_persist_risk_score(
@@ -653,6 +793,100 @@ class PredictiveModelingService:
             ],
         }
 
+    def compute_coaching_impact(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        org_id: str,
+        lookback_days: int = 60,
+    ) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        note_rows = db.execute(
+            select(ManagerCoachingNote, Scorecard)
+            .join(Scorecard, Scorecard.id == ManagerCoachingNote.scorecard_id)
+            .join(DrillSession, DrillSession.id == Scorecard.session_id)
+            .where(
+                ManagerCoachingNote.reviewer_id == manager_id,
+                ManagerCoachingNote.created_at >= cutoff,
+                DrillSession.rep_id.is_not(None),
+            )
+        ).all()
+        override_rows = db.scalars(
+            select(OverrideLabel)
+            .where(
+                OverrideLabel.manager_id == manager_id,
+                OverrideLabel.org_id == org_id,
+                OverrideLabel.created_at >= cutoff,
+            )
+        ).all()
+
+        processed = 0
+        for note, scorecard in note_rows:
+            processed += self._upsert_coaching_impact_row(
+                db,
+                manager_id=manager_id,
+                org_id=org_id,
+                rep_id=self._session_rep_id(db, scorecard.session_id),
+                source_session_id=scorecard.session_id,
+                intervention_type="coaching_note",
+                intervention_at=self._as_utc(note.created_at) or datetime.now(timezone.utc),
+            )
+
+        for label in override_rows:
+            processed += self._upsert_coaching_impact_row(
+                db,
+                manager_id=manager_id,
+                org_id=org_id,
+                rep_id=self._session_rep_id(db, label.session_id),
+                source_session_id=label.session_id,
+                intervention_type="override_label",
+                intervention_at=self._as_utc(label.created_at) or datetime.now(timezone.utc),
+            )
+
+        db.flush()
+        return processed
+
+    def get_manager_impact_summary(self, db: Session, *, manager_id: str) -> dict[str, Any]:
+        rows = db.scalars(
+            select(ManagerCoachingImpact)
+            .where(
+                ManagerCoachingImpact.manager_id == manager_id,
+                ManagerCoachingImpact.impact_computed_at.is_not(None),
+            )
+            .order_by(ManagerCoachingImpact.impact_computed_at.desc(), ManagerCoachingImpact.created_at.desc())
+        ).all()
+        measured = [row for row in rows if row.score_delta is not None]
+        deltas = [float(row.score_delta) for row in measured]
+        coaching_note_deltas = [float(row.score_delta) for row in measured if row.intervention_type == "coaching_note"]
+        override_label_deltas = [float(row.score_delta) for row in measured if row.intervention_type == "override_label"]
+        positive = [row for row in measured if (row.score_delta or 0.0) > 0.3]
+
+        rep_groups: dict[str, list[float]] = defaultdict(list)
+        for row in measured:
+            rep_groups[row.rep_id].append(float(row.score_delta))
+
+        best_impact_rep = None
+        if rep_groups:
+            best_rep_id, best_deltas = max(rep_groups.items(), key=lambda item: mean(item[1]))
+            rep = db.scalar(select(User).where(User.id == best_rep_id))
+            best_impact_rep = {
+                "rep_id": best_rep_id,
+                "name": rep.name if rep is not None else best_rep_id,
+                "avg_delta": round(mean(best_deltas), 4),
+            }
+
+        return {
+            "manager_id": manager_id,
+            "total_interventions_measured": len(measured),
+            "avg_score_delta": round(mean(deltas), 4) if deltas else None,
+            "positive_impact_rate": round(len(positive) / len(measured), 4) if measured else 0.0,
+            "best_impact_rep": best_impact_rep,
+            "coaching_note_avg_delta": round(mean(coaching_note_deltas), 4) if coaching_note_deltas else None,
+            "override_label_avg_delta": round(mean(override_label_deltas), 4) if override_label_deltas else None,
+            "recent_impacts": [self._serialize_manager_impact(row) for row in rows[:5]],
+        }
+
     def _serialize_skill_forecast(self, row: RepSkillForecast) -> dict[str, Any]:
         return {
             "skill": row.skill,
@@ -697,6 +931,21 @@ class PredictiveModelingService:
             "percentile_in_cohort": percentile,
             "percentile_in_org": round(row.percentile_in_org, 2) if row.percentile_in_org is not None else None,
             "interpretation": self._benchmark_interpretation(percentile),
+        }
+
+    def _serialize_manager_impact(self, row: ManagerCoachingImpact) -> dict[str, Any]:
+        return {
+            "rep_id": row.rep_id,
+            "source_session_id": row.source_session_id,
+            "intervention_type": row.intervention_type,
+            "intervention_at": row.intervention_at.isoformat() if row.intervention_at else None,
+            "pre_intervention_score": round(row.pre_intervention_score, 2) if row.pre_intervention_score is not None else None,
+            "post_intervention_score": round(row.post_intervention_score, 2) if row.post_intervention_score is not None else None,
+            "score_delta": round(row.score_delta, 4) if row.score_delta is not None else None,
+            "sessions_observed": row.sessions_observed,
+            "observation_window_days": row.observation_window_days,
+            "impact_classified": row.impact_classified,
+            "impact_computed_at": row.impact_computed_at.isoformat() if row.impact_computed_at else None,
         }
 
     def _quarter_label(self, hire_date: date) -> str:
@@ -763,6 +1012,100 @@ class PredictiveModelingService:
         if percentile_in_cohort >= 35:
             return "Average"
         return "Below average"
+
+    def _impact_classification(self, score_delta: float | None) -> str | None:
+        if score_delta is None:
+            return None
+        if score_delta > 0.5:
+            return "positive"
+        if score_delta > -0.3:
+            return "neutral"
+        return "negative"
+
+    def _session_rep_id(self, db: Session, session_id: str) -> str | None:
+        session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+        return session.rep_id if session is not None else None
+
+    def _upsert_coaching_impact_row(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        org_id: str,
+        rep_id: str | None,
+        source_session_id: str,
+        intervention_type: str,
+        intervention_at: datetime,
+    ) -> int:
+        if not rep_id:
+            return 0
+        anchor_date = (self._as_utc(intervention_at) or datetime.now(timezone.utc)).date()
+        pre_rows = db.scalars(
+            select(FactSession)
+            .where(
+                FactSession.rep_id == rep_id,
+                FactSession.manager_id == manager_id,
+                FactSession.session_date < anchor_date,
+                FactSession.overall_score.is_not(None),
+            )
+            .order_by(FactSession.session_date.desc(), FactSession.started_at.desc())
+            .limit(3)
+        ).all()
+        post_rows = db.scalars(
+            select(FactSession)
+            .where(
+                FactSession.rep_id == rep_id,
+                FactSession.manager_id == manager_id,
+                FactSession.session_date > anchor_date,
+                FactSession.session_date <= (anchor_date + timedelta(days=self.IMPACT_WINDOW_DAYS)),
+                FactSession.overall_score.is_not(None),
+            )
+            .order_by(FactSession.session_date.asc(), FactSession.started_at.asc())
+            .limit(3)
+        ).all()
+        if not post_rows:
+            return 0
+
+        pre_scores = [float(row.overall_score) for row in reversed(pre_rows) if row.overall_score is not None]
+        post_scores = [float(row.overall_score) for row in post_rows if row.overall_score is not None]
+        pre_score = round(mean(pre_scores), 4) if pre_scores else self._safe_float(
+            db.scalar(select(Scorecard.overall_score).where(Scorecard.session_id == source_session_id))
+        )
+        post_score = round(mean(post_scores), 4) if post_scores else None
+        score_delta = round(post_score - pre_score, 4) if pre_score is not None and post_score is not None else None
+
+        row = db.scalar(
+            select(ManagerCoachingImpact).where(
+                ManagerCoachingImpact.manager_id == manager_id,
+                ManagerCoachingImpact.source_session_id == source_session_id,
+                ManagerCoachingImpact.intervention_type == intervention_type,
+            )
+        )
+        if row is None:
+            row = ManagerCoachingImpact(
+                manager_id=manager_id,
+                rep_id=rep_id,
+                org_id=org_id,
+                source_session_id=source_session_id,
+                intervention_type=intervention_type,
+                intervention_at=intervention_at,
+            )
+            db.add(row)
+
+        row.rep_id = rep_id
+        row.org_id = org_id
+        row.source_session_id = source_session_id
+        row.intervention_type = intervention_type
+        row.intervention_at = intervention_at
+        row.pre_intervention_score = pre_score
+        row.post_intervention_score = post_score
+        row.score_delta = score_delta
+        row.sessions_observed = len(post_rows)
+        row.observation_window_days = self.IMPACT_WINDOW_DAYS
+        row.impact_classified = self._impact_classification(score_delta)
+        row.impact_computed_at = datetime.now(timezone.utc)
+        db.flush()
+        return 1
 
     def _risk_level_for_score(self, risk_score: float) -> str:
         if risk_score < 0.2:

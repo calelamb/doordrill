@@ -101,3 +101,27 @@ class RepCohortBenchmark(Base, TimestampMixin):
     percentile_in_cohort: Mapped[float | None] = mapped_column(Float, nullable=True)
     percentile_in_org: Mapped[float | None] = mapped_column(Float, nullable=True)
     benchmark_computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ManagerCoachingImpact(Base, TimestampMixin):
+    __tablename__ = "manager_coaching_impacts"
+    __table_args__ = (
+        Index("ix_manager_coaching_impact_manager", "manager_id"),
+        Index("ix_manager_coaching_impact_rep", "rep_id"),
+        Index("ix_manager_coaching_impact_session", "source_session_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    manager_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    rep_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    source_session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    intervention_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    intervention_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    pre_intervention_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    post_intervention_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sessions_observed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    observation_window_days: Mapped[int] = mapped_column(Integer, nullable=False, default=14)
+    impact_classified: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    impact_computed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

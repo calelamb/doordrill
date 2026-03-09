@@ -54,6 +54,9 @@ storage_service = StorageService()
 
 SILENCE_FILLER_SECONDS = 4.0
 MAX_RUNTIME_PAUSE_MS = 60
+HOMEOWNER_MAX_TOKENS = 80
+WS_KEEPALIVE_TIMEOUT_SECONDS = 120
+WS_KEEPALIVE_INTERVAL_SECONDS = 30
 
 
 def _normalize_ts(value: datetime) -> datetime:
@@ -310,6 +313,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 rep_text=prompt_text,
                 stage=stage,
                 system_prompt=system_prompt,
+                max_tokens=HOMEOWNER_MAX_TOKENS,
             ):
                 if interrupt_signal_at is not None:
                     ai_interrupted = True
@@ -583,6 +587,25 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     last_rep_audio_at = time.monotonic()
     receiver_task = asyncio.create_task(receive_loop())
 
+    async def keepalive_loop() -> None:
+        while not disconnected.is_set():
+            await asyncio.sleep(WS_KEEPALIVE_INTERVAL_SECONDS)
+            if disconnected.is_set():
+                break
+            try:
+                await emit_session_state(
+                    {
+                        "state": "keepalive",
+                        "keepalive_timeout_seconds": WS_KEEPALIVE_TIMEOUT_SECONDS,
+                    }
+                )
+                await maybe_flush()
+            except Exception:  # pragma: no cover
+                logger.exception("WebSocket keepalive failed", extra={"session_id": session_id, "trace_id": ws_trace_id})
+                break
+
+    keepalive_task = asyncio.create_task(keepalive_loop())
+
     try:
         await emit_session_state({"state": "connected", **orchestrator.get_state_payload(session_id)})
         await maybe_flush()
@@ -770,12 +793,19 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         pass
     finally:
         receiver_task.cancel()
+        keepalive_task.cancel()
         try:
             await receiver_task
         except asyncio.CancelledError:
             pass
         except Exception:  # pragma: no cover
             logger.exception("Receiver task cleanup error", extra={"session_id": session_id, "trace_id": ws_trace_id})
+        try:
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # pragma: no cover
+            logger.exception("Keepalive task cleanup error", extra={"session_id": session_id, "trace_id": ws_trace_id})
 
         try:
             await maybe_flush(force=True)

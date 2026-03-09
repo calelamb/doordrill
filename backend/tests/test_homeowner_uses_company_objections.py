@@ -4,28 +4,13 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.models.scenario import Scenario
-from app.schemas.knowledge import RetrievedChunk
 from app.services.conversation_orchestrator import ConversationOrchestrator
 from app.services.document_retrieval_service import DocumentRetrievalService
 
 
-def test_homeowner_uses_company_objections(seed_org, monkeypatch):
+def test_homeowner_prompt_does_not_use_company_objections(seed_org, monkeypatch):
     def fake_retrieve_for_topic(self, db, *, org_id: str, topic: str, context_hint: str = "", k: int = 5, min_score: float = 0.70):
-        assert org_id == seed_org["org_id"]
-        assert topic == "homeowner objections territory D2D door to door sales typical concerns"
-        assert "skeptical homeowner" in context_hint
-        assert "pest_control" in context_hint
-        assert "price" in context_hint
-        assert "trust" in context_hint
-        return [
-            RetrievedChunk(
-                chunk_id="chunk-homeowner-1",
-                document_id="document-homeowner-1",
-                document_name="Territory Objection Playbook",
-                text="Homeowners in this territory usually push on monthly cost and ask whether local proof exists.",
-                similarity_score=0.91,
-            )
-        ]
+        raise AssertionError("homeowner prompt should not retrieve company training context")
 
     monkeypatch.setattr(DocumentRetrievalService, "retrieve_for_topic", fake_retrieve_for_topic)
 
@@ -50,8 +35,7 @@ def test_homeowner_uses_company_objections(seed_org, monkeypatch):
     finally:
         db.close()
 
-    assert "=== Territory & Objection Context (from your company's training materials) ===" in prompt
-    assert "=== Company Training Material ===" in prompt
-    assert "Territory Objection Playbook" in prompt
-    assert "monthly cost" in prompt
-    assert "more realistic and representative" in prompt
+    assert "Respond in 1-3 short sentences only." in prompt
+    assert "Never write more than 2-3 sentences per response." in prompt
+    assert "=== Company Training Material ===" not in prompt
+    assert "Territory & Objection Context" not in prompt

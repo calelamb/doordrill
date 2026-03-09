@@ -183,6 +183,7 @@ def test_weekly_team_briefing_structure(client, seed_org, monkeypatch):
         assert "Rep summaries:" in user_prompt
         assert "Team average score:" in user_prompt
         assert "Most common weakness tag:" in user_prompt
+        assert "Your recent coaching interventions show" in user_prompt
         return {
             "team_pulse": "The team is generating enough volume to coach from, but closing consistency is still separating the best reps from the rest. Ray is pushing upward while Nina needs a tighter objection-to-close handoff.",
             "standout_rep": {
@@ -232,6 +233,7 @@ def test_weekly_team_briefing_structure(client, seed_org, monkeypatch):
     assert len(body["manager_action_items"]) >= 1
     assert body["data_summary"]["rep_count_considered"] == 2
     assert body["data_summary"]["rep_summaries"]
+    assert "manager_coaching_effectiveness" in body["data_summary"]
 
     cached = client.post(
         "/manager/team/weekly-briefing",
