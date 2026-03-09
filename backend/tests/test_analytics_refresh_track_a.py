@@ -122,6 +122,8 @@ def test_track_a_analytics_warehouse_refresh(client, seed_org):
         analytics_refresh = AnalyticsRefreshService().backfill_all(db)
         db.commit()
         assert analytics_refresh["refreshed_managers"] >= 1
+        assert "scenario_outcome_aggregate_rows" in analytics_refresh
+        assert "rep_cohort_benchmark_rows" in analytics_refresh
 
         assert db.scalar(select(func.count(AnalyticsMetricDefinition.metric_key))) >= 6
         assert db.get(AnalyticsFactSession, session_id) is not None

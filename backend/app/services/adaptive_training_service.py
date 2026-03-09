@@ -11,6 +11,8 @@ from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.training import AdaptiveRecommendationOutcome
+from app.models.user import User
+from app.services.predictive_modeling_service import PredictiveModelingService
 
 SKILL_ORDER = ["opening", "rapport", "pitch_clarity", "objection_handling", "closing"]
 SKILL_GRAPH_EDGES = [
@@ -48,12 +50,17 @@ SKILL_GRAPH_EDGES = [
 EMOTION_RESISTANCE = {"interested": 1, "curious": 2, "neutral": 3, "skeptical": 4, "annoyed": 5, "hostile": 5}
 ATTITUDE_RESISTANCE = {"friendly": 1, "interested": 2, "curious": 2, "neutral": 3, "skeptical": 4, "busy": 4, "annoyed": 5, "hostile": 5}
 ATTITUDE_PATIENCE = {"friendly": 5, "interested": 4, "curious": 4, "neutral": 3, "skeptical": 3, "busy": 2, "annoyed": 1, "hostile": 1}
+predictive_modeling_service = PredictiveModelingService()
 
 
 class AdaptiveTrainingService:
     """Builds rep skill profiles and recommends scenario difficulty from historical session data."""
 
     def build_plan(self, db: Session, rep_id: str) -> dict[str, Any]:
+        rep = db.scalar(select(User).where(User.id == rep_id))
+        if rep is None:
+            raise ValueError("rep not found")
+
         sessions = db.scalars(
             select(DrillSession)
             .where(DrillSession.rep_id == rep_id)
@@ -89,12 +96,20 @@ class AdaptiveTrainingService:
             recommended_difficulty=recommended_difficulty,
         )
         recommendations = self._recommend_scenarios(
+            db=db,
             scenarios=scenarios,
             skill_profile=skill_profile,
             recommended_difficulty=recommended_difficulty,
             target_difficulty_factors=target_difficulty_factors,
             weakest_skills=weakest_skills,
             snapshots=snapshots,
+        )
+        skill_profile_nodes = [skill_profile[skill] for skill in SKILL_ORDER]
+        readiness_forecast = predictive_modeling_service.compute_and_persist_forecast(
+            db,
+            rep_id=rep_id,
+            org_id=rep.org_id,
+            skill_profile=skill_profile_nodes,
         )
 
         return {
@@ -105,8 +120,9 @@ class AdaptiveTrainingService:
             "recommended_difficulty": recommended_difficulty,
             "weakest_skills": weakest_skills,
             "target_difficulty_factors": target_difficulty_factors,
-            "skill_profile": [skill_profile[skill] for skill in SKILL_ORDER],
+            "skill_profile": skill_profile_nodes,
             "skill_graph": SKILL_GRAPH_EDGES,
+            "readiness_forecast": readiness_forecast,
             "recommended_scenarios": recommendations,
         }
 
@@ -130,6 +146,7 @@ class AdaptiveTrainingService:
                 if scenario is None:
                     raise ValueError("scenario not found")
                 selected = self._recommend_scenarios(
+                    db=db,
                     scenarios=[scenario],
                     skill_profile={node["skill"]: node for node in plan["skill_profile"]},
                     recommended_difficulty=plan["recommended_difficulty"],
@@ -298,20 +315,23 @@ class AdaptiveTrainingService:
     def _build_skill_profile(self, snapshots: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         if not snapshots:
             return {
-                "opening": self._skill_node("opening", 5.4, 0.0, 0.0, ["starting baseline"]),
-                "rapport": self._skill_node("rapport", 5.2, 0.0, 0.0, ["starting baseline"]),
-                "pitch_clarity": self._skill_node("pitch_clarity", 5.0, 0.0, 0.0, ["starting baseline"]),
-                "objection_handling": self._skill_node("objection_handling", 4.9, 0.0, 0.0, ["starting baseline"]),
-                "closing": self._skill_node("closing", 4.8, 0.0, 0.0, ["starting baseline"]),
+                "opening": self._skill_node("opening", 5.4, 0.0, 0.0, ["starting baseline"], []),
+                "rapport": self._skill_node("rapport", 5.2, 0.0, 0.0, ["starting baseline"], []),
+                "pitch_clarity": self._skill_node("pitch_clarity", 5.0, 0.0, 0.0, ["starting baseline"], []),
+                "objection_handling": self._skill_node("objection_handling", 4.9, 0.0, 0.0, ["starting baseline"], []),
+                "closing": self._skill_node("closing", 4.8, 0.0, 0.0, ["starting baseline"], []),
             }
 
         weighted_histories: dict[str, list[float]] = {skill: [] for skill in SKILL_ORDER}
+        raw_histories: dict[str, list[float]] = {skill: [] for skill in SKILL_ORDER}
         weights = list(range(1, len(snapshots) + 1))
         professionalism_avg = self._mean(snapshot["professionalism"] for snapshot in snapshots)
 
         for index, snapshot in enumerate(snapshots):
             for skill in SKILL_ORDER:
-                weighted_histories[skill].append(snapshot["skills"][skill] * weights[index])
+                skill_score = snapshot["skills"][skill]
+                weighted_histories[skill].append(skill_score * weights[index])
+                raw_histories[skill].append(round(float(skill_score), 2))
 
         direct_scores = {
             skill: self._safe_divide(sum(weighted_histories[skill]), sum(weights)) for skill in SKILL_ORDER
@@ -336,6 +356,7 @@ class AdaptiveTrainingService:
                 self._skill_trend(snapshots, skill),
                 min(1.0, len(snapshots) / 4),
                 self._contributing_metrics(skill),
+                raw_histories[skill],
             )
             for skill in SKILL_ORDER
         }
@@ -343,6 +364,7 @@ class AdaptiveTrainingService:
     def _recommend_scenarios(
         self,
         *,
+        db: Session,
         scenarios: list[Scenario],
         skill_profile: dict[str, dict[str, Any]],
         recommended_difficulty: int,
@@ -352,6 +374,15 @@ class AdaptiveTrainingService:
     ) -> list[dict[str, Any]]:
         recommendations: list[dict[str, Any]] = []
         scenario_relevance = self._scenario_relevance_map(snapshots=snapshots, weakest_skills=weakest_skills)
+        outcome_ranked = predictive_modeling_service.get_outcome_ranked_scenarios(
+            db,
+            focus_skill=weakest_skills[0] if weakest_skills else SKILL_ORDER[0],
+            difficulty=recommended_difficulty,
+        )
+        outcome_ranked_map = {
+            item["scenario_id"]: item
+            for item in outcome_ranked
+        }
         for scenario in scenarios:
             factors = self._scenario_difficulty_factors(scenario)
             focus = self._scenario_skill_focus(scenario)
@@ -367,8 +398,11 @@ class AdaptiveTrainingService:
             )
             targeted_weaknesses = [skill for skill in weakest_skills if focus.get(skill, 0.0) >= 0.18]
             historical_relevance = scenario_relevance.get(scenario.id, 0.0)
+            outcome_rank = outcome_ranked_map.get(scenario.id)
+            historical_delta = self._safe_float((outcome_rank or {}).get("avg_skill_delta")) or 0.0
+            outcome_boost = outcome_rank is not None
             recommendation_score = round(
-                self._clamp_10((weakness_alignment * 0.75) + (difficulty_fit * 0.65) + historical_relevance),
+                self._clamp_10((weakness_alignment * 0.75) + (difficulty_fit * 0.65) + historical_relevance + (historical_delta * 0.6)),
                 2,
             )
             focus_skills = [skill for skill, weight in sorted(focus.items(), key=lambda item: item[1], reverse=True) if weight >= 0.18]
@@ -378,13 +412,19 @@ class AdaptiveTrainingService:
                     "scenario_name": scenario.name,
                     "difficulty": int(scenario.difficulty),
                     "recommendation_score": recommendation_score,
+                    "outcome_boost": outcome_boost,
+                    "avg_skill_delta_historical": round(historical_delta, 4) if outcome_boost else None,
                     "focus_skills": focus_skills,
                     "target_weaknesses": targeted_weaknesses or weakest_skills[:1],
                     "difficulty_factors": factors,
                     "rationale": self._recommendation_rationale(focus_skills, targeted_weaknesses or weakest_skills[:1], factors),
                 }
             )
-        return sorted(recommendations, key=lambda item: (item["recommendation_score"], -item["difficulty"]), reverse=True)[:5]
+        return sorted(
+            recommendations,
+            key=lambda item: (item.get("outcome_boost", False), item["recommendation_score"], -item["difficulty"]),
+            reverse=True,
+        )[:5]
 
     def _scenario_relevance_map(
         self,
@@ -619,13 +659,22 @@ class AdaptiveTrainingService:
         }
         return metrics[skill]
 
-    def _skill_node(self, skill: str, score: float, trend: float, confidence: float, metrics: list[str]) -> dict[str, Any]:
+    def _skill_node(
+        self,
+        skill: str,
+        score: float,
+        trend: float,
+        confidence: float,
+        metrics: list[str],
+        history: list[float],
+    ) -> dict[str, Any]:
         return {
             "skill": skill,
             "score": round(self._clamp_10(score), 2),
             "trend": round(trend, 2),
             "confidence": round(max(0.0, min(1.0, confidence)), 2),
             "contributing_metrics": metrics,
+            "history": history,
         }
 
     def _bounded_score(self, value: Any, *, fallback: float) -> float:

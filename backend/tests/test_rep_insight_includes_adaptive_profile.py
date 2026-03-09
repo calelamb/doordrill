@@ -124,6 +124,7 @@ def test_rep_insight_includes_adaptive_profile(client, seed_org, monkeypatch):
     def fake_claude(*, system_prompt: str, user_prompt: str, max_tokens: int):
         assert "Adaptive skill profile:" in user_prompt
         assert "Recommended difficulty:" in user_prompt
+        assert "Cohort benchmarks:" in user_prompt
         assert "Emotion recovery average across recent sessions:" in user_prompt
         assert "Override signal:" in user_prompt
         assert "Readiness trajectory:" in user_prompt
@@ -150,6 +151,9 @@ def test_rep_insight_includes_adaptive_profile(client, seed_org, monkeypatch):
     assert body["adaptive_skill_profile"][0]["skill"] == "opening"
     assert "sessions_to_readiness" in body["readiness_trajectory"]
     assert body["readiness_trajectory"]["trajectory_per_skill"]
+    assert body["risk_level"] == "low"
+    assert body["triggered_alerts"] == []
     assert body["override_signal"]["override_count"] == 0
     assert body["data_summary"]["adaptive_plan"]["recommended_difficulty"] >= 1
     assert body["data_summary"]["emotion_recovery_average"] > 0
+    assert body["data_summary"]["risk_signal"]["risk_level"] == "low"

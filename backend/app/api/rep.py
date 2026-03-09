@@ -15,16 +15,19 @@ from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.types import AssignmentStatus, SessionStatus
 from app.models.user import User, Team
+from app.schemas.adaptive_training import RepForecastResponse
 from app.schemas.assignment import AssignmentResponse
 from app.schemas.notification import DeviceTokenCreateRequest, DeviceTokenResponse
 from app.schemas.profile import ProfileUpdateRequest, HierarchyNode
 from app.schemas.session import SessionCreateRequest, SessionResponse
 from app.services.notification_service import NotificationService
 from app.services.manager_review_service import ManagerReviewService
+from app.services.predictive_modeling_service import PredictiveModelingService
 
 router = APIRouter(prefix="/rep", tags=["rep"])
 notification_service = NotificationService()
 review_service = ManagerReviewService()
+predictive_modeling_service = PredictiveModelingService()
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -82,6 +85,20 @@ def get_rep_assignments(
     _ensure_same_org(actor, rep_user.org_id)
 
     return db.scalars(select(Assignment).where(Assignment.rep_id == rep_id).order_by(Assignment.created_at.desc())).all()
+
+
+@router.get("/{rep_id}/forecast", response_model=RepForecastResponse)
+def get_rep_forecast(
+    rep_id: str,
+    actor: Actor = Depends(require_rep_or_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    if actor.user_id and actor.role == "rep" and actor.user_id != rep_id:
+        raise HTTPException(status_code=403, detail="rep can only access their own forecast")
+
+    rep_user = _get_user_or_404(db, rep_id, "rep")
+    _ensure_same_org(actor, rep_user.org_id)
+    return predictive_modeling_service.get_rep_forecast(db, rep_id=rep_id)
 
 
 @router.post("/sessions", response_model=SessionResponse)

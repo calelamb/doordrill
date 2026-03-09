@@ -21,6 +21,8 @@ class RepInsightContent(BaseModel):
     readiness_trajectory: dict[str, Any] = Field(default_factory=dict)
     override_signal: dict[str, Any] = Field(default_factory=dict)
     adaptive_skill_profile: list[dict[str, Any]] = Field(default_factory=list)
+    risk_level: str | None = Field(default=None, max_length=16)
+    triggered_alerts: list[str] = Field(default_factory=list)
 
 
 class RepInsightResponse(RepInsightContent):

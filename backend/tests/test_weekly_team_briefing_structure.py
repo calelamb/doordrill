@@ -241,3 +241,54 @@ def test_weekly_team_briefing_structure(client, seed_org, monkeypatch):
     assert cached.status_code == 200
     assert cached.json() == body
     assert call_count["value"] == 1
+
+
+def test_weekly_team_briefing_uses_predictive_at_risk_reps(client, seed_org, monkeypatch):
+    second_rep_id = _create_second_rep(seed_org)
+    for offset in range(5):
+        _seed_weekly_session(
+            seed_org,
+            rep_id=second_rep_id,
+            rep_name="Nina Newleaf",
+            day_offset=offset + 1,
+            overall_score=5.0,
+            objection_score=5.0,
+            closing_score=5.0,
+            weakness_tags=["closing"],
+        )
+
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "_call_claude_json",
+        lambda **kwargs: {
+            "team_pulse": "The team has enough reps this week to spot stable patterns.",
+            "standout_rep": {"name": "Nina Newleaf", "why": "She logged the most recent practice volume this week."},
+            "needs_attention": [],
+            "shared_weakness": {
+                "skill": "closing",
+                "team_average": 5.0,
+                "note": "The close is still too soft across the week.",
+            },
+            "huddle_topic": {
+                "topic": "Finish the ask cleanly",
+                "suggested_talking_points": [
+                    "Show the exact ask.",
+                    "Strip extra explanation after the objection.",
+                    "End with a direct commitment request.",
+                ],
+            },
+            "manager_action_items": ["Review Nina's latest five reps for plateau patterns."],
+        },
+    )
+
+    response = client.post(
+        "/manager/team/weekly-briefing",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["needs_attention"]
+    assert body["needs_attention"][0]["name"] == "Nina Newleaf"
+    assert body["data_summary"]["at_risk_reps"][0]["rep_id"] == second_rep_id

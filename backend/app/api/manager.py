@@ -29,6 +29,7 @@ from app.schemas.adaptive_training import (
     AdaptiveAssignmentRequest,
     AdaptiveAssignmentResponse,
     AdaptiveTrainingPlanResponse,
+    TeamForecastResponse,
 )
 from app.schemas.assignment import AssignmentCreateRequest, AssignmentResponse, FollowupAssignmentRequest
 from app.schemas.knowledge import (
@@ -85,6 +86,7 @@ from app.services.management_analytics_runtime_service import ManagementAnalytic
 from app.services.manager_feed_service import ManagerFeedService
 from app.services.manager_review_service import ManagerReviewService
 from app.services.notification_service import NotificationService
+from app.services.predictive_modeling_service import PredictiveModelingService
 from app.services.storage_service import StorageService
 
 router = APIRouter(prefix="/manager", tags=["manager"])
@@ -97,6 +99,7 @@ notification_service = NotificationService()
 management_analytics_service = ManagementAnalyticsRuntimeService()
 analytics_refresh_service = AnalyticsRefreshService()
 manager_ai_service = ManagerAiCoachingService()
+predictive_modeling_service = PredictiveModelingService()
 document_processing_service = DocumentProcessingService(storage_service=storage_service)
 document_retrieval_service = DocumentRetrievalService()
 RUBRIC_CATEGORY_KEYS = {
@@ -2522,7 +2525,31 @@ def get_adaptive_training_plan(
 ) -> AdaptiveTrainingPlanResponse:
     if actor.user_id and actor.role == "manager" and actor.user_id != manager_id:
         raise HTTPException(status_code=403, detail="manager can only access their own adaptive plans")
-    return adaptive_training_service.build_plan(db, rep_id=rep_id)
+    try:
+        return adaptive_training_service.build_plan(db, rep_id=rep_id)
+    except ValueError as exc:
+        if str(exc) == "rep not found":
+            raise HTTPException(status_code=404, detail="rep not found") from exc
+        raise
+
+
+@router.get("/{manager_id}/team-forecast", response_model=TeamForecastResponse)
+def get_team_forecast(
+    manager_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    manager = _get_authorized_manager(
+        db,
+        actor,
+        manager_id,
+        "manager can only access their own team forecast",
+    )
+    return predictive_modeling_service.get_team_forecast(
+        db,
+        manager_id=manager_id,
+        org_id=manager.org_id,
+    )
 
 
 @router.post("/reps/{rep_id}/adaptive-assignment", response_model=AdaptiveAssignmentResponse)
@@ -2553,6 +2580,8 @@ def create_adaptive_assignment(
     except ValueError as exc:
         message = str(exc)
         if "scenario not found" in message:
+            raise HTTPException(status_code=404, detail=message) from exc
+        if message == "rep not found":
             raise HTTPException(status_code=404, detail=message) from exc
         raise HTTPException(status_code=400, detail=message) from exc
 

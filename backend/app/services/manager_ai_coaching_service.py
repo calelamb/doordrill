@@ -36,6 +36,7 @@ from app.schemas.knowledge import RetrievedChunk
 from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.management_cache_service import ManagementCacheService
+from app.services.predictive_modeling_service import PredictiveModelingService
 
 READINESS_THRESHOLD = 7.0
 
@@ -135,6 +136,7 @@ class ManagerAiCoachingService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.adaptive_training_service = AdaptiveTrainingService()
+        self.predictive_modeling_service = PredictiveModelingService()
         self.document_retrieval_service = DocumentRetrievalService(settings=self.settings)
         cache_size = max(128, self.settings.management_analytics_cache_max_entries)
         self.rep_insight_cache = ManagementCacheService(
@@ -354,6 +356,21 @@ Respond with JSON only:
         ]
         adaptive_plan = self.adaptive_training_service.build_plan(db, rep_id=rep.id)
         adaptive_skill_profile = list(adaptive_plan.get("skill_profile") or [])
+        cohort_benchmarks = self.predictive_modeling_service.get_rep_benchmarks(db, rep_id=rep.id)
+        cohort_benchmark_summary = "; ".join(
+            (
+                f"{item['skill']}: {item['percentile_in_cohort']:.0f}th percentile"
+                for item in cohort_benchmarks.get("skills", [])
+                if item.get("percentile_in_cohort") is not None
+            )
+        ) or "No cohort benchmark data available."
+        risk_signal = self.predictive_modeling_service.get_at_risk_reps(
+            db,
+            manager_id=rep.team.manager_id if rep.team is not None and rep.team.manager_id else "",
+            org_id=rep.org_id,
+            min_risk_level="low",
+        ) if rep.team is not None and rep.team.manager_id else []
+        rep_risk = next((item for item in risk_signal if item.get("rep_id") == rep.id), None)
         readiness_trajectory = self._compute_readiness_trajectory(
             recent_snapshots,
             adaptive_skill_profile,
@@ -469,9 +486,12 @@ Rep data:
 - Adaptive readiness score: {adaptive_plan.get('readiness_score', 0.0)}/10
 - Recommended difficulty: {adaptive_plan.get('recommended_difficulty')}
 - Adaptive weakest skills: {", ".join(adaptive_plan.get('weakest_skills', [])) or "None identified"}
+- Cohort benchmarks: {cohort_benchmark_summary}
 - Emotion recovery average across recent sessions: {emotion_recovery_average}/10
 - Override signal: {json.dumps(override_signal, default=str)}
 - Readiness trajectory: {json.dumps(readiness_trajectory, default=str)}
+- Risk level: {(rep_risk or {}).get('risk_level', 'low')}
+- Risk flags: {", ".join((rep_risk or {}).get('triggered_alerts', [])) or "none"}. The manager should be aware of these signals.
 - Recent AI session summaries:
 {last_three_summaries}
 
@@ -501,6 +521,8 @@ Provide a coaching analysis in this exact JSON format:
                 "readiness_trajectory": readiness_trajectory,
                 "override_signal": override_signal,
                 "adaptive_skill_profile": adaptive_skill_profile,
+                "risk_level": (rep_risk or {}).get("risk_level"),
+                "triggered_alerts": list((rep_risk or {}).get("triggered_alerts") or []),
             }
         )
 
@@ -524,9 +546,14 @@ Provide a coaching analysis in this exact JSON format:
                 "recommended_difficulty": adaptive_plan.get("recommended_difficulty"),
                 "weakest_skills": adaptive_plan.get("weakest_skills", []),
             },
+            "cohort_benchmarks": cohort_benchmarks,
             "emotion_recovery_average": emotion_recovery_average,
             "override_signal": override_signal,
             "readiness_trajectory": readiness_trajectory,
+            "risk_signal": rep_risk or {
+                "risk_level": "low",
+                "triggered_alerts": [],
+            },
         }
         response = RepInsightResponse(
             rep_id=rep.id,
@@ -926,6 +953,22 @@ Requirements:
                 }
             )
 
+        at_risk_reps = self.predictive_modeling_service.get_at_risk_reps(
+            db,
+            manager_id=manager.id,
+            org_id=manager.org_id,
+            min_risk_level="medium",
+        )
+        at_risk_by_rep_id = {item["rep_id"]: item for item in at_risk_reps}
+        for brief in rep_briefs:
+            risk = at_risk_by_rep_id.get(brief["rep_id"])
+            if risk:
+                brief["risk_signal"] = {
+                    "risk_level": risk.get("risk_level"),
+                    "risk_score": risk.get("risk_score"),
+                    "triggered_alerts": risk.get("triggered_alerts", []),
+                }
+
         team_average_score = round(
             self._mean(item["average_score"] for item in rep_briefs if isinstance(item.get("average_score"), (int, float))),
             2,
@@ -941,6 +984,7 @@ Team data for the last 7 days:
 - Rep summaries: {json.dumps(rep_briefs, default=str)}
 - Team average score: {team_average_score}
 - Most common weakness tag: {shared_weakness}
+- At-risk reps from predictive scoring: {json.dumps(at_risk_reps[:3], default=str)}
 
 Return JSON in this exact shape:
 {{
@@ -968,8 +1012,20 @@ Requirements:
         )
         if not isinstance(content_payload, dict):
             raise AiCoachingUnavailableError("Claude returned an invalid weekly team briefing payload")
-        if isinstance(content_payload.get("needs_attention"), list):
-            content_payload["needs_attention"] = content_payload["needs_attention"][:2]
+        content_payload["needs_attention"] = [
+            {
+                "name": next(
+                    (
+                        brief["rep_name"]
+                        for brief in rep_briefs
+                        if brief["rep_id"] == risk["rep_id"]
+                    ),
+                    risk["rep_id"],
+                ),
+                "concern": self._weekly_risk_concern_text(risk),
+            }
+            for risk in at_risk_reps[:2]
+        ]
 
         response = WeeklyTeamBriefingResponse.model_validate(
             {
@@ -980,6 +1036,7 @@ Requirements:
                     "rep_count_considered": len(capped_reps),
                     "team_average_score": team_average_score,
                     "most_common_weakness_tag": shared_weakness,
+                    "at_risk_reps": at_risk_reps[:5],
                     "rep_summaries": rep_briefs,
                 },
                 **content_payload,
@@ -1121,6 +1178,21 @@ Requirements:
         if not items:
             return 0.0
         return sum(items) / len(items)
+
+    def _weekly_risk_concern_text(self, risk: dict[str, Any]) -> str:
+        alerts = ", ".join(risk.get("triggered_alerts") or []) or "no explicit flags"
+        risk_level = risk.get("risk_level") or "low"
+        if risk.get("days_since_last_session") is not None:
+            return (
+                f"Risk is {risk_level} with flags {alerts}; the rep has been inactive for "
+                f"{risk['days_since_last_session']} days."
+            )
+        if risk.get("decline_slope") is not None:
+            return (
+                f"Risk is {risk_level} with flags {alerts}; the current decline slope is "
+                f"{risk['decline_slope']:.2f} per session."
+            )
+        return f"Risk is {risk_level} with flags {alerts}."
 
     def _clamp_score(self, value: float) -> float:
         return max(0.0, min(10.0, value))

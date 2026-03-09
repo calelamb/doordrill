@@ -16,7 +16,8 @@ from app.models.session import Session as DrillSession
 from app.models.session import SessionTurn
 from app.models.user import Organization, User
 from app.models.warehouse import DimRep, DimScenario, DimTime, FactRepDaily, FactSession
-from app.models.types import TurnSpeaker
+from app.models.types import TurnSpeaker, UserRole
+from app.services.predictive_modeling_service import PredictiveModelingService
 
 
 def _utcnow() -> datetime:
@@ -56,6 +57,9 @@ class SessionWarehouseBundle:
 class WarehouseEtlService:
     ETL_VERSION = "1.0"
 
+    def __init__(self) -> None:
+        self.predictive_modeling_service = PredictiveModelingService()
+
     def write_session(self, db: Session, session_id: str, *, commit: bool = True) -> dict[str, str]:
         bundle = self._load_session_with_relations(db, session_id)
         self._upsert_dim_time(db, self._session_date(bundle.session))
@@ -68,6 +72,33 @@ class WarehouseEtlService:
         else:
             db.flush()
         return {"session_id": fact.session_id, "fact_session_id": fact.fact_session_id}
+
+    def refresh_predictive_aggregates(self, db: Session, *, org_id: str | None = None) -> dict[str, int]:
+        scenario_rows_written = self.predictive_modeling_service.refresh_scenario_outcome_aggregates(db, org_id=org_id)
+        org_ids = (
+            [org_id]
+            if org_id is not None
+            else [
+                value
+                for value in db.scalars(
+                    select(func.distinct(User.org_id)).where(
+                        User.org_id.is_not(None),
+                        User.role == UserRole.REP,
+                    )
+                ).all()
+                if value
+            ]
+        )
+        cohort_rows_written = 0
+        for current_org_id in org_ids:
+            cohort_rows_written += self.predictive_modeling_service.refresh_cohort_benchmarks(
+                db,
+                org_id=current_org_id,
+            )
+        return {
+            "scenario_outcome_aggregate_rows": scenario_rows_written,
+            "rep_cohort_benchmark_rows": cohort_rows_written,
+        }
 
     def _load_session_with_relations(self, db: Session, session_id: str) -> SessionWarehouseBundle:
         session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))

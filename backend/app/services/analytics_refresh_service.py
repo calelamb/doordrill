@@ -38,6 +38,7 @@ from app.models.session import SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, TurnSpeaker, UserRole
 from app.models.user import Team, User
 from app.services.management_analytics_service import ManagementAnalyticsService
+from app.services.warehouse_etl_service import WarehouseEtlService
 
 METRIC_DEFINITIONS = [
     {
@@ -174,6 +175,7 @@ def _score_value(value: Any) -> float | None:
 class AnalyticsRefreshService:
     def __init__(self) -> None:
         self.management_analytics = ManagementAnalyticsService(prefer_materialized_views=False)
+        self.warehouse_etl_service = WarehouseEtlService()
 
     def ensure_metric_definitions(self, db: Session) -> int:
         created = 0
@@ -1319,6 +1321,7 @@ class AnalyticsRefreshService:
             for manager_id in manager_ids:
                 self.refresh_manager(db, manager_id=manager_id)
                 row_counts["refreshed_managers"] += 1
+            row_counts.update(self.warehouse_etl_service.refresh_predictive_aggregates(db))
             self._finish_run(db, run=run, status="completed", row_counts=row_counts)
             return {"status": "completed", "run_id": run.id, **row_counts}
         except Exception as exc:
