@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 class DeviceTokenCreateRequest(BaseModel):
     platform: str = Field(pattern="^(ios|android)$")
+    provider: str = Field(default="expo", pattern="^(expo|fcm)$")
     token: str = Field(min_length=20, max_length=512)
 
 

@@ -4,6 +4,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
+from app.models.device_token import DeviceToken
 from app.models.notification_delivery import NotificationDelivery
 from app.models.postprocess_run import PostprocessRun
 
@@ -59,7 +60,11 @@ def test_rep_device_token_register_and_revoke(client, seed_org):
     headers = {"x-user-id": seed_org["rep_id"], "x-user-role": "rep"}
     register = client.post(
         "/rep/device-tokens",
-        json={"platform": "ios", "token": "ExponentPushToken[abcdefghijklmnopqrstuv12345]"},
+        json={
+            "platform": "ios",
+            "provider": "expo",
+            "token": "ExponentPushToken[abcdefghijklmnopqrstuv12345]",
+        },
         headers=headers,
     )
     assert register.status_code == 200
@@ -68,6 +73,56 @@ def test_rep_device_token_register_and_revoke(client, seed_org):
     revoke = client.delete(f"/rep/device-tokens/{token_id}", headers=headers)
     assert revoke.status_code == 200
     assert revoke.json()["ok"] is True
+
+
+def test_rep_device_token_upsert_refreshes_last_seen_without_duplicates(client, seed_org):
+    headers = {"x-user-id": seed_org["rep_id"], "x-user-role": "rep"}
+    payload = {
+        "platform": "ios",
+        "provider": "expo",
+        "token": "ExponentPushToken[abcdefghijklmnopqrstuv-upsert-12345]",
+    }
+
+    first = client.post("/rep/device-tokens", json=payload, headers=headers)
+    assert first.status_code == 200
+
+    db = SessionLocal()
+    try:
+        first_row = db.scalar(
+            select(DeviceToken).where(
+                DeviceToken.user_id == seed_org["rep_id"],
+                DeviceToken.provider == "expo",
+                DeviceToken.token == payload["token"],
+            )
+        )
+        assert first_row is not None
+        first_id = first_row.id
+        first_seen_at = first_row.last_seen_at
+    finally:
+        db.close()
+
+    time.sleep(0.01)
+
+    second = client.post("/rep/device-tokens", json=payload, headers=headers)
+    assert second.status_code == 200
+    assert second.json()["id"] == first_id
+
+    db = SessionLocal()
+    try:
+        rows = db.scalars(
+            select(DeviceToken).where(
+                DeviceToken.user_id == seed_org["rep_id"],
+                DeviceToken.provider == "expo",
+                DeviceToken.token == payload["token"],
+            )
+        ).all()
+    finally:
+        db.close()
+
+    assert len(rows) == 1
+    assert rows[0].id == first_id
+    assert rows[0].status == "active"
+    assert rows[0].last_seen_at >= first_seen_at
 
 
 def test_manager_notification_feed_and_postprocess_audit(client, seed_org):

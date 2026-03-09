@@ -13,6 +13,11 @@ import {
 } from "../types";
 
 type HeaderMap = Record<string, string>;
+type DeviceTokenRegistrationPayload = {
+  token: string;
+  platform: "ios" | "android";
+  provider: "expo" | "fcm";
+};
 
 type RawCategoryScore = number | (Partial<CategoryScoreDetail> & { score?: number }) | null;
 
@@ -235,6 +240,15 @@ export async function fetchRepPlan(repId: string): Promise<RepPlan> {
 export async function lookupRepByEmail(email: string): Promise<{ rep_id: string }> {
   const response = await fetch(`${API_BASE_URL}/rep/lookup?email=${encodeURIComponent(email)}`);
   return parseJson<{ rep_id: string }>(response, "lookup rep");
+}
+
+export async function registerDeviceToken(repId: string, payload: DeviceTokenRegistrationPayload): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/rep/device-tokens`, {
+    method: "POST",
+    headers: repHeaders(repId),
+    body: JSON.stringify(payload)
+  });
+  await parseJson<Record<string, unknown>>(response, "register device token");
 }
 
 export async function uploadRepAvatar(repId: string, uri: string): Promise<{ avatar_url: string }> {

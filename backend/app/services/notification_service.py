@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -198,33 +200,68 @@ class NotificationService:
             "error": delivery.last_error,
         }
 
-    def register_device_token(self, db: Session, *, user_id: str, platform: str, token: str) -> DeviceToken:
-        provider = self._infer_push_provider(token)
-        existing = db.scalar(
-            select(DeviceToken).where(
-                DeviceToken.user_id == user_id,
-                DeviceToken.provider == provider,
-                DeviceToken.token == token,
-            )
-        )
+    def register_device_token(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        platform: str,
+        provider: str | None,
+        token: str,
+    ) -> DeviceToken:
+        resolved_provider = provider or self._infer_push_provider(token)
         now = datetime.now(timezone.utc)
+
+        row_filter = (
+            DeviceToken.user_id == user_id,
+            DeviceToken.provider == resolved_provider,
+            DeviceToken.token == token,
+        )
+        bind = db.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else ""
+
+        if dialect_name in {"postgresql", "sqlite"}:
+            insert_fn = postgresql_insert if dialect_name == "postgresql" else sqlite_insert
+            stmt = insert_fn(DeviceToken).values(
+                user_id=user_id,
+                platform=platform,
+                provider=resolved_provider,
+                token=token,
+                status="active",
+                last_seen_at=now,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["user_id", "provider", "token"],
+                set_={
+                    "platform": platform,
+                    "status": "active",
+                    "last_seen_at": now,
+                },
+            )
+            db.execute(stmt)
+            db.commit()
+            row = db.scalar(select(DeviceToken).where(*row_filter))
+            if row is None:
+                raise RuntimeError("device token upsert failed")
+            return row
+
+        row = DeviceToken(
+            user_id=user_id,
+            platform=platform,
+            provider=resolved_provider,
+            token=token,
+            status="active",
+            last_seen_at=now,
+        )
+        existing = db.scalar(select(DeviceToken).where(*row_filter))
         if existing:
             existing.platform = platform
-            existing.provider = provider
             existing.status = "active"
             existing.last_seen_at = now
             db.commit()
             db.refresh(existing)
             return existing
 
-        row = DeviceToken(
-            user_id=user_id,
-            platform=platform,
-            provider=provider,
-            token=token,
-            status="active",
-            last_seen_at=now,
-        )
         db.add(row)
         db.commit()
         db.refresh(row)

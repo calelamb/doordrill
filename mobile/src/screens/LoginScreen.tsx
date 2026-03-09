@@ -6,6 +6,7 @@ import { TreePine, Mail, Lock } from "lucide-react-native";
 
 import { useSession } from "../store/session";
 import { lookupRepByEmail } from "../services/api";
+import { requestAndRegisterPushToken } from "../services/notifications";
 
 export function LoginScreen() {
   const { setRepId } = useSession();
@@ -25,6 +26,7 @@ export function LoginScreen() {
       // we just look up the user by email to get their ID.
       const { rep_id } = await lookupRepByEmail(email.trim());
       setRepId(rep_id);
+      void requestAndRegisterPushToken(rep_id).catch(() => undefined);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to log in");
       setLoading(false);

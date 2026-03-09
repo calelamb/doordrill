@@ -21,7 +21,16 @@
       "wsBaseUrl": "ws://127.0.0.1:8000"
     },
     "plugins": [
-      "expo-font"
+      "expo-font",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#2D5A3D",
+          "sounds": [],
+          "mode": "production"
+        }
+      ]
     ]
   }
 }

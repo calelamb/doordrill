@@ -20,6 +20,7 @@ Use either Expo public env vars or `app.json` extras:
 
 - `EXPO_PUBLIC_API_BASE_URL`
 - `EXPO_PUBLIC_WS_BASE_URL`
+- `EXPO_PUBLIC_PROJECT_ID` (required on a physical device to fetch an Expo push token)
 
 Defaults are set for local backend:
 

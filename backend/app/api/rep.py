@@ -696,6 +696,7 @@ def register_device_token(
         db,
         user_id=user.id,
         platform=payload.platform,
+        provider=payload.provider,
         token=payload.token,
     )
     return {

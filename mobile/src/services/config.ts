@@ -1,7 +1,13 @@
 import { Platform } from "react-native";
 import Constants from "expo-constants";
 
-const extras = (Constants.expoConfig?.extra ?? {}) as Record<string, string | undefined>;
+type ExpoExtras = {
+  apiBaseUrl?: string;
+  wsBaseUrl?: string;
+  projectId?: string;
+};
+
+const extras = (Constants.expoConfig?.extra ?? {}) as ExpoExtras;
 
 // Try to get the IP address of the machine running the Expo development server
 // This is essential for testing on a physical device via Expo Go.
@@ -17,3 +23,4 @@ export const WS_BASE_URL =
   process.env.EXPO_PUBLIC_WS_BASE_URL ??
   extras.wsBaseUrl ??
   API_BASE_URL.replace(/^http/i, "ws");
+export const EXPO_PROJECT_ID = process.env.EXPO_PUBLIC_PROJECT_ID ?? extras.projectId ?? null;
