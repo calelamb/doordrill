@@ -1,16 +1,34 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { useEffect, useMemo, useState, useRef } from "react";
-import { ActivityIndicator, Animated as RNAnimated, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
-import { UserCircle } from "lucide-react-native";
-import Animated, { FadeInDown, FadeInUp, withSpring } from "react-native-reanimated";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Animated as RNAnimated,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StyleProp,
+  StyleSheet,
+  Text,
+  View,
+  ViewStyle,
+} from "react-native";
+import { ArrowRight, ChevronDown, ChevronUp, UserCircle } from "lucide-react-native";
+import Animated, {
+  FadeInDown,
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withSpring,
+  withTiming,
+} from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 
 import { RootStackParamList } from "../navigation/types";
-import { fetchRepSession, fetchRepScenario } from "../services/api";
+import { fetchRepScenario, fetchRepSession } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { RepSessionDetail, Scorecard, ScenarioBrief } from "../types";
+import { CategoryScoreDetail, RepSessionDetail, ScenarioBrief, TranscriptTurn } from "../types";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Score">;
 
@@ -20,6 +38,7 @@ type CategoryRow = {
   key: CategoryKey;
   label: string;
   score: number;
+  detail?: CategoryScoreDetail;
 };
 
 const CATEGORY_ORDER: Array<{ key: CategoryKey; label: string }> = [
@@ -30,14 +49,45 @@ const CATEGORY_ORDER: Array<{ key: CategoryKey; label: string }> = [
   { key: "professionalism", label: "Professionalism" },
 ];
 
+const CATEGORY_INITIALS: Record<CategoryKey, string> = {
+  opening: "O",
+  pitch_delivery: "P",
+  objection_handling: "OH",
+  closing_technique: "C",
+  professionalism: "PR",
+};
+
+const POSITIVE_SIGNALS = new Set([
+  "acknowledges_concern",
+  "builds_rapport",
+  "explains_value",
+  "provides_proof",
+  "reduces_pressure",
+  "personalizes_pitch",
+  "invites_dialogue",
+]);
+
+const NEGATIVE_SIGNALS = new Set([
+  "pushes_close",
+  "dismisses_concern",
+  "ignores_objection",
+  "high_difficulty_backfire",
+]);
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function scoreValue(value: number | { score?: number } | undefined): number {
-  if (typeof value === "number") {
-    return clamp(value, 0, 10);
-  }
+function titleCase(value: string): string {
+  return value
+    .replace(/_/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function scoreValue(value: CategoryScoreDetail | undefined): number {
   if (value && typeof value.score === "number") {
     return clamp(value.score, 0, 10);
   }
@@ -45,14 +95,166 @@ function scoreValue(value: number | { score?: number } | undefined): number {
 }
 
 function scoreBand(score: number) {
-  if (score < 5) return { bg: "rgba(220, 38, 38, 0.12)", text: "#dc2626", border: "rgba(220, 38, 38, 0.2)" };
-  if (score < 8) return { bg: "rgba(217, 119, 6, 0.12)", text: "#d97706", border: "rgba(217, 119, 6, 0.2)" };
-  return { bg: "rgba(22, 101, 52, 0.12)", text: "#166534", border: "rgba(22, 101, 52, 0.2)" };
+  if (score < 5) return { bg: colors.dangerSoft, text: colors.danger, border: "rgba(180, 35, 24, 0.2)" };
+  if (score < 8) return { bg: colors.warningSoft, text: colors.warning, border: "rgba(180, 83, 9, 0.2)" };
+  return { bg: colors.accentSoft, text: colors.accent, border: "rgba(22, 101, 52, 0.2)" };
 }
 
-function CategoryBar({ label, score, index }: { label: string; score: number; index: number }) {
+function formatTurnLabel(turnId: string, turnIndexById: Record<string, number>): string {
+  const turnIndex = turnIndexById[turnId];
+  return typeof turnIndex === "number" ? `Turn ${turnIndex}` : `Turn ${turnId.slice(0, 4)}`;
+}
+
+function hasMeaningfulDetail(detail?: CategoryScoreDetail): boolean {
+  if (!detail?.rationale_summary || !detail.rationale_detail) {
+    return false;
+  }
+  return detail.rationale_detail.trim() !== detail.rationale_summary.trim() &&
+    detail.rationale_detail.length > detail.rationale_summary.length + 20;
+}
+
+function hasDeepDive(detail?: CategoryScoreDetail): boolean {
+  return Boolean(
+    detail?.rationale_summary ||
+      detail?.rationale_detail ||
+      detail?.improvement_target ||
+      detail?.behavioral_signals?.length ||
+      detail?.evidence_turn_ids?.length
+  );
+}
+
+function transcriptBody(turn: TranscriptTurn): string {
+  return turn.rep_text || turn.ai_text || "";
+}
+
+function transcriptSpeaker(turn: TranscriptTurn): "You" | "Homeowner" {
+  return turn.rep_text ? "You" : "Homeowner";
+}
+
+function ShimmerBlock({
+  height,
+  width = "100%",
+  style,
+}: {
+  height: number;
+  width?: number | string;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const shimmerProgress = useSharedValue(0);
+  const sizeStyle: ViewStyle = { height, width: width as ViewStyle["width"] };
+
+  useEffect(() => {
+    shimmerProgress.value = withRepeat(withTiming(1, { duration: 1250 }), -1, false);
+  }, [shimmerProgress]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(shimmerProgress.value, [0, 1], [-220, 220]) }],
+  }));
+
+  return (
+    <View style={[styles.skeletonBlock, sizeStyle, style]}>
+      <Animated.View style={[styles.skeletonShimmerRail, animatedStyle]}>
+        <LinearGradient
+          colors={["transparent", "rgba(255,255,255,0.6)", "transparent"]}
+          start={{ x: 0, y: 0.5 }}
+          end={{ x: 1, y: 0.5 }}
+          style={styles.skeletonShimmer}
+        />
+      </Animated.View>
+    </View>
+  );
+}
+
+function LoadingSkeleton() {
+  return (
+    <>
+      <View style={styles.loadingCard}>
+        <Text style={styles.loadingText}>Pulling your scorecard...</Text>
+      </View>
+
+      <View style={styles.heroBlock}>
+        <ShimmerBlock height={160} width={160} style={styles.heroSkeletonOrb} />
+        <ShimmerBlock height={4} style={styles.heroSkeletonTrack} />
+        <ShimmerBlock height={18} width={180} style={styles.heroSkeletonLabel} />
+      </View>
+
+      <Text style={styles.sectionTitle}>PERFORMANCE BREAKDOWN</Text>
+      <View style={styles.categoriesContainer}>
+        {Array.from({ length: 5 }, (_, index) => (
+          <View key={`skeleton-${index}`} style={styles.categoryRow}>
+            <View style={styles.categoryHeader}>
+              <ShimmerBlock height={14} width="38%" />
+              <ShimmerBlock height={14} width={42} />
+            </View>
+            <ShimmerBlock height={6} style={styles.track} />
+            {index === 1 ? (
+              <View style={styles.loadingExpandedCard}>
+                <ShimmerBlock height={12} width="92%" />
+                <ShimmerBlock height={12} width="68%" />
+                <ShimmerBlock height={28} width={180} style={styles.loadingExpandedChip} />
+              </View>
+            ) : null}
+          </View>
+        ))}
+      </View>
+
+      <Text style={styles.sectionTitle}>WHAT TO WORK ON</Text>
+      <View style={styles.categoriesContainer}>
+        {Array.from({ length: 3 }, (_, index) => (
+          <View key={`target-skeleton-${index}`} style={styles.improvementRow}>
+            <ShimmerBlock height={38} width={38} style={styles.improvementInitialSkeleton} />
+            <View style={styles.improvementBody}>
+              <ShimmerBlock height={14} width="50%" />
+              <ShimmerBlock height={12} width="88%" style={styles.improvementSkeletonLine} />
+            </View>
+            <ShimmerBlock height={28} width={48} style={styles.improvementBadgeSkeleton} />
+          </View>
+        ))}
+      </View>
+    </>
+  );
+}
+
+function ExpandableCategoryBar({
+  label,
+  score,
+  detail,
+  index,
+  expanded,
+  onPress,
+  onEvidencePress,
+  turnIndexById,
+}: {
+  label: string;
+  score: number;
+  detail?: CategoryScoreDetail;
+  index: number;
+  expanded: boolean;
+  onPress: () => void;
+  onEvidencePress: (turnId: string) => void;
+  turnIndexById: Record<string, number>;
+}) {
   const widthAnim = useRef(new RNAnimated.Value(0)).current;
+  const expandProgress = useSharedValue(expanded ? 1 : 0);
+  const detailProgress = useSharedValue(0);
+  const [showFullDetail, setShowFullDetail] = useState(false);
   const band = scoreBand(score);
+
+  const summaryText = detail?.rationale_summary ?? detail?.rationale_detail ?? "";
+  const showMoreLink = hasMeaningfulDetail(detail);
+  const hasSignals = Boolean(detail?.behavioral_signals?.length);
+  const hasEvidence = Boolean(detail?.evidence_turn_ids?.length);
+  const improvementTarget = detail?.improvement_target ?? null;
+  const canExpand = hasDeepDive(detail);
+
+  const baseExpandedHeight =
+    (summaryText ? 64 : 0) +
+    (showMoreLink ? 24 : 0) +
+    (improvementTarget ? 44 : 0) +
+    (hasSignals ? 68 : 0) +
+    (hasEvidence ? 42 : 0) +
+    (canExpand ? 20 : 0);
+  const fullDetailHeight = showMoreLink && detail?.rationale_detail ? 112 : 0;
 
   useEffect(() => {
     RNAnimated.timing(widthAnim, {
@@ -63,20 +265,131 @@ function CategoryBar({ label, score, index }: { label: string; score: number; in
     }).start();
   }, [score, index, widthAnim]);
 
+  useEffect(() => {
+    expandProgress.value = withSpring(expanded ? 1 : 0, { damping: 18, stiffness: 180 });
+    if (!expanded) {
+      setShowFullDetail(false);
+    }
+  }, [expanded, expandProgress]);
+
+  useEffect(() => {
+    detailProgress.value = withSpring(showFullDetail ? 1 : 0, { damping: 18, stiffness: 180 });
+  }, [detailProgress, showFullDetail]);
+
+  const expandedStyle = useAnimatedStyle(() => ({
+    maxHeight: (baseExpandedHeight + fullDetailHeight * detailProgress.value) * expandProgress.value,
+    opacity: expandProgress.value,
+    marginTop: canExpand ? 8 * expandProgress.value : 0,
+  }));
+
+  const detailStyle = useAnimatedStyle(() => ({
+    maxHeight: fullDetailHeight * detailProgress.value,
+    opacity: detailProgress.value,
+  }));
+
   return (
-    <Animated.View entering={FadeInDown.delay(300 + index * 100).springify()} style={styles.categoryRow}>
-      <View style={styles.categoryHeader}>
-        <Text style={styles.categoryName}>{label}</Text>
-        <Text style={[styles.categoryScore, { color: band.text }]}>{score.toFixed(1)}</Text>
-      </View>
-      <View style={styles.track}>
-        <RNAnimated.View
-          style={[
-            styles.trackFill,
-            { backgroundColor: colors.accent, width: widthAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }) }
-          ]}
-        />
-      </View>
+    <Animated.View entering={FadeInDown.delay(240 + index * 90).springify()} style={styles.categoryRow}>
+      <Pressable
+        onPress={canExpand ? onPress : undefined}
+        disabled={!canExpand}
+        style={({ pressed }) => [styles.categoryPressable, pressed && canExpand ? styles.categoryPressablePressed : null]}
+      >
+        <View style={styles.categoryHeader}>
+          <Text style={styles.categoryName}>{label}</Text>
+          <View style={styles.categoryRight}>
+            <Text style={[styles.categoryScore, { color: band.text }]}>{score.toFixed(1)}</Text>
+            {canExpand ? (
+              expanded ? <ChevronUp size={15} color={colors.muted} /> : <ChevronDown size={15} color={colors.muted} />
+            ) : null}
+          </View>
+        </View>
+        <View style={styles.track}>
+          <RNAnimated.View
+            style={[
+              styles.trackFill,
+              {
+                backgroundColor: band.text,
+                width: widthAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }),
+              },
+            ]}
+          />
+        </View>
+      </Pressable>
+
+      <Animated.View style={[styles.categoryExpandedWrap, expandedStyle]}>
+        {expanded && canExpand ? (
+          <Animated.View entering={FadeInDown.duration(220)} style={styles.categoryExpandedInner}>
+            {summaryText ? (
+              <View style={styles.categoryRationaleRow}>
+                <Text style={styles.categoryRationaleText}>{summaryText}</Text>
+                {showMoreLink ? (
+                  <>
+                    <Pressable onPress={() => setShowFullDetail((current) => !current)} hitSlop={8}>
+                      <Text style={styles.moreLink}>{showFullDetail ? "Less" : "More"}</Text>
+                    </Pressable>
+                    <Animated.View style={[styles.categoryDetailWrap, detailStyle]}>
+                      {detail?.rationale_detail ? <Text style={styles.categoryDetailText}>{detail.rationale_detail}</Text> : null}
+                    </Animated.View>
+                  </>
+                ) : null}
+              </View>
+            ) : null}
+
+            {improvementTarget ? (
+              <View style={styles.improvementChip}>
+                <ArrowRight size={12} color={colors.warning} />
+                <Text style={styles.improvementChipText}>{improvementTarget}</Text>
+              </View>
+            ) : null}
+
+            {hasSignals ? (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.signalChipRow}>
+                {(detail?.behavioral_signals ?? []).map((signal) => {
+                  const normalizedSignal = String(signal);
+                  const positive = POSITIVE_SIGNALS.has(normalizedSignal);
+                  const negative = NEGATIVE_SIGNALS.has(normalizedSignal);
+
+                  return (
+                    <View
+                      key={`${label}-${normalizedSignal}`}
+                      style={[
+                        styles.signalChip,
+                        positive ? styles.signalChipPositive : null,
+                        negative ? styles.signalChipNegative : null,
+                        !positive && !negative ? styles.signalChipNeutral : null,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.signalChipText,
+                          positive ? styles.signalChipTextPositive : null,
+                          negative ? styles.signalChipTextNegative : null,
+                          !positive && !negative ? styles.signalChipTextNeutral : null,
+                        ]}
+                      >
+                        {titleCase(normalizedSignal)}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            ) : null}
+
+            {hasEvidence ? (
+              <View style={styles.evidenceRow}>
+                <Text style={styles.evidencePrefix}>Evidence:</Text>
+                <View style={styles.evidenceLinks}>
+                  {(detail?.evidence_turn_ids ?? []).map((turnId) => (
+                    <Pressable key={turnId} onPress={() => onEvidencePress(turnId)} hitSlop={8}>
+                      <Text style={styles.evidenceLink}>{formatTurnLabel(turnId, turnIndexById)}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            ) : null}
+          </Animated.View>
+        ) : null}
+      </Animated.View>
     </Animated.View>
   );
 }
@@ -90,8 +403,13 @@ export function ScoreScreen({ route, navigation }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pollCount, setPollCount] = useState(0);
+  const [expandedCategoryKey, setExpandedCategoryKey] = useState<CategoryKey | null>(null);
+  const [focusedTranscriptTurnId, setFocusedTranscriptTurnId] = useState<string | null>(null);
 
   const heroBarAnim = useRef(new RNAnimated.Value(0)).current;
+  const scrollRef = useRef<ScrollView | null>(null);
+  const transcriptSectionOffsetRef = useRef(0);
+  const transcriptTurnOffsetsRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -110,6 +428,7 @@ export function ScoreScreen({ route, navigation }: Props) {
         const result = await fetchRepSession(repId, sessionId);
         if (cancelled) return;
         setData(result);
+        setError(null);
 
         if (result.session.scenario_id && !scenario) {
           const sc = await fetchRepScenario(repId, result.session.scenario_id);
@@ -118,7 +437,7 @@ export function ScoreScreen({ route, navigation }: Props) {
 
         if (!result.scorecard && pollCount < 5) {
           retryTimer = setTimeout(() => {
-            if (!cancelled) setPollCount((c) => c + 1);
+            if (!cancelled) setPollCount((current) => current + 1);
           }, 2000);
         }
       } catch (err) {
@@ -139,9 +458,10 @@ export function ScoreScreen({ route, navigation }: Props) {
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [pollCount, repId, sessionId, scenario]);
+  }, [pollCount, repId, scenario, sessionId]);
 
   const scorecard = data?.scorecard;
+  const transcript = data?.transcript ?? [];
   const overallScore = scorecard?.overall_score ?? 0;
   const overallBand = scoreBand(overallScore);
 
@@ -153,128 +473,256 @@ export function ScoreScreen({ route, navigation }: Props) {
         useNativeDriver: false,
       }).start();
     }
-  }, [scorecard, overallScore, heroBarAnim]);
+  }, [heroBarAnim, overallScore, scorecard]);
 
-  const managerNote = data?.manager_note || data?.manager_review?.notes;
+  useEffect(() => {
+    if (!scorecard) {
+      setExpandedCategoryKey(null);
+    }
+  }, [scorecard]);
+
+  const managerNote = data?.manager_coaching_note?.note ?? data?.manager_note ?? data?.manager_review?.notes ?? null;
+  const improvementTargets = scorecard?.improvement_targets ?? [];
+
+  const turnIndexById = useMemo<Record<string, number>>(
+    () =>
+      transcript.reduce<Record<string, number>>((accumulator, turn) => {
+        accumulator[turn.turn_id] = turn.turn_index;
+        return accumulator;
+      }, {}),
+    [transcript]
+  );
 
   const categories = useMemo<CategoryRow[]>(() => {
     const scores = scorecard?.category_scores ?? {};
-    return CATEGORY_ORDER.map((cat) => ({
-      ...cat,
-      score: scoreValue(scores[cat.key]),
+    return CATEGORY_ORDER.map((category) => ({
+      ...category,
+      detail: scores[category.key],
+      score: scoreValue(scores[category.key]),
     }));
   }, [scorecard]);
 
   const highlights = (scorecard?.highlights ?? []).slice(0, 4);
+  const weaknessTags = scorecard?.weakness_tags ?? [];
+
+  function handleEvidencePress(turnId: string) {
+    setFocusedTranscriptTurnId(turnId);
+    const sectionOffset = transcriptSectionOffsetRef.current;
+    const rowOffset = transcriptTurnOffsetsRef.current[turnId];
+    const targetY = sectionOffset + (typeof rowOffset === "number" ? rowOffset : 0) - 140;
+    scrollRef.current?.scrollTo({ y: Math.max(0, targetY), animated: true });
+  }
 
   return (
     <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {loading ? (
-          <View style={styles.loadingCard}>
-            <ActivityIndicator color={colors.accent} />
-            <Text style={styles.loadingText}>Pulling your scorecard...</Text>
-          </View>
-        ) : (
-          <>
-            <View style={styles.heroBlock}>
-              {/* @ts-ignore */}
-              <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}>
-                <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
-                <Text style={styles.heroLabel}>Overall Score</Text>
-              </Animated.View>
-              <View style={styles.heroBarTrack}>
-                <RNAnimated.View
-                  style={[
-                    styles.heroBarFill,
-                    {
-                      backgroundColor: overallBand.text,
-                      width: heroBarAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }),
-                    },
-                  ]}
-                />
+        <ScrollView ref={scrollRef} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+          {loading ? (
+            <LoadingSkeleton />
+          ) : (
+            <>
+              <View style={styles.heroBlock}>
+                {/* @ts-ignore */}
+                <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}>
+                  <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
+                  <Text style={styles.heroLabel}>Overall Score</Text>
+                </Animated.View>
+                <View style={styles.heroBarTrack}>
+                  <RNAnimated.View
+                    style={[
+                      styles.heroBarFill,
+                      {
+                        backgroundColor: overallBand.text,
+                        width: heroBarAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }),
+                      },
+                    ]}
+                  />
+                </View>
+                <Text style={styles.scenarioName}>{scenario?.name ?? "Scenario"}</Text>
               </View>
-              <Text style={styles.scenarioName}>{scenario?.name ?? "Scenario"}</Text>
-            </View>
 
-            {refreshing && !scorecard ? <Text style={styles.refreshText}>AI grading is still processing...</Text> : null}
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+              {refreshing && !scorecard ? <Text style={styles.refreshText}>AI grading is still processing...</Text> : null}
+              {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
-            {scorecard ? (
-              <>
-                <Text style={styles.sectionTitle}>PERFORMANCE BREAKDOWN</Text>
-                <BlurView intensity={40} tint="light" style={styles.categoriesContainer}>
-                  {categories.map((cat, idx) => (
-                    <CategoryBar key={cat.key} label={cat.label} score={cat.score} index={idx} />
-                  ))}
-                </BlurView>
+              {scorecard ? (
+                <>
+                  <Text style={styles.sectionTitle}>PERFORMANCE BREAKDOWN</Text>
+                  <BlurView intensity={40} tint="light" style={styles.categoriesContainer}>
+                    {categories.map((category, index) => (
+                      <ExpandableCategoryBar
+                        key={category.key}
+                        label={category.label}
+                        score={category.score}
+                        detail={category.detail}
+                        index={index}
+                        expanded={expandedCategoryKey === category.key}
+                        onPress={() => setExpandedCategoryKey((current) => (current === category.key ? null : category.key))}
+                        onEvidencePress={handleEvidencePress}
+                        turnIndexById={turnIndexById}
+                      />
+                    ))}
+                  </BlurView>
 
-                <Text style={styles.sectionTitle}>KEY MOMENTS</Text>
-                {highlights.length === 0 ? <Text style={styles.emptyText}>No highlights available.</Text> : null}
-                {highlights.map((hl, idx) => {
-                  const isStrong = hl.type === "strong";
-                  const hlBand = isStrong ? scoreBand(8) : scoreBand(6);
-                  const quote = hl.transcript_quote || hl.quote || null;
+                  {improvementTargets.length > 0 ? (
+                    <>
+                      <Text style={styles.sectionTitle}>WHAT TO WORK ON</Text>
+                      <Text style={styles.sectionSubtitle}>Focus on these in your next drill</Text>
+                      <BlurView intensity={40} tint="light" style={styles.categoriesContainer}>
+                        {improvementTargets.slice(0, 3).map((target, index) => {
+                          const band = scoreBand(target.score);
+                          const categoryKey = target.category as CategoryKey;
+                          const initials = CATEGORY_INITIALS[categoryKey] ?? target.label.slice(0, 2).toUpperCase();
 
-                  return (
-                    <Animated.View key={idx} entering={FadeInDown.delay(700 + idx * 100).springify()} style={styles.highlightCardWrapper}>
-                      <BlurView intensity={40} tint="light" style={styles.highlightCard}>
-                        <View style={styles.highlightHeader}>
-                          <View style={[styles.highlightTag, { backgroundColor: isStrong ? colors.accentSoft : "#FEF3C7" }]}> 
-                            <Text style={[styles.highlightTagText, { color: isStrong ? colors.accent : "#92400E" }]}>
-                              {isStrong ? "Strong" : "Improve"}
+                          return (
+                            <Animated.View key={`${target.category}-${index}`} entering={FadeInDown.delay(520 + index * 90).springify()} style={styles.improvementRow}>
+                              <View style={[styles.improvementInitial, { backgroundColor: band.bg, borderColor: band.border }]}>
+                                <Text style={[styles.improvementInitialText, { color: band.text }]}>{initials}</Text>
+                              </View>
+                              <View style={styles.improvementBody}>
+                                <Text style={styles.improvementLabel}>{target.label}</Text>
+                                <Text style={styles.improvementTarget}>{target.target}</Text>
+                              </View>
+                              <View style={[styles.scoreBadge, { backgroundColor: band.bg, borderColor: band.border }]}>
+                                <Text style={[styles.scoreBadgeText, { color: band.text }]}>{target.score.toFixed(1)}</Text>
+                              </View>
+                            </Animated.View>
+                          );
+                        })}
+                      </BlurView>
+                    </>
+                  ) : null}
+
+                  <Text style={styles.sectionTitle}>KEY MOMENTS</Text>
+                  {highlights.length === 0 ? <Text style={styles.emptyText}>No highlights available.</Text> : null}
+                  {highlights.map((highlight, index) => {
+                    const isStrong = highlight.type === "strong";
+                    const highlightBand = isStrong ? scoreBand(8.2) : scoreBand(6.2);
+                    const quote = highlight.transcript_quote || highlight.quote || null;
+
+                    return (
+                      <Animated.View key={`${highlight.type}-${index}`} entering={FadeInDown.delay(700 + index * 100).springify()} style={styles.highlightCardWrapper}>
+                        <BlurView intensity={40} tint="light" style={styles.highlightCard}>
+                          <View style={styles.highlightHeader}>
+                            <View style={[styles.highlightTag, { backgroundColor: highlightBand.bg, borderColor: highlightBand.border }]}>
+                              <Text style={[styles.highlightTagText, { color: highlightBand.text }]}>{isStrong ? "Strong" : "Improve"}</Text>
+                            </View>
+                            {highlight.turn_id ? <Text style={styles.turnRef}>{formatTurnLabel(highlight.turn_id, turnIndexById)}</Text> : null}
+                          </View>
+                          <Text style={styles.highlightNote}>{highlight.note}</Text>
+                          {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
+                        </BlurView>
+                      </Animated.View>
+                    );
+                  })}
+
+                  <Text style={styles.sectionTitle}>FEEDBACK</Text>
+                  <Animated.View entering={FadeInDown.delay(1000).springify()} style={styles.summaryCardWrapper}>
+                    <BlurView intensity={40} tint="light" style={styles.summaryCard}>
+                      <Text style={styles.summaryText}>{scorecard.ai_summary}</Text>
+                    </BlurView>
+                  </Animated.View>
+
+                  {managerNote ? (
+                    <Animated.View entering={FadeInDown.delay(1100).springify()} style={styles.managerNoteCard}>
+                      <View style={styles.managerNoteHeader}>
+                        <UserCircle size={16} color={colors.accent} />
+                        <Text style={styles.managerNoteLabel}>Manager Note</Text>
+                      </View>
+                      <Text style={styles.managerNoteText}>{managerNote}</Text>
+                    </Animated.View>
+                  ) : null}
+
+                  {weaknessTags.length > 0 ? (
+                    <>
+                      <Text style={styles.sectionTitle}>AREAS TO WATCH</Text>
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.weaknessScroll}>
+                        {weaknessTags.map((tag) => (
+                          <View key={tag} style={styles.weaknessChip}>
+                            <Text style={styles.weaknessChipText}>{titleCase(tag)}</Text>
+                          </View>
+                        ))}
+                      </ScrollView>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
+
+              {transcript.length > 0 ? (
+                <>
+                  <Text style={styles.sectionTitle}>TRANSCRIPT</Text>
+                  <Text style={styles.sectionSubtitle}>Tap evidence turns above to jump here</Text>
+                  <BlurView
+                    intensity={40}
+                    tint="light"
+                    style={styles.transcriptContainer}
+                    onLayout={(event) => {
+                      transcriptSectionOffsetRef.current = event.nativeEvent.layout.y;
+                    }}
+                  >
+                    {transcript.map((turn, index) => {
+                      const isFocused = focusedTranscriptTurnId === turn.turn_id;
+                      const isRepTurn = Boolean(turn.rep_text);
+                      const line = transcriptBody(turn);
+
+                      return (
+                        <Animated.View
+                          key={turn.turn_id}
+                          entering={FadeInDown.delay(260 + index * 60).springify()}
+                          onLayout={(event) => {
+                            transcriptTurnOffsetsRef.current[turn.turn_id] = event.nativeEvent.layout.y;
+                          }}
+                          style={[
+                            styles.transcriptCard,
+                            isRepTurn ? styles.transcriptCardRep : styles.transcriptCardAi,
+                            isFocused ? styles.transcriptCardFocused : null,
+                          ]}
+                        >
+                          <View style={styles.transcriptHeader}>
+                            <Text style={styles.transcriptBadge}>{transcriptSpeaker(turn)}</Text>
+                            <Text style={styles.transcriptMeta}>
+                              {`Turn ${turn.turn_index}`}
+                              {turn.stage ? ` • ${titleCase(turn.stage)}` : ""}
+                              {turn.emotion ? ` • ${titleCase(turn.emotion)}` : ""}
                             </Text>
                           </View>
-                          {hl.turn_id ? <Text style={styles.turnRef}>Turn {hl.turn_id.slice(0, 8)}</Text> : null}
-                        </View>
-                        <Text style={styles.highlightNote}>{hl.note}</Text>
-                        {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
-                      </BlurView>
-                    </Animated.View>
-                  );
-                })}
-
-                <Text style={styles.sectionTitle}>FEEDBACK</Text>
-                <Animated.View entering={FadeInDown.delay(1000).springify()} style={styles.summaryCardWrapper}>
-                  <BlurView intensity={40} tint="light" style={styles.summaryCard}>
-                    <Text style={styles.summaryText}>{scorecard.ai_summary}</Text>
+                          <Text style={styles.transcriptText}>{line}</Text>
+                          {turn.objection_tags.length > 0 ? (
+                            <View style={styles.transcriptTagRow}>
+                              {turn.objection_tags.map((tag) => (
+                                <View key={`${turn.turn_id}-${tag}`} style={styles.transcriptTag}>
+                                  <Text style={styles.transcriptTagText}>{titleCase(tag)}</Text>
+                                </View>
+                              ))}
+                            </View>
+                          ) : null}
+                        </Animated.View>
+                      );
+                    })}
                   </BlurView>
-                </Animated.View>
+                </>
+              ) : null}
 
-                {managerNote ? (
-                  <Animated.View entering={FadeInDown.delay(1100).springify()} style={styles.managerNoteCard}>
-                    <View style={styles.managerNoteHeader}>
-                      <UserCircle size={16} color={colors.accent} />
-                      <Text style={styles.managerNoteLabel}>Manager Note</Text>
-                    </View>
-                    <Text style={styles.managerNoteText}>{managerNote}</Text>
-                  </Animated.View>
-                ) : null}
-              </>
-            ) : null}
-
-            <View style={styles.ctaRow}>
-              <Pressable
-                style={styles.primaryCta}
-                onPress={() => {
-                  const assignmentId = data?.session.assignment_id;
-                  const scenarioId = data?.session.scenario_id;
-                  if (assignmentId && scenarioId) {
-                    navigation.replace("PreSession", { assignmentId, scenarioId });
-                  }
-                }}
-              >
-                <Text style={styles.primaryCtaLabel}>Try Again</Text>
-              </Pressable>
-          <Pressable style={styles.secondaryCta} onPress={() => navigation.replace("MainTabs", { screen: "AssignmentsTab" })}>
-            <Text style={styles.secondaryCtaLabel}>Back to Drills</Text>
-          </Pressable>
-            </View>
-          </>
-        )}
-      </ScrollView>
-    </SafeAreaView>
+              <View style={styles.ctaRow}>
+                <Pressable
+                  style={styles.primaryCta}
+                  onPress={() => {
+                    const assignmentId = data?.session.assignment_id;
+                    const scenarioId = data?.session.scenario_id;
+                    if (assignmentId && scenarioId) {
+                      navigation.replace("PreSession", { assignmentId, scenarioId });
+                    }
+                  }}
+                >
+                  <Text style={styles.primaryCtaLabel}>Try Again</Text>
+                </Pressable>
+                <Pressable style={styles.secondaryCta} onPress={() => navigation.replace("MainTabs", { screen: "AssignmentsTab" })}>
+                  <Text style={styles.secondaryCtaLabel}>Back to Drills</Text>
+                </Pressable>
+              </View>
+            </>
+          )}
+        </ScrollView>
+      </SafeAreaView>
     </LinearGradient>
   );
 }
@@ -283,16 +731,63 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   safeArea: { flex: 1 },
   content: { padding: 20, paddingBottom: 40 },
+
   loadingCard: {
-    marginTop: 40,
-    padding: 20,
+    marginTop: 18,
+    marginBottom: 8,
     alignItems: "center",
-    gap: 12,
   },
-  loadingText: { color: colors.muted, fontSize: 15 },
+  loadingText: {
+    color: colors.muted,
+    fontSize: 15,
+    fontFamily: "Poppins_600SemiBold",
+  },
+  skeletonBlock: {
+    overflow: "hidden",
+    borderRadius: 999,
+    backgroundColor: "rgba(108, 98, 85, 0.12)",
+  },
+  skeletonShimmerRail: {
+    ...StyleSheet.absoluteFillObject,
+    width: 160,
+  },
+  skeletonShimmer: {
+    flex: 1,
+  },
+  heroSkeletonOrb: {
+    borderRadius: 999,
+    marginBottom: 12,
+  },
+  heroSkeletonTrack: {
+    width: "100%",
+    borderRadius: 4,
+  },
+  heroSkeletonLabel: {
+    marginTop: 16,
+  },
+  loadingExpandedCard: {
+    gap: 10,
+    marginTop: 10,
+    padding: 12,
+    borderRadius: 18,
+    backgroundColor: "rgba(255,255,255,0.45)",
+  },
+  loadingExpandedChip: {
+    borderRadius: 14,
+  },
+  improvementInitialSkeleton: {
+    borderRadius: 19,
+  },
+  improvementSkeletonLine: {
+    marginTop: 8,
+  },
+  improvementBadgeSkeleton: {
+    borderRadius: 14,
+  },
+
   refreshText: { color: colors.muted, fontSize: 13, textAlign: "center", marginBottom: 12 },
-  errorText: { color: "#AF2D18", fontSize: 14, fontWeight: "700", textAlign: "center", marginBottom: 12 },
-  
+  errorText: { color: colors.danger, fontSize: 14, fontWeight: "700", textAlign: "center", marginBottom: 12 },
+
   heroBlock: {
     alignItems: "center",
     paddingTop: 12,
@@ -341,7 +836,7 @@ const styles = StyleSheet.create({
     color: colors.ink,
     marginTop: 16,
   },
-  
+
   sectionTitle: {
     fontSize: 12,
     fontWeight: "700",
@@ -349,7 +844,13 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
     letterSpacing: 1,
     marginTop: 28,
+    marginBottom: 8,
+  },
+  sectionSubtitle: {
+    fontSize: 13,
+    color: colors.muted,
     marginBottom: 12,
+    lineHeight: 18,
   },
   categoriesContainer: {
     gap: 12,
@@ -368,6 +869,12 @@ const styles = StyleSheet.create({
   categoryRow: {
     gap: 6,
   },
+  categoryPressable: {
+    gap: 6,
+  },
+  categoryPressablePressed: {
+    opacity: 0.85,
+  },
   categoryHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -376,6 +883,12 @@ const styles = StyleSheet.create({
   categoryName: {
     fontSize: 13,
     color: colors.ink,
+    flex: 1,
+  },
+  categoryRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   categoryScore: {
     fontSize: 13,
@@ -391,9 +904,155 @@ const styles = StyleSheet.create({
     height: "100%",
     borderRadius: 3,
   },
-  
+  categoryExpandedWrap: {
+    overflow: "hidden",
+  },
+  categoryExpandedInner: {
+    gap: 12,
+    paddingTop: 2,
+  },
+  categoryRationaleRow: {
+    gap: 6,
+  },
+  categoryRationaleText: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: colors.muted,
+  },
+  moreLink: {
+    fontSize: 12,
+    color: colors.accent,
+    fontFamily: "Poppins_600SemiBold",
+  },
+  categoryDetailWrap: {
+    overflow: "hidden",
+  },
+  categoryDetailText: {
+    fontSize: 13,
+    lineHeight: 20,
+    color: colors.ink,
+    paddingTop: 2,
+  },
+  improvementChip: {
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: colors.warningSoft,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(180, 83, 9, 0.24)",
+  },
+  improvementChipText: {
+    fontSize: 12,
+    color: colors.warning,
+    fontFamily: "Poppins_600SemiBold",
+  },
+  signalChipRow: {
+    gap: 8,
+    paddingRight: 12,
+  },
+  signalChip: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  signalChipPositive: {
+    backgroundColor: colors.accentSoft,
+    borderColor: "rgba(22, 101, 52, 0.2)",
+  },
+  signalChipNegative: {
+    backgroundColor: colors.dangerSoft,
+    borderColor: "rgba(180, 35, 24, 0.2)",
+  },
+  signalChipNeutral: {
+    backgroundColor: colors.warningSoft,
+    borderColor: "rgba(180, 83, 9, 0.2)",
+  },
+  signalChipText: {
+    fontSize: 11,
+    fontFamily: "Poppins_600SemiBold",
+  },
+  signalChipTextPositive: {
+    color: colors.accent,
+  },
+  signalChipTextNegative: {
+    color: colors.danger,
+  },
+  signalChipTextNeutral: {
+    color: colors.warning,
+  },
+  evidenceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  evidencePrefix: {
+    fontSize: 12,
+    color: colors.muted,
+  },
+  evidenceLinks: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  evidenceLink: {
+    fontSize: 12,
+    color: colors.accent,
+    textDecorationLine: "underline",
+  },
+
+  improvementRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  improvementInitial: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  improvementInitialText: {
+    fontSize: 12,
+    fontFamily: "Poppins_700Bold",
+  },
+  improvementBody: {
+    flex: 1,
+  },
+  improvementLabel: {
+    fontSize: 14,
+    color: colors.ink,
+    fontFamily: "Poppins_600SemiBold",
+  },
+  improvementTarget: {
+    fontSize: 13,
+    color: colors.muted,
+    lineHeight: 19,
+    marginTop: 2,
+  },
+  scoreBadge: {
+    minWidth: 48,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  scoreBadgeText: {
+    fontSize: 12,
+    fontFamily: "Poppins_700Bold",
+  },
+
   emptyText: { color: colors.muted, fontSize: 14, fontStyle: "italic" },
-  
+
   highlightCardWrapper: {
     marginBottom: 12,
     borderRadius: 24,
@@ -419,6 +1078,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   highlightTagText: {
     fontSize: 11,
@@ -439,7 +1099,7 @@ const styles = StyleSheet.create({
     marginTop: 6,
     lineHeight: 20,
   },
-  
+
   summaryCardWrapper: {
     borderRadius: 24,
     overflow: "hidden",
@@ -460,7 +1120,7 @@ const styles = StyleSheet.create({
     color: colors.ink,
     lineHeight: 24,
   },
-  
+
   managerNoteCard: {
     backgroundColor: colors.accentSoft,
     borderLeftWidth: 3,
@@ -485,7 +1145,101 @@ const styles = StyleSheet.create({
     marginTop: 6,
     lineHeight: 18,
   },
-  
+
+  weaknessScroll: {
+    gap: 10,
+    paddingRight: 20,
+  },
+  weaknessChip: {
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    backgroundColor: colors.dangerSoft,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(180, 35, 24, 0.22)",
+  },
+  weaknessChipText: {
+    color: colors.danger,
+    fontSize: 12,
+    fontFamily: "Poppins_600SemiBold",
+  },
+
+  transcriptContainer: {
+    gap: 12,
+    borderRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
+    padding: 20,
+    overflow: "hidden",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.04,
+    shadowRadius: 16,
+    elevation: 3,
+  },
+  transcriptCard: {
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 14,
+  },
+  transcriptCardRep: {
+    backgroundColor: "rgba(22, 101, 52, 0.06)",
+    borderColor: "rgba(22, 101, 52, 0.12)",
+  },
+  transcriptCardAi: {
+    backgroundColor: "rgba(180, 83, 9, 0.06)",
+    borderColor: "rgba(180, 83, 9, 0.12)",
+  },
+  transcriptCardFocused: {
+    backgroundColor: colors.warningSoft,
+    borderColor: "rgba(180, 83, 9, 0.24)",
+    shadowColor: colors.warning,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.08,
+    shadowRadius: 14,
+    elevation: 3,
+  },
+  transcriptHeader: {
+    gap: 4,
+  },
+  transcriptBadge: {
+    alignSelf: "flex-start",
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    color: colors.muted,
+    fontFamily: "Poppins_600SemiBold",
+  },
+  transcriptMeta: {
+    fontSize: 12,
+    color: colors.muted,
+    lineHeight: 18,
+  },
+  transcriptText: {
+    marginTop: 10,
+    fontSize: 14,
+    color: colors.ink,
+    lineHeight: 21,
+  },
+  transcriptTagRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 10,
+  },
+  transcriptTag: {
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    backgroundColor: "rgba(31, 26, 19, 0.06)",
+  },
+  transcriptTagText: {
+    fontSize: 11,
+    color: colors.muted,
+    fontFamily: "Poppins_600SemiBold",
+  },
+
   ctaRow: {
     flexDirection: "row",
     gap: 12,

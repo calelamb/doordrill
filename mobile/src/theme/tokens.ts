@@ -7,5 +7,9 @@ export const colors = {
   line: "rgba(0, 0, 0, 0.06)", // Softened for Apple UI style
   accent: "#166534",
   accentSoft: "rgba(22, 101, 52, 0.12)",
-  success: "#15803d"
+  success: "#15803d",
+  warning: "#B45309",
+  warningSoft: "rgba(180, 83, 9, 0.12)",
+  danger: "#B42318",
+  dangerSoft: "rgba(180, 35, 24, 0.12)"
 };

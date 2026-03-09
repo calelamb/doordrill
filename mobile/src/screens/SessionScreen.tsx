@@ -1,7 +1,9 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
+import { BlurView } from "expo-blur";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Haptics from "expo-haptics";
+import { LinearGradient } from "expo-linear-gradient";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Animated as RNAnimated, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 import Animated, { 

@@ -1,7 +1,30 @@
 import { API_BASE_URL } from "./config";
-import { RepAssignment, RepProgress, RepSessionDetail, ScenarioBrief } from "../types";
+import {
+  CategoryScoreDetail,
+  ImprovementTarget,
+  RepAssignment,
+  RepProgress,
+  RepSessionDetail,
+  ScenarioBrief,
+  Scorecard,
+  TranscriptTurn,
+} from "../types";
 
 type HeaderMap = Record<string, string>;
+
+type RawCategoryScore = number | (Partial<CategoryScoreDetail> & { score?: number }) | null;
+
+type RawScorecard = Omit<Scorecard, "category_scores" | "improvement_targets" | "scorecard_schema_version"> & {
+  scorecard_schema_version?: string;
+  category_scores?: Record<string, RawCategoryScore>;
+};
+
+type RawRepSessionDetail = Omit<RepSessionDetail, "scorecard" | "transcript" | "manager_note" | "manager_coaching_note"> & {
+  scorecard: RawScorecard | null;
+  transcript?: TranscriptTurn[];
+  improvement_targets?: ImprovementTarget[];
+  manager_coaching_note?: RepSessionDetail["manager_coaching_note"];
+};
 
 function repHeaders(repId: string): HeaderMap {
   return {
@@ -16,6 +39,63 @@ async function parseJson<T>(response: Response, action: string): Promise<T> {
     throw new Error(`${action} failed (${response.status})`);
   }
   return (await response.json()) as T;
+}
+
+function normalizeCategoryScore(value: RawCategoryScore): CategoryScoreDetail {
+  if (typeof value === "number") {
+    return { score: value };
+  }
+
+  if (value && typeof value === "object") {
+    return {
+      score: typeof value.score === "number" ? value.score : 0,
+      rationale_summary: value.rationale_summary,
+      rationale_detail: value.rationale_detail,
+      improvement_target: value.improvement_target ?? null,
+      behavioral_signals: Array.isArray(value.behavioral_signals) ? value.behavioral_signals : [],
+      evidence_turn_ids: Array.isArray(value.evidence_turn_ids) ? value.evidence_turn_ids : [],
+      confidence: typeof value.confidence === "number" ? value.confidence : undefined,
+    };
+  }
+
+  return { score: 0 };
+}
+
+function normalizeScorecard(
+  scorecard: RawScorecard | null,
+  improvementTargets: ImprovementTarget[]
+): Scorecard | null {
+  if (!scorecard) {
+    return null;
+  }
+
+  const normalizedScores = Object.fromEntries(
+    Object.entries(scorecard.category_scores ?? {}).map(([key, value]) => [key, normalizeCategoryScore(value)])
+  );
+
+  return {
+    ...scorecard,
+    scorecard_schema_version: scorecard.scorecard_schema_version ?? "v1",
+    category_scores: normalizedScores,
+    improvement_targets: improvementTargets,
+    highlights: scorecard.highlights ?? [],
+    ai_summary: scorecard.ai_summary ?? "",
+    evidence_turn_ids: Array.isArray(scorecard.evidence_turn_ids) ? scorecard.evidence_turn_ids : [],
+    weakness_tags: Array.isArray(scorecard.weakness_tags) ? scorecard.weakness_tags : [],
+  };
+}
+
+function normalizeRepSessionDetail(payload: RawRepSessionDetail): RepSessionDetail {
+  const improvementTargets = Array.isArray(payload.improvement_targets) ? payload.improvement_targets : [];
+  const managerCoachingNote = payload.manager_coaching_note ?? null;
+
+  return {
+    ...payload,
+    scorecard: normalizeScorecard(payload.scorecard, improvementTargets),
+    transcript: Array.isArray(payload.transcript) ? payload.transcript : [],
+    manager_coaching_note: managerCoachingNote,
+    manager_note: managerCoachingNote?.note ?? null,
+  };
 }
 
 export async function checkApiReachable(timeoutMs = 3500): Promise<boolean> {
@@ -76,7 +156,8 @@ export async function fetchRepSession(repId: string, sessionId: string): Promise
   const response = await fetch(`${API_BASE_URL}/rep/sessions/${encodeURIComponent(sessionId)}`, {
     headers: repHeaders(repId)
   });
-  return parseJson<RepSessionDetail>(response, "fetch session detail");
+  const payload = await parseJson<RawRepSessionDetail>(response, "fetch session detail");
+  return normalizeRepSessionDetail(payload);
 }
 
 export async function fetchRepProgress(repId: string): Promise<RepProgress> {
