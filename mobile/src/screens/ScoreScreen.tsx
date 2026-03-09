@@ -1,17 +1,19 @@
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Animated as RNAnimated,
   Pressable,
   SafeAreaView,
   ScrollView,
+  Share,
   StyleProp,
   StyleSheet,
   Text,
   View,
   ViewStyle,
 } from "react-native";
-import { ArrowRight, ChevronDown, ChevronUp, UserCircle } from "lucide-react-native";
+import { ArrowRight, ChevronDown, ChevronUp, FileText, Share2, UserCircle } from "lucide-react-native";
 import Animated, {
   FadeInDown,
   interpolate,
@@ -32,6 +34,7 @@ import { CategoryScoreDetail, RepSessionDetail, ScenarioBrief, TranscriptTurn } 
 
 type Props = NativeStackScreenProps<RootStackParamList, "Score">;
 
+type TabKey = "scorecard" | "transcript";
 type CategoryKey = "opening" | "pitch_delivery" | "objection_handling" | "closing_technique" | "professionalism";
 
 type CategoryRow = {
@@ -109,8 +112,10 @@ function hasMeaningfulDetail(detail?: CategoryScoreDetail): boolean {
   if (!detail?.rationale_summary || !detail.rationale_detail) {
     return false;
   }
-  return detail.rationale_detail.trim() !== detail.rationale_summary.trim() &&
-    detail.rationale_detail.length > detail.rationale_summary.length + 20;
+  return (
+    detail.rationale_detail.trim() !== detail.rationale_summary.trim() &&
+    detail.rationale_detail.length > detail.rationale_summary.length + 20
+  );
 }
 
 function hasDeepDive(detail?: CategoryScoreDetail): boolean {
@@ -123,12 +128,39 @@ function hasDeepDive(detail?: CategoryScoreDetail): boolean {
   );
 }
 
-function transcriptBody(turn: TranscriptTurn): string {
-  return turn.rep_text || turn.ai_text || "";
+function emotionTone(emotion: string | null | undefined) {
+  const normalized = String(emotion ?? "").trim().toLowerCase();
+  if (normalized === "hostile") {
+    return { bg: colors.dangerSoft, text: colors.danger, border: "rgba(180, 35, 24, 0.2)" };
+  }
+  if (normalized === "annoyed") {
+    return { bg: colors.warningSoft, text: colors.warning, border: "rgba(180, 83, 9, 0.2)" };
+  }
+  if (normalized === "skeptical") {
+    return { bg: "rgba(217, 119, 6, 0.08)", text: "#9A6700", border: "rgba(217, 119, 6, 0.18)" };
+  }
+  if (normalized === "neutral") {
+    return { bg: "rgba(108, 98, 85, 0.12)", text: colors.muted, border: "rgba(108, 98, 85, 0.16)" };
+  }
+  return { bg: colors.accentSoft, text: colors.accent, border: "rgba(22, 101, 52, 0.18)" };
 }
 
-function transcriptSpeaker(turn: TranscriptTurn): "You" | "Homeowner" {
-  return turn.rep_text ? "You" : "Homeowner";
+function formatTranscriptForShare(transcript: TranscriptTurn[], scenarioName: string, startedAt?: string | null) {
+  const dateLabel = startedAt ? new Date(startedAt).toLocaleDateString() : new Date().toLocaleDateString();
+  const blocks = transcript
+    .map((turn) => {
+      const lines = [`Turn ${turn.turn_index}`];
+      if (turn.rep_text.trim()) {
+        lines.push(`You: ${turn.rep_text.trim()}`);
+      }
+      if (turn.ai_text.trim()) {
+        lines.push(`Homeowner: ${turn.ai_text.trim()}`);
+      }
+      return lines.join("\n");
+    })
+    .join("\n\n");
+
+  return `[DoorDrill Transcript] ${scenarioName} — ${dateLabel}\n\n${blocks}`;
 }
 
 function ShimmerBlock({
@@ -167,7 +199,7 @@ function ShimmerBlock({
 
 function LoadingSkeleton() {
   return (
-    <>
+    <ScrollView contentContainerStyle={styles.loadingContent} showsVerticalScrollIndicator={false}>
       <View style={styles.loadingCard}>
         <Text style={styles.loadingText}>Pulling your scorecard...</Text>
       </View>
@@ -176,6 +208,12 @@ function LoadingSkeleton() {
         <ShimmerBlock height={160} width={160} style={styles.heroSkeletonOrb} />
         <ShimmerBlock height={4} style={styles.heroSkeletonTrack} />
         <ShimmerBlock height={18} width={180} style={styles.heroSkeletonLabel} />
+      </View>
+
+      <View style={styles.tabSwitcherShell}>
+        <View style={styles.tabSwitcherTrack}>
+          <ShimmerBlock height={44} width="50%" style={styles.tabSkeletonIndicator} />
+        </View>
       </View>
 
       <Text style={styles.sectionTitle}>PERFORMANCE BREAKDOWN</Text>
@@ -197,21 +235,7 @@ function LoadingSkeleton() {
           </View>
         ))}
       </View>
-
-      <Text style={styles.sectionTitle}>WHAT TO WORK ON</Text>
-      <View style={styles.categoriesContainer}>
-        {Array.from({ length: 3 }, (_, index) => (
-          <View key={`target-skeleton-${index}`} style={styles.improvementRow}>
-            <ShimmerBlock height={38} width={38} style={styles.improvementInitialSkeleton} />
-            <View style={styles.improvementBody}>
-              <ShimmerBlock height={14} width="50%" />
-              <ShimmerBlock height={12} width="88%" style={styles.improvementSkeletonLine} />
-            </View>
-            <ShimmerBlock height={28} width={48} style={styles.improvementBadgeSkeleton} />
-          </View>
-        ))}
-      </View>
-    </>
+    </ScrollView>
   );
 }
 
@@ -263,14 +287,14 @@ function ExpandableCategoryBar({
       delay: index * 100,
       useNativeDriver: false,
     }).start();
-  }, [score, index, widthAnim]);
+  }, [index, score, widthAnim]);
 
   useEffect(() => {
     expandProgress.value = withSpring(expanded ? 1 : 0, { damping: 18, stiffness: 180 });
     if (!expanded) {
       setShowFullDetail(false);
     }
-  }, [expanded, expandProgress]);
+  }, [expandProgress, expanded]);
 
   useEffect(() => {
     detailProgress.value = withSpring(showFullDetail ? 1 : 0, { damping: 18, stiffness: 180 });
@@ -394,6 +418,83 @@ function ExpandableCategoryBar({
   );
 }
 
+function TranscriptTurnCard({
+  turn,
+  evidenceLabels,
+  focused,
+  onLayout,
+}: {
+  turn: TranscriptTurn;
+  evidenceLabels: string[];
+  focused: boolean;
+  onLayout: (y: number) => void;
+}) {
+  const repText = turn.rep_text.trim();
+  const aiText = turn.ai_text.trim();
+  if (!repText && !aiText) {
+    return null;
+  }
+  const emotion = turn.emotion ? emotionTone(turn.emotion) : null;
+
+  return (
+    <Animated.View
+      entering={FadeInDown.springify()}
+      onLayout={(event) => onLayout(event.nativeEvent.layout.y)}
+      style={styles.transcriptEntry}
+    >
+      <Text style={styles.turnDivider}>{`Turn ${turn.turn_index}`}</Text>
+      {turn.stage || emotion ? (
+        <View style={styles.turnMetaRow}>
+          {turn.stage ? <Text style={styles.transcriptStage}>{titleCase(turn.stage)}</Text> : null}
+          {emotion ? (
+            <View style={[styles.emotionChip, { backgroundColor: emotion.bg, borderColor: emotion.border }]}>
+              <Text style={[styles.emotionChipText, { color: emotion.text }]}>{titleCase(turn.emotion ?? "")}</Text>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
+      {repText ? (
+        <View style={[styles.transcriptBubbleRow, styles.transcriptBubbleRowRep]}>
+          <View
+            style={[
+              styles.transcriptBubble,
+              styles.transcriptBubbleRep,
+              evidenceLabels.length > 0 ? styles.transcriptEvidenceBubble : null,
+              focused ? styles.transcriptFocusedBubble : null,
+            ]}
+          >
+            <View style={styles.transcriptBubbleHeader}>
+              <Text style={styles.transcriptBubbleSpeaker}>You</Text>
+            </View>
+            <Text style={styles.transcriptText}>{repText}</Text>
+            {evidenceLabels.length > 0 ? (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.transcriptEvidenceChipRow}>
+                {evidenceLabels.map((label) => (
+                  <View key={`${turn.turn_id}-${label}`} style={[styles.signalChip, styles.signalChipPositive]}>
+                    <Text style={[styles.signalChipText, styles.signalChipTextPositive]}>{label}</Text>
+                  </View>
+                ))}
+              </ScrollView>
+            ) : null}
+          </View>
+        </View>
+      ) : null}
+
+      {aiText ? (
+        <View style={[styles.transcriptBubbleRow, styles.transcriptBubbleRowAi]}>
+          <View style={[styles.transcriptBubble, styles.transcriptBubbleAi]}>
+            <View style={styles.transcriptBubbleHeader}>
+              <Text style={styles.transcriptBubbleSpeaker}>Homeowner</Text>
+            </View>
+            <Text style={styles.transcriptText}>{aiText}</Text>
+          </View>
+        </View>
+      ) : null}
+    </Animated.View>
+  );
+}
+
 export function ScoreScreen({ route, navigation }: Props) {
   const { repId } = useSession();
   const { sessionId } = route.params;
@@ -403,13 +504,18 @@ export function ScoreScreen({ route, navigation }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pollCount, setPollCount] = useState(0);
+  const [activeTab, setActiveTab] = useState<TabKey>("scorecard");
   const [expandedCategoryKey, setExpandedCategoryKey] = useState<CategoryKey | null>(null);
   const [focusedTranscriptTurnId, setFocusedTranscriptTurnId] = useState<string | null>(null);
+  const [pendingTranscriptTurnId, setPendingTranscriptTurnId] = useState<string | null>(null);
+  const [tabSwitcherWidth, setTabSwitcherWidth] = useState(0);
 
   const heroBarAnim = useRef(new RNAnimated.Value(0)).current;
-  const scrollRef = useRef<ScrollView | null>(null);
-  const transcriptSectionOffsetRef = useRef(0);
+  const transcriptScrollRef = useRef<ScrollView | null>(null);
   const transcriptTurnOffsetsRef = useRef<Record<string, number>>({});
+
+  const tabIndicatorOffset = useSharedValue(0);
+  const tabIndicatorWidth = useSharedValue(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -431,8 +537,8 @@ export function ScoreScreen({ route, navigation }: Props) {
         setError(null);
 
         if (result.session.scenario_id && !scenario) {
-          const sc = await fetchRepScenario(repId, result.session.scenario_id);
-          if (!cancelled) setScenario(sc);
+          const scenarioResult = await fetchRepScenario(repId, result.session.scenario_id);
+          if (!cancelled) setScenario(scenarioResult);
         }
 
         if (!result.scorecard && pollCount < 5) {
@@ -464,6 +570,10 @@ export function ScoreScreen({ route, navigation }: Props) {
   const transcript = data?.transcript ?? [];
   const overallScore = scorecard?.overall_score ?? 0;
   const overallBand = scoreBand(overallScore);
+  const managerNote = data?.manager_coaching_note?.note ?? data?.manager_note ?? data?.manager_review?.notes ?? null;
+  const improvementTargets = scorecard?.improvement_targets ?? [];
+  const highlights = (scorecard?.highlights ?? []).slice(0, 4);
+  const weaknessTags = scorecard?.weakness_tags ?? [];
 
   useEffect(() => {
     if (scorecard) {
@@ -481,8 +591,38 @@ export function ScoreScreen({ route, navigation }: Props) {
     }
   }, [scorecard]);
 
-  const managerNote = data?.manager_coaching_note?.note ?? data?.manager_note ?? data?.manager_review?.notes ?? null;
-  const improvementTargets = scorecard?.improvement_targets ?? [];
+  useEffect(() => {
+    const width = Math.max(0, (tabSwitcherWidth - 8) / 2);
+    tabIndicatorWidth.value = withSpring(width, { damping: 18, stiffness: 180 });
+    tabIndicatorOffset.value = withSpring(activeTab === "scorecard" ? 0 : width, { damping: 18, stiffness: 180 });
+  }, [activeTab, tabIndicatorOffset, tabIndicatorWidth, tabSwitcherWidth]);
+
+  function scrollToTranscriptTurn(turnId: string) {
+    const offset = transcriptTurnOffsetsRef.current[turnId];
+    if (typeof offset !== "number") {
+      return false;
+    }
+    transcriptScrollRef.current?.scrollTo({ y: Math.max(0, offset - 20), animated: true });
+    setPendingTranscriptTurnId(null);
+    return true;
+  }
+
+  useEffect(() => {
+    if (activeTab !== "transcript" || !pendingTranscriptTurnId) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      scrollToTranscriptTurn(pendingTranscriptTurnId);
+    }, 160);
+
+    return () => clearTimeout(timer);
+  }, [activeTab, pendingTranscriptTurnId, transcript.length]);
+
+  const tabIndicatorStyle = useAnimatedStyle(() => ({
+    width: tabIndicatorWidth.value,
+    transform: [{ translateX: tabIndicatorOffset.value }],
+  }));
 
   const turnIndexById = useMemo<Record<string, number>>(
     () =>
@@ -493,235 +633,349 @@ export function ScoreScreen({ route, navigation }: Props) {
     [transcript]
   );
 
+  const evidenceLabelsByTurnId = useMemo<Record<string, string[]>>(() => {
+    const labelsByTurnId: Record<string, string[]> = {};
+
+    function addLabel(turnId: string, label: string) {
+      if (!turnId) {
+        return;
+      }
+      if (!labelsByTurnId[turnId]) {
+        labelsByTurnId[turnId] = [];
+      }
+      if (!labelsByTurnId[turnId].includes(label)) {
+        labelsByTurnId[turnId].push(label);
+      }
+    }
+
+    for (const turnId of scorecard?.evidence_turn_ids ?? []) {
+      addLabel(turnId, "Overall");
+    }
+
+    for (const category of CATEGORY_ORDER) {
+      const evidenceTurnIds = scorecard?.category_scores?.[category.key]?.evidence_turn_ids ?? [];
+      for (const turnId of evidenceTurnIds) {
+        addLabel(turnId, category.label);
+      }
+    }
+
+    return labelsByTurnId;
+  }, [scorecard]);
+
   const categories = useMemo<CategoryRow[]>(() => {
-    const scores = scorecard?.category_scores ?? {};
+    const categoryScores = scorecard?.category_scores ?? {};
     return CATEGORY_ORDER.map((category) => ({
       ...category,
-      detail: scores[category.key],
-      score: scoreValue(scores[category.key]),
+      detail: categoryScores[category.key],
+      score: scoreValue(categoryScores[category.key]),
     }));
   }, [scorecard]);
 
-  const highlights = (scorecard?.highlights ?? []).slice(0, 4);
-  const weaknessTags = scorecard?.weakness_tags ?? [];
+  const transcriptShareText = useMemo(
+    () => formatTranscriptForShare(transcript, scenario?.name ?? "Scenario", data?.session.started_at),
+    [data?.session.started_at, scenario?.name, transcript]
+  );
+
+  async function handleShareTranscript() {
+    if (!transcript.length) {
+      return;
+    }
+
+    try {
+      await Share.share({
+        title: `${scenario?.name ?? "DoorDrill"} Transcript`,
+        message: transcriptShareText,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to share transcript");
+    }
+  }
 
   function handleEvidencePress(turnId: string) {
     setFocusedTranscriptTurnId(turnId);
-    const sectionOffset = transcriptSectionOffsetRef.current;
-    const rowOffset = transcriptTurnOffsetsRef.current[turnId];
-    const targetY = sectionOffset + (typeof rowOffset === "number" ? rowOffset : 0) - 140;
-    scrollRef.current?.scrollTo({ y: Math.max(0, targetY), animated: true });
+    setPendingTranscriptTurnId(turnId);
+    setActiveTab("transcript");
+    if (activeTab === "transcript") {
+      requestAnimationFrame(() => {
+        scrollToTranscriptTurn(turnId);
+      });
+    }
+  }
+
+  function renderScorecardTab() {
+    if (!scorecard) {
+      return (
+        <View style={styles.emptyStateCard}>
+          {refreshing ? <ActivityIndicator color={colors.accent} /> : null}
+          <Text style={styles.emptyStateTitle}>{refreshing ? "Grading in progress" : "Scorecard not available"}</Text>
+          <Text style={styles.emptyStateText}>
+            {refreshing ? "We are still processing your drill." : "This session does not have a scorecard yet."}
+          </Text>
+        </View>
+      );
+    }
+
+    return (
+      <>
+        <Text style={styles.sectionTitle}>PERFORMANCE BREAKDOWN</Text>
+        <BlurView intensity={40} tint="light" style={styles.categoriesContainer}>
+          {categories.map((category, index) => (
+            <ExpandableCategoryBar
+              key={category.key}
+              label={category.label}
+              score={category.score}
+              detail={category.detail}
+              index={index}
+              expanded={expandedCategoryKey === category.key}
+              onPress={() => setExpandedCategoryKey((current) => (current === category.key ? null : category.key))}
+              onEvidencePress={handleEvidencePress}
+              turnIndexById={turnIndexById}
+            />
+          ))}
+        </BlurView>
+
+        {improvementTargets.length > 0 ? (
+          <>
+            <Text style={styles.sectionTitle}>WHAT TO WORK ON</Text>
+            <Text style={styles.sectionSubtitle}>Focus on these in your next drill</Text>
+            <BlurView intensity={40} tint="light" style={styles.categoriesContainer}>
+              {improvementTargets.slice(0, 3).map((target, index) => {
+                const band = scoreBand(target.score);
+                const categoryKey = target.category as CategoryKey;
+                const initials = CATEGORY_INITIALS[categoryKey] ?? target.label.slice(0, 2).toUpperCase();
+
+                return (
+                  <Animated.View
+                    key={`${target.category}-${index}`}
+                    entering={FadeInDown.delay(520 + index * 90).springify()}
+                    style={styles.improvementRow}
+                  >
+                    <View style={[styles.improvementInitial, { backgroundColor: band.bg, borderColor: band.border }]}>
+                      <Text style={[styles.improvementInitialText, { color: band.text }]}>{initials}</Text>
+                    </View>
+                    <View style={styles.improvementBody}>
+                      <Text style={styles.improvementLabel}>{target.label}</Text>
+                      <Text style={styles.improvementTarget}>{target.target}</Text>
+                    </View>
+                    <View style={[styles.scoreBadge, { backgroundColor: band.bg, borderColor: band.border }]}>
+                      <Text style={[styles.scoreBadgeText, { color: band.text }]}>{target.score.toFixed(1)}</Text>
+                    </View>
+                  </Animated.View>
+                );
+              })}
+            </BlurView>
+          </>
+        ) : null}
+
+        <Text style={styles.sectionTitle}>KEY MOMENTS</Text>
+        {highlights.length === 0 ? <Text style={styles.emptyText}>No highlights available.</Text> : null}
+        {highlights.map((highlight, index) => {
+          const isStrong = highlight.type === "strong";
+          const highlightBand = isStrong ? scoreBand(8.2) : scoreBand(6.2);
+          const quote = highlight.transcript_quote || highlight.quote || null;
+
+          return (
+            <Animated.View
+              key={`${highlight.type}-${index}`}
+              entering={FadeInDown.delay(700 + index * 100).springify()}
+              style={styles.highlightCardWrapper}
+            >
+              <BlurView intensity={40} tint="light" style={styles.highlightCard}>
+                <View style={styles.highlightHeader}>
+                  <View style={[styles.highlightTag, { backgroundColor: highlightBand.bg, borderColor: highlightBand.border }]}>
+                    <Text style={[styles.highlightTagText, { color: highlightBand.text }]}>{isStrong ? "Strong" : "Improve"}</Text>
+                  </View>
+                  {highlight.turn_id ? <Text style={styles.turnRef}>{formatTurnLabel(highlight.turn_id, turnIndexById)}</Text> : null}
+                </View>
+                <Text style={styles.highlightNote}>{highlight.note}</Text>
+                {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
+              </BlurView>
+            </Animated.View>
+          );
+        })}
+
+        <Text style={styles.sectionTitle}>FEEDBACK</Text>
+        <Animated.View entering={FadeInDown.delay(1000).springify()} style={styles.summaryCardWrapper}>
+          <BlurView intensity={40} tint="light" style={styles.summaryCard}>
+            <Text style={styles.summaryText}>{scorecard.ai_summary}</Text>
+          </BlurView>
+        </Animated.View>
+
+        {managerNote ? (
+          <Animated.View entering={FadeInDown.delay(1100).springify()} style={styles.managerNoteCard}>
+            <View style={styles.managerNoteHeader}>
+              <UserCircle size={16} color={colors.accent} />
+              <Text style={styles.managerNoteLabel}>Manager Note</Text>
+            </View>
+            <Text style={styles.managerNoteText}>{managerNote}</Text>
+          </Animated.View>
+        ) : null}
+
+        {weaknessTags.length > 0 ? (
+          <>
+            <Text style={styles.sectionTitle}>AREAS TO WATCH</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.weaknessScroll}>
+              {weaknessTags.map((tag) => (
+                <View key={tag} style={styles.weaknessChip}>
+                  <Text style={styles.weaknessChipText}>{titleCase(tag)}</Text>
+                </View>
+              ))}
+            </ScrollView>
+          </>
+        ) : null}
+
+        <View style={styles.ctaRow}>
+          <Pressable
+            style={styles.primaryCta}
+            onPress={() => {
+              const assignmentId = data?.session.assignment_id;
+              const scenarioId = data?.session.scenario_id;
+              if (assignmentId && scenarioId) {
+                navigation.replace("PreSession", { assignmentId, scenarioId });
+              }
+            }}
+          >
+            <Text style={styles.primaryCtaLabel}>Try Again</Text>
+          </Pressable>
+          <Pressable style={styles.secondaryCta} onPress={() => navigation.replace("MainTabs", { screen: "AssignmentsTab" })}>
+            <Text style={styles.secondaryCtaLabel}>Back to Drills</Text>
+          </Pressable>
+        </View>
+      </>
+    );
+  }
+
+  function renderTranscriptTab() {
+    if (loading || refreshing) {
+      return (
+        <View style={styles.transcriptLoadingState}>
+          <ActivityIndicator color={colors.accent} />
+          <Text style={styles.loadingText}>Loading transcript...</Text>
+        </View>
+      );
+    }
+
+    if (transcript.length === 0) {
+      return (
+        <View style={styles.emptyStateCard}>
+          <FileText size={26} color={colors.muted} />
+          <Text style={styles.emptyStateTitle}>Transcript not available for this session</Text>
+          <Text style={styles.emptyStateText}>Conversation turns were not saved for this drill.</Text>
+        </View>
+      );
+    }
+
+    return (
+      <>
+        <View style={styles.transcriptTabHeader}>
+          <View>
+            <Text style={styles.sectionTitleCompact}>FULL TRANSCRIPT</Text>
+            <Text style={styles.sectionSubtitle}>Evidence-highlighted moments from your drill</Text>
+          </View>
+          <Pressable
+            style={({ pressed }) => [styles.shareButton, pressed ? styles.shareButtonPressed : null]}
+            onPress={() => void handleShareTranscript()}
+          >
+            <Share2 size={16} color={colors.accent} />
+            <Text style={styles.shareButtonText}>Share</Text>
+          </Pressable>
+        </View>
+
+        <BlurView intensity={40} tint="light" style={styles.transcriptContainer}>
+          {transcript.map((turn) => (
+            <TranscriptTurnCard
+              key={`${turn.turn_id}-${turn.turn_index}`}
+              turn={turn}
+              evidenceLabels={evidenceLabelsByTurnId[turn.turn_id] ?? []}
+              focused={focusedTranscriptTurnId === turn.turn_id}
+              onLayout={(y) => {
+                transcriptTurnOffsetsRef.current[turn.turn_id] = y;
+                if (pendingTranscriptTurnId === turn.turn_id && activeTab === "transcript") {
+                  requestAnimationFrame(() => {
+                    scrollToTranscriptTurn(turn.turn_id);
+                  });
+                }
+              }}
+            />
+          ))}
+        </BlurView>
+      </>
+    );
+  }
+
+  if (loading && !data) {
+    return (
+      <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+        <SafeAreaView style={styles.safeArea}>
+          <LoadingSkeleton />
+        </SafeAreaView>
+      </LinearGradient>
+    );
   }
 
   return (
     <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <ScrollView ref={scrollRef} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-          {loading ? (
-            <LoadingSkeleton />
-          ) : (
-            <>
-              <View style={styles.heroBlock}>
-                {/* @ts-ignore */}
-                <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}>
-                  <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
-                  <Text style={styles.heroLabel}>Overall Score</Text>
-                </Animated.View>
-                <View style={styles.heroBarTrack}>
-                  <RNAnimated.View
-                    style={[
-                      styles.heroBarFill,
-                      {
-                        backgroundColor: overallBand.text,
-                        width: heroBarAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }),
-                      },
-                    ]}
-                  />
-                </View>
-                <Text style={styles.scenarioName}>{scenario?.name ?? "Scenario"}</Text>
+        <View style={styles.screenBody}>
+          <View style={styles.headerShell}>
+            <View style={styles.heroBlock}>
+              {/* @ts-ignore */}
+              <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}>
+                <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
+                <Text style={styles.heroLabel}>Overall Score</Text>
+              </Animated.View>
+              <View style={styles.heroBarTrack}>
+                <RNAnimated.View
+                  style={[
+                    styles.heroBarFill,
+                    {
+                      backgroundColor: overallBand.text,
+                      width: heroBarAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }),
+                    },
+                  ]}
+                />
               </View>
+              <Text style={styles.scenarioName}>{scenario?.name ?? "Scenario"}</Text>
+            </View>
 
-              {refreshing && !scorecard ? <Text style={styles.refreshText}>AI grading is still processing...</Text> : null}
-              {error ? <Text style={styles.errorText}>{error}</Text> : null}
-
-              {scorecard ? (
-                <>
-                  <Text style={styles.sectionTitle}>PERFORMANCE BREAKDOWN</Text>
-                  <BlurView intensity={40} tint="light" style={styles.categoriesContainer}>
-                    {categories.map((category, index) => (
-                      <ExpandableCategoryBar
-                        key={category.key}
-                        label={category.label}
-                        score={category.score}
-                        detail={category.detail}
-                        index={index}
-                        expanded={expandedCategoryKey === category.key}
-                        onPress={() => setExpandedCategoryKey((current) => (current === category.key ? null : category.key))}
-                        onEvidencePress={handleEvidencePress}
-                        turnIndexById={turnIndexById}
-                      />
-                    ))}
-                  </BlurView>
-
-                  {improvementTargets.length > 0 ? (
-                    <>
-                      <Text style={styles.sectionTitle}>WHAT TO WORK ON</Text>
-                      <Text style={styles.sectionSubtitle}>Focus on these in your next drill</Text>
-                      <BlurView intensity={40} tint="light" style={styles.categoriesContainer}>
-                        {improvementTargets.slice(0, 3).map((target, index) => {
-                          const band = scoreBand(target.score);
-                          const categoryKey = target.category as CategoryKey;
-                          const initials = CATEGORY_INITIALS[categoryKey] ?? target.label.slice(0, 2).toUpperCase();
-
-                          return (
-                            <Animated.View key={`${target.category}-${index}`} entering={FadeInDown.delay(520 + index * 90).springify()} style={styles.improvementRow}>
-                              <View style={[styles.improvementInitial, { backgroundColor: band.bg, borderColor: band.border }]}>
-                                <Text style={[styles.improvementInitialText, { color: band.text }]}>{initials}</Text>
-                              </View>
-                              <View style={styles.improvementBody}>
-                                <Text style={styles.improvementLabel}>{target.label}</Text>
-                                <Text style={styles.improvementTarget}>{target.target}</Text>
-                              </View>
-                              <View style={[styles.scoreBadge, { backgroundColor: band.bg, borderColor: band.border }]}>
-                                <Text style={[styles.scoreBadgeText, { color: band.text }]}>{target.score.toFixed(1)}</Text>
-                              </View>
-                            </Animated.View>
-                          );
-                        })}
-                      </BlurView>
-                    </>
-                  ) : null}
-
-                  <Text style={styles.sectionTitle}>KEY MOMENTS</Text>
-                  {highlights.length === 0 ? <Text style={styles.emptyText}>No highlights available.</Text> : null}
-                  {highlights.map((highlight, index) => {
-                    const isStrong = highlight.type === "strong";
-                    const highlightBand = isStrong ? scoreBand(8.2) : scoreBand(6.2);
-                    const quote = highlight.transcript_quote || highlight.quote || null;
-
-                    return (
-                      <Animated.View key={`${highlight.type}-${index}`} entering={FadeInDown.delay(700 + index * 100).springify()} style={styles.highlightCardWrapper}>
-                        <BlurView intensity={40} tint="light" style={styles.highlightCard}>
-                          <View style={styles.highlightHeader}>
-                            <View style={[styles.highlightTag, { backgroundColor: highlightBand.bg, borderColor: highlightBand.border }]}>
-                              <Text style={[styles.highlightTagText, { color: highlightBand.text }]}>{isStrong ? "Strong" : "Improve"}</Text>
-                            </View>
-                            {highlight.turn_id ? <Text style={styles.turnRef}>{formatTurnLabel(highlight.turn_id, turnIndexById)}</Text> : null}
-                          </View>
-                          <Text style={styles.highlightNote}>{highlight.note}</Text>
-                          {quote ? <Text style={styles.highlightQuote}>"{quote}"</Text> : null}
-                        </BlurView>
-                      </Animated.View>
-                    );
-                  })}
-
-                  <Text style={styles.sectionTitle}>FEEDBACK</Text>
-                  <Animated.View entering={FadeInDown.delay(1000).springify()} style={styles.summaryCardWrapper}>
-                    <BlurView intensity={40} tint="light" style={styles.summaryCard}>
-                      <Text style={styles.summaryText}>{scorecard.ai_summary}</Text>
-                    </BlurView>
-                  </Animated.View>
-
-                  {managerNote ? (
-                    <Animated.View entering={FadeInDown.delay(1100).springify()} style={styles.managerNoteCard}>
-                      <View style={styles.managerNoteHeader}>
-                        <UserCircle size={16} color={colors.accent} />
-                        <Text style={styles.managerNoteLabel}>Manager Note</Text>
-                      </View>
-                      <Text style={styles.managerNoteText}>{managerNote}</Text>
-                    </Animated.View>
-                  ) : null}
-
-                  {weaknessTags.length > 0 ? (
-                    <>
-                      <Text style={styles.sectionTitle}>AREAS TO WATCH</Text>
-                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.weaknessScroll}>
-                        {weaknessTags.map((tag) => (
-                          <View key={tag} style={styles.weaknessChip}>
-                            <Text style={styles.weaknessChipText}>{titleCase(tag)}</Text>
-                          </View>
-                        ))}
-                      </ScrollView>
-                    </>
-                  ) : null}
-                </>
-              ) : null}
-
-              {transcript.length > 0 ? (
-                <>
-                  <Text style={styles.sectionTitle}>TRANSCRIPT</Text>
-                  <Text style={styles.sectionSubtitle}>Tap evidence turns above to jump here</Text>
-                  <BlurView
-                    intensity={40}
-                    tint="light"
-                    style={styles.transcriptContainer}
-                    onLayout={(event) => {
-                      transcriptSectionOffsetRef.current = event.nativeEvent.layout.y;
-                    }}
-                  >
-                    {transcript.map((turn, index) => {
-                      const isFocused = focusedTranscriptTurnId === turn.turn_id;
-                      const isRepTurn = Boolean(turn.rep_text);
-                      const line = transcriptBody(turn);
-
-                      return (
-                        <Animated.View
-                          key={turn.turn_id}
-                          entering={FadeInDown.delay(260 + index * 60).springify()}
-                          onLayout={(event) => {
-                            transcriptTurnOffsetsRef.current[turn.turn_id] = event.nativeEvent.layout.y;
-                          }}
-                          style={[
-                            styles.transcriptCard,
-                            isRepTurn ? styles.transcriptCardRep : styles.transcriptCardAi,
-                            isFocused ? styles.transcriptCardFocused : null,
-                          ]}
-                        >
-                          <View style={styles.transcriptHeader}>
-                            <Text style={styles.transcriptBadge}>{transcriptSpeaker(turn)}</Text>
-                            <Text style={styles.transcriptMeta}>
-                              {`Turn ${turn.turn_index}`}
-                              {turn.stage ? ` • ${titleCase(turn.stage)}` : ""}
-                              {turn.emotion ? ` • ${titleCase(turn.emotion)}` : ""}
-                            </Text>
-                          </View>
-                          <Text style={styles.transcriptText}>{line}</Text>
-                          {turn.objection_tags.length > 0 ? (
-                            <View style={styles.transcriptTagRow}>
-                              {turn.objection_tags.map((tag) => (
-                                <View key={`${turn.turn_id}-${tag}`} style={styles.transcriptTag}>
-                                  <Text style={styles.transcriptTagText}>{titleCase(tag)}</Text>
-                                </View>
-                              ))}
-                            </View>
-                          ) : null}
-                        </Animated.View>
-                      );
-                    })}
-                  </BlurView>
-                </>
-              ) : null}
-
-              <View style={styles.ctaRow}>
+            <View style={styles.tabSwitcherShell}>
+              <View
+                style={styles.tabSwitcherTrack}
+                onLayout={(event) => setTabSwitcherWidth(event.nativeEvent.layout.width)}
+              >
+                <Animated.View style={[styles.tabIndicator, tabIndicatorStyle]} />
                 <Pressable
-                  style={styles.primaryCta}
-                  onPress={() => {
-                    const assignmentId = data?.session.assignment_id;
-                    const scenarioId = data?.session.scenario_id;
-                    if (assignmentId && scenarioId) {
-                      navigation.replace("PreSession", { assignmentId, scenarioId });
-                    }
-                  }}
+                  style={styles.tabButton}
+                  onPress={() => setActiveTab("scorecard")}
                 >
-                  <Text style={styles.primaryCtaLabel}>Try Again</Text>
+                  <Text style={[styles.tabLabel, activeTab === "scorecard" ? styles.tabLabelActive : styles.tabLabelInactive]}>
+                    Scorecard
+                  </Text>
                 </Pressable>
-                <Pressable style={styles.secondaryCta} onPress={() => navigation.replace("MainTabs", { screen: "AssignmentsTab" })}>
-                  <Text style={styles.secondaryCtaLabel}>Back to Drills</Text>
+                <Pressable
+                  style={styles.tabButton}
+                  onPress={() => setActiveTab("transcript")}
+                >
+                  <Text style={[styles.tabLabel, activeTab === "transcript" ? styles.tabLabelActive : styles.tabLabelInactive]}>
+                    Transcript
+                  </Text>
                 </Pressable>
               </View>
-            </>
+            </View>
+
+            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+          </View>
+
+          {activeTab === "scorecard" ? (
+            <ScrollView contentContainerStyle={styles.tabContent} showsVerticalScrollIndicator={false}>
+              {renderScorecardTab()}
+            </ScrollView>
+          ) : (
+            <ScrollView ref={transcriptScrollRef} contentContainerStyle={styles.tabContent} showsVerticalScrollIndicator={false}>
+              {renderTranscriptTab()}
+            </ScrollView>
           )}
-        </ScrollView>
+        </View>
       </SafeAreaView>
     </LinearGradient>
   );
@@ -730,7 +984,19 @@ export function ScoreScreen({ route, navigation }: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   safeArea: { flex: 1 },
-  content: { padding: 20, paddingBottom: 40 },
+  screenBody: { flex: 1 },
+  headerShell: {
+    paddingHorizontal: 20,
+    paddingTop: 8,
+  },
+  tabContent: {
+    paddingHorizontal: 20,
+    paddingBottom: 40,
+  },
+  loadingContent: {
+    paddingHorizontal: 20,
+    paddingBottom: 40,
+  },
 
   loadingCard: {
     marginTop: 18,
@@ -765,6 +1031,9 @@ const styles = StyleSheet.create({
   heroSkeletonLabel: {
     marginTop: 16,
   },
+  tabSkeletonIndicator: {
+    borderRadius: 999,
+  },
   loadingExpandedCard: {
     gap: 10,
     marginTop: 10,
@@ -775,23 +1044,19 @@ const styles = StyleSheet.create({
   loadingExpandedChip: {
     borderRadius: 14,
   },
-  improvementInitialSkeleton: {
-    borderRadius: 19,
-  },
-  improvementSkeletonLine: {
-    marginTop: 8,
-  },
-  improvementBadgeSkeleton: {
-    borderRadius: 14,
-  },
 
-  refreshText: { color: colors.muted, fontSize: 13, textAlign: "center", marginBottom: 12 },
-  errorText: { color: colors.danger, fontSize: 14, fontWeight: "700", textAlign: "center", marginBottom: 12 },
+  errorText: {
+    color: colors.danger,
+    fontSize: 14,
+    fontWeight: "700",
+    textAlign: "center",
+    marginTop: 12,
+  },
 
   heroBlock: {
     alignItems: "center",
     paddingTop: 12,
-    marginBottom: 24,
+    marginBottom: 20,
   },
   heroOrb: {
     width: 160,
@@ -837,6 +1102,45 @@ const styles = StyleSheet.create({
     marginTop: 16,
   },
 
+  tabSwitcherShell: {
+    marginBottom: 16,
+  },
+  tabSwitcherTrack: {
+    position: "relative",
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    backgroundColor: "rgba(255,255,255,0.7)",
+    padding: 4,
+  },
+  tabIndicator: {
+    position: "absolute",
+    left: 4,
+    top: 4,
+    bottom: 4,
+    borderRadius: 999,
+    backgroundColor: colors.accent,
+  },
+  tabButton: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 11,
+    zIndex: 1,
+  },
+  tabLabel: {
+    fontSize: 14,
+    fontFamily: "Poppins_600SemiBold",
+  },
+  tabLabelActive: {
+    color: "#fff",
+  },
+  tabLabelInactive: {
+    color: colors.muted,
+  },
+
   sectionTitle: {
     fontSize: 12,
     fontWeight: "700",
@@ -846,10 +1150,17 @@ const styles = StyleSheet.create({
     marginTop: 28,
     marginBottom: 8,
   },
+  sectionTitleCompact: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: colors.muted,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
   sectionSubtitle: {
     fontSize: 13,
     color: colors.muted,
-    marginBottom: 12,
     lineHeight: 18,
   },
   categoriesContainer: {
@@ -1051,7 +1362,35 @@ const styles = StyleSheet.create({
     fontFamily: "Poppins_700Bold",
   },
 
-  emptyText: { color: colors.muted, fontSize: 14, fontStyle: "italic" },
+  emptyText: {
+    color: colors.muted,
+    fontSize: 14,
+    fontStyle: "italic",
+  },
+  emptyStateCard: {
+    marginTop: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    borderRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
+    paddingHorizontal: 24,
+    paddingVertical: 32,
+  },
+  emptyStateTitle: {
+    fontSize: 16,
+    color: colors.ink,
+    fontFamily: "Poppins_600SemiBold",
+    textAlign: "center",
+  },
+  emptyStateText: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.muted,
+    textAlign: "center",
+  },
 
   highlightCardWrapper: {
     marginBottom: 12,
@@ -1085,7 +1424,10 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     textTransform: "uppercase",
   },
-  turnRef: { color: colors.muted, fontSize: 11 },
+  turnRef: {
+    color: colors.muted,
+    fontSize: 11,
+  },
   highlightNote: {
     fontSize: 14,
     fontWeight: "600",
@@ -1120,7 +1462,6 @@ const styles = StyleSheet.create({
     color: colors.ink,
     lineHeight: 24,
   },
-
   managerNoteCard: {
     backgroundColor: colors.accentSoft,
     borderLeftWidth: 3,
@@ -1145,7 +1486,6 @@ const styles = StyleSheet.create({
     marginTop: 6,
     lineHeight: 18,
   },
-
   weaknessScroll: {
     gap: 10,
     paddingRight: 20,
@@ -1164,8 +1504,40 @@ const styles = StyleSheet.create({
     fontFamily: "Poppins_600SemiBold",
   },
 
-  transcriptContainer: {
+  transcriptLoadingState: {
+    paddingTop: 48,
+    alignItems: "center",
     gap: 12,
+  },
+  transcriptTabHeader: {
+    marginTop: 24,
+    marginBottom: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  shareButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.72)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+  },
+  shareButtonPressed: {
+    opacity: 0.82,
+  },
+  shareButtonText: {
+    fontSize: 12,
+    color: colors.accent,
+    fontFamily: "Poppins_600SemiBold",
+  },
+  transcriptContainer: {
+    gap: 10,
     borderRadius: 24,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line,
@@ -1178,43 +1550,83 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
     elevation: 3,
   },
-  transcriptCard: {
-    borderRadius: 18,
-    borderWidth: StyleSheet.hairlineWidth,
-    padding: 14,
+  transcriptEntry: {
+    gap: 10,
   },
-  transcriptCardRep: {
-    backgroundColor: "rgba(22, 101, 52, 0.06)",
-    borderColor: "rgba(22, 101, 52, 0.12)",
-  },
-  transcriptCardAi: {
-    backgroundColor: "rgba(180, 83, 9, 0.06)",
-    borderColor: "rgba(180, 83, 9, 0.12)",
-  },
-  transcriptCardFocused: {
-    backgroundColor: colors.warningSoft,
-    borderColor: "rgba(180, 83, 9, 0.24)",
-    shadowColor: colors.warning,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.08,
-    shadowRadius: 14,
-    elevation: 3,
-  },
-  transcriptHeader: {
-    gap: 4,
-  },
-  transcriptBadge: {
-    alignSelf: "flex-start",
+  turnDivider: {
+    alignSelf: "center",
     fontSize: 11,
+    color: colors.muted,
     textTransform: "uppercase",
     letterSpacing: 1,
-    color: colors.muted,
-    fontFamily: "Poppins_600SemiBold",
   },
-  transcriptMeta: {
-    fontSize: 12,
+  turnMetaRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  transcriptBubbleRow: {
+    flexDirection: "row",
+  },
+  transcriptBubbleRowRep: {
+    justifyContent: "flex-end",
+  },
+  transcriptBubbleRowAi: {
+    justifyContent: "flex-start",
+  },
+  transcriptBubble: {
+    width: "88%",
+    borderRadius: 22,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  transcriptBubbleRep: {
+    backgroundColor: colors.accentSoft,
+    borderColor: "rgba(22, 101, 52, 0.14)",
+  },
+  transcriptBubbleAi: {
+    backgroundColor: "rgba(255,255,255,0.8)",
+    borderColor: colors.line,
+  },
+  transcriptEvidenceBubble: {
+    borderLeftWidth: 3,
+    borderLeftColor: colors.accent,
+  },
+  transcriptFocusedBubble: {
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    elevation: 3,
+  },
+  transcriptBubbleHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+  },
+  transcriptStage: {
+    fontSize: 11,
     color: colors.muted,
-    lineHeight: 18,
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  transcriptBubbleSpeaker: {
+    fontSize: 12,
+    color: colors.ink,
+    fontFamily: "Poppins_700Bold",
+  },
+  emotionChip: {
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  emotionChipText: {
+    fontSize: 10,
+    fontFamily: "Poppins_600SemiBold",
   },
   transcriptText: {
     marginTop: 10,
@@ -1222,22 +1634,10 @@ const styles = StyleSheet.create({
     color: colors.ink,
     lineHeight: 21,
   },
-  transcriptTagRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
+  transcriptEvidenceChipRow: {
     gap: 8,
-    marginTop: 10,
-  },
-  transcriptTag: {
-    borderRadius: 999,
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    backgroundColor: "rgba(31, 26, 19, 0.06)",
-  },
-  transcriptTagText: {
-    fontSize: 11,
-    color: colors.muted,
-    fontFamily: "Poppins_600SemiBold",
+    paddingTop: 10,
+    paddingRight: 8,
   },
 
   ctaRow: {
