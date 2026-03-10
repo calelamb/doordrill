@@ -38,6 +38,10 @@ def _decode_bearer_token(raw_auth: str) -> dict[str, Any]:
     if not raw_auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="invalid authorization header format")
     token = raw_auth.split(" ", 1)[1].strip()
+    safe_algorithms = {"HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
+    algorithm = settings.jwt_algorithm
+    if algorithm not in safe_algorithms:
+        raise HTTPException(status_code=500, detail="unsupported JWT algorithm configured")
 
     options = {
         "verify_aud": bool(settings.jwt_audience),
@@ -49,7 +53,7 @@ def _decode_bearer_token(raw_auth: str) -> dict[str, Any]:
             payload = jwt.decode(
                 token,
                 signing_key,
-                algorithms=[settings.jwt_algorithm],
+                algorithms=[algorithm],
                 audience=settings.jwt_audience,
                 issuer=settings.jwt_issuer,
                 options=options,
@@ -58,7 +62,7 @@ def _decode_bearer_token(raw_auth: str) -> dict[str, Any]:
             payload = jwt.decode(
                 token,
                 settings.jwt_secret,
-                algorithms=[settings.jwt_algorithm],
+                algorithms=[algorithm],
                 audience=settings.jwt_audience,
                 issuer=settings.jwt_issuer,
                 options=options,

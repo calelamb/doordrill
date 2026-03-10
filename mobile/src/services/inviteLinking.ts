@@ -6,6 +6,7 @@ import { navigationRef } from "./notifications";
 type InviteRouteParams = RootStackParamList["Register"];
 
 let pendingInviteParams: InviteRouteParams | null = null;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function canNavigateToRegister(): boolean {
   const state = navigationRef.getRootState();
@@ -27,12 +28,13 @@ function parseInviteUrl(url: string): InviteRouteParams | null {
   const parsed = Linking.parse(url);
   const route = (parsed.path || parsed.hostname || "").replace(/^\/+|\/+$/g, "");
   const token = typeof parsed.queryParams?.token === "string" ? parsed.queryParams.token : null;
-  const email = typeof parsed.queryParams?.email === "string" ? parsed.queryParams.email : "";
+  const rawEmail = typeof parsed.queryParams?.email === "string" ? parsed.queryParams.email : "";
 
   if (route !== "invite" || !token) {
     return null;
   }
 
+  const email = rawEmail.length <= 254 && EMAIL_REGEX.test(rawEmail) ? rawEmail : "";
   return { token, email };
 }
 

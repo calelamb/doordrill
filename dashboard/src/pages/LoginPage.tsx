@@ -13,7 +13,11 @@ export function LoginPage() {
 
   const redirectTarget = useMemo(() => {
     const state = location.state as { from?: string } | null;
-    return state?.from || "/manager/feed";
+    const from = state?.from;
+    if (typeof from === "string" && from.startsWith("/") && !from.startsWith("//")) {
+      return from;
+    }
+    return "/manager/feed";
   }, [location.state]);
 
   const [email, setEmail] = useState("");

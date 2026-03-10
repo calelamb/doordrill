@@ -1,5 +1,4 @@
 import os
-import shutil
 import uuid
 from typing import Any
 from datetime import date, datetime, timedelta, timezone
@@ -11,6 +10,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_rep_or_manager
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.assignment import Assignment
 from app.models.prompt_version import PromptVersion
@@ -284,7 +284,10 @@ def _scenario_focus_skills(scenario: Scenario) -> list[str]:
 
 @router.get("/lookup")
 def lookup_rep_by_email(email: str = Query(...), db: Session = Depends(get_db)) -> dict:
-    # Development only endpoint to lookup a rep by email without auth
+    settings = get_settings()
+    if settings.environment not in {"dev", "test"}:
+        raise HTTPException(status_code=404, detail="not found")
+
     user = db.scalar(select(User).where(User.email == email.lower(), User.role == "rep"))
     if not user:
         # If user doesn't exist, create a mock user for them automatically for testing purposes
@@ -782,26 +785,45 @@ def revoke_device_token(
         raise HTTPException(status_code=404, detail="device token not found")
     return {"ok": True, "token_id": token_id}
 
+ALLOWED_AVATAR_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp"}
+ALLOWED_AVATAR_CONTENT_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+
 @router.post("/profile/avatar")
 def upload_avatar(
     file: UploadFile = File(...),
     actor: Actor = Depends(require_rep_or_manager),
     db: Session = Depends(get_db)
 ) -> dict:
+    settings = get_settings()
     if not actor.user_id:
         raise HTTPException(status_code=401, detail="authenticated actor required")
     user = _get_user_or_404(db, actor.user_id, "user")
-    
-    ext = file.filename.split(".")[-1] if file.filename else "jpg"
+
+    if file.content_type not in ALLOWED_AVATAR_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="file must be an image (JPEG, PNG, GIF, or WebP)")
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else ""
+    if ext not in ALLOWED_AVATAR_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="unsupported file extension")
+
+    contents = file.file.read(settings.max_upload_size_bytes + 1)
+    if len(contents) > settings.max_upload_size_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"file too large, max {settings.max_upload_size_bytes // 1_048_576}MB",
+        )
+
     filename = f"{user.id}_{uuid.uuid4().hex}.{ext}"
     filepath = os.path.join("uploads", "avatars", filename)
-    
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
     with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
+        buffer.write(contents)
+
     user.avatar_url = f"/uploads/avatars/{filename}"
     db.commit()
-    
+
     return {"avatar_url": user.avatar_url}
 
 @router.patch("/profile")

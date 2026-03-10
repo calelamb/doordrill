@@ -5,3 +5,7 @@ __pycache__/
 *.pyd
 .venv/
 doordrill.db
+.env
+.env.local
+.env.production
+.env.*.local

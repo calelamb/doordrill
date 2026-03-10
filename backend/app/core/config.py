@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     auth_mode: str = Field(default="headers", alias="AUTH_MODE")
     jwt_secret: str | None = Field(default="dev-jwt-secret-change-me", alias="JWT_SECRET")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    max_upload_size_bytes: int = Field(default=5_242_880, alias="MAX_UPLOAD_SIZE_BYTES")
     jwt_audience: str | None = Field(default=None, alias="JWT_AUDIENCE")
     jwt_issuer: str | None = Field(default=None, alias="JWT_ISSUER")
     jwt_jwks_url: str | None = Field(default=None, alias="JWT_JWKS_URL")

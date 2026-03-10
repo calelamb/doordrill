@@ -100,7 +100,12 @@ export function OnboardingChecklist() {
             <motion.button
               key={step.id}
               type="button"
-              onClick={() => navigate(step.cta_url)}
+              onClick={() => {
+                const target = step.cta_url;
+                if (target.startsWith("/") && !target.startsWith("//")) {
+                  navigate(target);
+                }
+              }}
               className="flex w-full items-center gap-3 rounded-2xl border border-white/25 bg-white/45 p-4 text-left transition hover:bg-white/70"
               whileTap={{ scale: 0.99 }}
               aria-label={step.is_complete ? `${step.label} complete` : `Complete step ${step.label}`}

@@ -24,6 +24,10 @@ const resolvedApiBaseUrl =
     ? simulatorApiUrl
     : process.env.EXPO_PUBLIC_API_BASE_URL ?? extras.apiBaseUrl ?? defaultApiUrl;
 
+if (__DEV__ === false && resolvedApiBaseUrl.startsWith("http://127.0.0.1")) {
+  console.warn("[DoorDrill] API base URL is pointing to localhost in a non-dev build. Set EXPO_PUBLIC_API_BASE_URL.");
+}
+
 export const API_BASE_URL = resolvedApiBaseUrl;
 export const WS_BASE_URL =
   (Device.isDevice === false ? API_BASE_URL.replace(/^http/i, "ws") : process.env.EXPO_PUBLIC_WS_BASE_URL ?? extras.wsBaseUrl) ??

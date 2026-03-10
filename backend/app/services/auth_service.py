@@ -7,9 +7,13 @@ import os
 from datetime import UTC, datetime, timedelta
 
 import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import Argon2Error, VerificationError, VerifyMismatchError
 
 from app.core.config import get_settings
 from app.models.user import User
+
+_password_hasher = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
 
 
 class AuthService:
@@ -17,16 +21,36 @@ class AuthService:
         self.settings = get_settings()
 
     def hash_password(self, password: str) -> str:
-        salt = os.urandom(16)
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120_000, dklen=32)
-        return f"pbkdf2_sha256$120000${base64.urlsafe_b64encode(salt).decode()}${base64.urlsafe_b64encode(digest).decode()}"
+        return _password_hasher.hash(password)
 
     def verify_password(self, password: str, password_hash: str | None) -> bool:
         if not password_hash:
             return False
+        if password_hash.startswith("pbkdf2_sha256$"):
+            return self._verify_pbkdf2(password, password_hash)
+        try:
+            return _password_hasher.verify(password_hash, password)
+        except (VerifyMismatchError, VerificationError, Argon2Error):
+            return False
+
+    def needs_rehash(self, password_hash: str | None) -> bool:
+        if not password_hash:
+            return False
+        if password_hash.startswith("pbkdf2_sha256$"):
+            return True
+        try:
+            return _password_hasher.check_needs_rehash(password_hash)
+        except Argon2Error:
+            return False
+
+    @staticmethod
+    def _verify_pbkdf2(password: str, password_hash: str) -> bool:
         try:
             scheme, rounds, salt_b64, digest_b64 = password_hash.split("$", 3)
             if scheme != "pbkdf2_sha256":
+                return False
+            rounds_int = int(rounds)
+            if not (1000 <= rounds_int <= 1_000_000):
                 return False
             salt = base64.urlsafe_b64decode(salt_b64.encode())
             expected_digest = base64.urlsafe_b64decode(digest_b64.encode())
@@ -34,7 +58,7 @@ class AuthService:
                 "sha256",
                 password.encode("utf-8"),
                 salt,
-                int(rounds),
+                rounds_int,
                 dklen=len(expected_digest),
             )
             return hmac.compare_digest(actual_digest, expected_digest)

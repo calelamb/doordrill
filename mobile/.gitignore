@@ -2,3 +2,7 @@ node_modules
 .expo
 dist
 *.log
+.env
+.env.local
+.env.production
+.env.*.local

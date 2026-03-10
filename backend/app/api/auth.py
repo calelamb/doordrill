@@ -110,6 +110,10 @@ def login(payload: AuthLoginRequest, db: Session = Depends(get_db)) -> AuthToken
     if user is None or not auth_service.verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid credentials")
 
+    if auth_service.needs_rehash(user.password_hash):
+        user.password_hash = auth_service.hash_password(payload.password)
+        db.commit()
+
     tokens = auth_service.issue_tokens(user)
     return _to_auth_response(user, tokens)
 
