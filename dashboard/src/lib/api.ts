@@ -34,7 +34,7 @@ import type {
   WeeklyTeamBriefingResponse,
 } from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? "/api" : "http://127.0.0.1:8000");
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? "/api" : (() => { throw new Error("VITE_API_BASE_URL must be set for production builds"); })());
 const WS_BASE = import.meta.env.VITE_WS_BASE_URL ??
   (import.meta.env.DEV
     ? `${window.location.origin.replace(/^http/i, "ws")}/api`
@@ -85,8 +85,6 @@ function buildHeaders({ userId, role, public: isPublic }: AuthOptions = {}): Hea
   }
 
   headers.set("authorization", `Bearer ${auth.access_token}`);
-  headers.set("x-user-id", userId ?? auth.user.id);
-  headers.set("x-user-role", role ?? (auth.user.role as "manager" | "admin" | "rep"));
   return headers;
 }
 

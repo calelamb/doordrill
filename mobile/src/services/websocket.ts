@@ -1,6 +1,7 @@
 import { WsInboundEvent } from "../types";
 import { AudioChunk } from "./audio";
 import { WS_BASE_URL } from "./config";
+import { useSession } from "../store/session";
 
 type Listener = (event: WsInboundEvent) => void;
 
@@ -11,7 +12,7 @@ export class SessionWsClient {
 
   constructor(private readonly sessionId: string) {}
 
-  connect(listener: Listener, onClosed?: () => void): Promise<void> {
+  async connect(listener: Listener, onClosed?: () => void): Promise<void> {
     if (this.socket?.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
@@ -19,7 +20,9 @@ export class SessionWsClient {
       return this.connectPromise;
     }
 
-    const url = `${WS_BASE_URL}/ws/sessions/${encodeURIComponent(this.sessionId)}`;
+    const accessToken = await useSession.getState().getAccessToken();
+    const tokenParam = accessToken ? `?access_token=${encodeURIComponent(accessToken)}` : "";
+    const url = `${WS_BASE_URL}/ws/sessions/${encodeURIComponent(this.sessionId)}${tokenParam}`;
 
     this.connectPromise = new Promise((resolve, reject) => {
       const ws = new WebSocket(url);

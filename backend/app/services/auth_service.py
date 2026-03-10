@@ -7,9 +7,13 @@ import os
 from datetime import UTC, datetime, timedelta
 
 import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 from app.core.config import get_settings
 from app.models.user import User
+
+_ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
 
 
 class AuthService:
@@ -17,16 +21,51 @@ class AuthService:
         self.settings = get_settings()
 
     def hash_password(self, password: str) -> str:
-        salt = os.urandom(16)
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120_000, dklen=32)
-        return f"pbkdf2_sha256$120000${base64.urlsafe_b64encode(salt).decode()}${base64.urlsafe_b64encode(digest).decode()}"
+        """Hash a password using argon2id."""
+        return _ph.hash(password)
 
     def verify_password(self, password: str, password_hash: str | None) -> bool:
+        """Verify a password against a stored hash.
+
+        Supports both argon2id (new) and legacy pbkdf2_sha256 hashes.
+        Returns True if the password matches. Callers should check
+        needs_rehash() to transparently upgrade legacy hashes.
+        """
         if not password_hash:
             return False
+
+        # Legacy PBKDF2 hash format: pbkdf2_sha256$rounds$salt$digest
+        if password_hash.startswith("pbkdf2_sha256$"):
+            return self._verify_pbkdf2(password, password_hash)
+
+        # Argon2id hash format
+        try:
+            return _ph.verify(password_hash, password)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return False
+
+    def needs_rehash(self, password_hash: str | None) -> bool:
+        """Check if a password hash should be upgraded to argon2id."""
+        if not password_hash:
+            return False
+        # Any legacy PBKDF2 hash needs rehashing
+        if password_hash.startswith("pbkdf2_sha256$"):
+            return True
+        # Check if argon2 params have changed
+        try:
+            return _ph.check_needs_rehash(password_hash)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _verify_pbkdf2(password: str, password_hash: str) -> bool:
+        """Verify a legacy PBKDF2-SHA256 hash."""
         try:
             scheme, rounds, salt_b64, digest_b64 = password_hash.split("$", 3)
             if scheme != "pbkdf2_sha256":
+                return False
+            rounds_int = int(rounds)
+            if not (1000 <= rounds_int <= 1_000_000):
                 return False
             salt = base64.urlsafe_b64decode(salt_b64.encode())
             expected_digest = base64.urlsafe_b64decode(digest_b64.encode())
@@ -34,7 +73,7 @@ class AuthService:
                 "sha256",
                 password.encode("utf-8"),
                 salt,
-                int(rounds),
+                rounds_int,
                 dklen=len(expected_digest),
             )
             return hmac.compare_digest(actual_digest, expected_digest)

@@ -829,9 +829,12 @@ async def upload_manager_document(
     if not document_name:
         raise HTTPException(status_code=400, detail="document name is required")
 
-    file_bytes = await file.read()
+    max_doc_size = 25 * 1024 * 1024  # 25 MB
+    file_bytes = await file.read(max_doc_size + 1)
     if not file_bytes:
         raise HTTPException(status_code=400, detail="uploaded file is empty")
+    if len(file_bytes) > max_doc_size:
+        raise HTTPException(status_code=413, detail="file too large, max 25MB")
 
     storage_key = _build_document_storage_key(manager, file.filename or f"{document_name}.{file_type.value}")
     storage_service.upload_bytes(storage_key, file_bytes, content_type=file.content_type or "application/octet-stream")

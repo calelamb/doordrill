@@ -39,6 +39,12 @@ def _decode_bearer_token(raw_auth: str) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="invalid authorization header format")
     token = raw_auth.split(" ", 1)[1].strip()
 
+    # Restrict algorithms to prevent "none" algorithm attacks
+    SAFE_ALGORITHMS = {"HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
+    algorithm = settings.jwt_algorithm
+    if algorithm not in SAFE_ALGORITHMS:
+        raise HTTPException(status_code=500, detail="unsupported JWT algorithm configured")
+
     options = {
         "verify_aud": bool(settings.jwt_audience),
         "verify_iss": bool(settings.jwt_issuer),
@@ -49,7 +55,7 @@ def _decode_bearer_token(raw_auth: str) -> dict[str, Any]:
             payload = jwt.decode(
                 token,
                 signing_key,
-                algorithms=[settings.jwt_algorithm],
+                algorithms=[algorithm],
                 audience=settings.jwt_audience,
                 issuer=settings.jwt_issuer,
                 options=options,
@@ -58,7 +64,7 @@ def _decode_bearer_token(raw_auth: str) -> dict[str, Any]:
             payload = jwt.decode(
                 token,
                 settings.jwt_secret,
-                algorithms=[settings.jwt_algorithm],
+                algorithms=[algorithm],
                 audience=settings.jwt_audience,
                 issuer=settings.jwt_issuer,
                 options=options,
@@ -83,10 +89,19 @@ def _resolve_identity(
         role = str(payload.get("role") or "").lower().strip() or None
         return user_id, role
 
-    if settings.auth_mode.lower() == "jwt" and settings.auth_required:
-        raise HTTPException(status_code=401, detail="missing bearer token")
+    # In JWT mode, never fall through to header-based auth
+    if settings.auth_mode.lower() == "jwt":
+        if settings.auth_required:
+            raise HTTPException(status_code=401, detail="missing bearer token")
+        return None, None
 
-    if x_user_id or x_user_role:
+    # Header-based auth only allowed in explicit "headers" mode (dev only)
+    if settings.auth_mode.lower() == "headers" and (x_user_id or x_user_role):
+        if settings.auth_required:
+            import logging
+            logging.getLogger("doordrill.security").warning(
+                "Header-based auth used with AUTH_REQUIRED=True — this mode is intended for development only"
+            )
         return x_user_id, x_user_role.lower() if x_user_role else None
 
     return None, None

@@ -6,7 +6,7 @@ import type {
   KnowledgeQueryResponse,
 } from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? "/api" : "http://127.0.0.1:8000");
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? "/api" : (() => { throw new Error("VITE_API_BASE_URL must be set for production builds"); })());
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = [".pdf", ".docx", ".txt"];
 
@@ -18,8 +18,6 @@ function buildAuthHeaders(managerId: string): Headers {
 
   const headers = new Headers();
   headers.set("authorization", `Bearer ${auth.access_token}`);
-  headers.set("x-user-id", managerId || auth.user.id);
-  headers.set("x-user-role", "manager");
   return headers;
 }
 
@@ -98,8 +96,6 @@ export function uploadDocument(
     const request = new XMLHttpRequest();
     request.open("POST", `${API_BASE}/manager/documents`);
     request.setRequestHeader("authorization", `Bearer ${auth.access_token}`);
-    request.setRequestHeader("x-user-id", managerId || auth.user.id);
-    request.setRequestHeader("x-user-role", "manager");
 
     request.upload.addEventListener("progress", (event) => {
       if (!event.lengthComputable || !onProgress) {
