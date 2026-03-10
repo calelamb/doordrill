@@ -19,7 +19,7 @@ class InviteRepResponse(BaseModel):
 class AcceptInviteRequest(BaseModel):
     token: str = Field(min_length=16, max_length=128)
     name: str = Field(min_length=1, max_length=255)
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
 
 
 class ValidateInviteResponse(BaseModel):

@@ -23,15 +23,20 @@ function navigateToInvite(params: InviteRouteParams): boolean {
   return true;
 }
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 function parseInviteUrl(url: string): InviteRouteParams | null {
   const parsed = Linking.parse(url);
   const route = (parsed.path || parsed.hostname || "").replace(/^\/+|\/+$/g, "");
   const token = typeof parsed.queryParams?.token === "string" ? parsed.queryParams.token : null;
-  const email = typeof parsed.queryParams?.email === "string" ? parsed.queryParams.email : "";
+  const rawEmail = typeof parsed.queryParams?.email === "string" ? parsed.queryParams.email : "";
 
   if (route !== "invite" || !token) {
     return null;
   }
+
+  // Sanitize email: only accept valid-looking emails, discard anything suspicious
+  const email = rawEmail.length <= 254 && EMAIL_REGEX.test(rawEmail) ? rawEmail : "";
 
   return { token, email };
 }

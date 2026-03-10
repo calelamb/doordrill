@@ -284,31 +284,16 @@ def _scenario_focus_skills(scenario: Scenario) -> list[str]:
 
 @router.get("/lookup")
 def lookup_rep_by_email(email: str = Query(...), db: Session = Depends(get_db)) -> dict:
-    # Development only endpoint to lookup a rep by email without auth
+    """Development only endpoint to lookup a rep by email. Disabled in non-dev environments."""
+    from app.core.config import get_settings as _get_settings
+    _settings = _get_settings()
+    if _settings.environment not in ("dev", "test"):
+        raise HTTPException(status_code=404, detail="not found")
+
     user = db.scalar(select(User).where(User.email == email.lower(), User.role == "rep"))
     if not user:
-        # If user doesn't exist, create a mock user for them automatically for testing purposes
-        from app.models.user import Organization
-        from app.models.types import UserRole
-        # Find any organization to attach them to, or create one
-        org = db.scalar(select(Organization).limit(1))
-        if not org:
-            org = Organization(name="Test Org", industry="Solar", plan_tier="starter")
-            db.add(org)
-            db.flush()
-            
-        user = User(
-            org_id=org.id,
-            role=UserRole.REP,
-            name=email.split("@")[0].replace(".", " ").title(),
-            email=email.lower(),
-            password_hash="mock",
-            auth_provider="local",
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        
+        raise HTTPException(status_code=404, detail="rep not found")
+
     return {"rep_id": user.id}
 
 
@@ -782,26 +767,47 @@ def revoke_device_token(
         raise HTTPException(status_code=404, detail="device token not found")
     return {"ok": True, "token_id": token_id}
 
+ALLOWED_AVATAR_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp"}
+ALLOWED_AVATAR_CONTENT_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+
 @router.post("/profile/avatar")
 def upload_avatar(
     file: UploadFile = File(...),
     actor: Actor = Depends(require_rep_or_manager),
     db: Session = Depends(get_db)
 ) -> dict:
+    from app.core.config import get_settings as _get_settings
+    _settings = _get_settings()
+
     if not actor.user_id:
         raise HTTPException(status_code=401, detail="authenticated actor required")
     user = _get_user_or_404(db, actor.user_id, "user")
-    
-    ext = file.filename.split(".")[-1] if file.filename else "jpg"
+
+    # Validate content type
+    if file.content_type not in ALLOWED_AVATAR_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="file must be an image (JPEG, PNG, GIF, or WebP)")
+
+    # Validate and sanitize extension
+    ext = (file.filename.split(".")[-1].lower() if file.filename and "." in file.filename else "")
+    if ext not in ALLOWED_AVATAR_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="unsupported file extension")
+
+    # Read with size limit
+    max_size = _settings.max_upload_size_bytes
+    contents = file.file.read(max_size + 1)
+    if len(contents) > max_size:
+        raise HTTPException(status_code=413, detail=f"file too large, max {max_size // 1_048_576}MB")
+
     filename = f"{user.id}_{uuid.uuid4().hex}.{ext}"
     filepath = os.path.join("uploads", "avatars", filename)
-    
+
     with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
+        buffer.write(contents)
+
     user.avatar_url = f"/uploads/avatars/{filename}"
     db.commit()
-    
+
     return {"avatar_url": user.avatar_url}
 
 @router.patch("/profile")
