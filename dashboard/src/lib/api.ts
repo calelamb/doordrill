@@ -34,8 +34,11 @@ import type {
   WeeklyTeamBriefingResponse,
 } from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
-const WS_BASE = import.meta.env.VITE_WS_BASE_URL ?? API_BASE.replace(/^http/i, "ws");
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? "/api" : "http://127.0.0.1:8000");
+const WS_BASE = import.meta.env.VITE_WS_BASE_URL ??
+  (import.meta.env.DEV
+    ? `${window.location.origin.replace(/^http/i, "ws")}/api`
+    : API_BASE.replace(/^http/i, "ws"));
 
 type AuthOptions = {
   userId?: string;
