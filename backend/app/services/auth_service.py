@@ -21,11 +21,14 @@ class AuthService:
         digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120_000, dklen=32)
         return f"pbkdf2_sha256$120000${base64.urlsafe_b64encode(salt).decode()}${base64.urlsafe_b64encode(digest).decode()}"
 
+    # Dummy hash used for constant-time comparison when user does not exist
+    _DUMMY_HASH = "pbkdf2_sha256$120000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
     def verify_password(self, password: str, password_hash: str | None) -> bool:
-        if not password_hash:
-            return False
+        # Always run the full PBKDF2 computation to prevent timing oracles
+        effective_hash = password_hash if password_hash else self._DUMMY_HASH
         try:
-            scheme, rounds, salt_b64, digest_b64 = password_hash.split("$", 3)
+            scheme, rounds, salt_b64, digest_b64 = effective_hash.split("$", 3)
             if scheme != "pbkdf2_sha256":
                 return False
             salt = base64.urlsafe_b64decode(salt_b64.encode())
@@ -37,7 +40,9 @@ class AuthService:
                 int(rounds),
                 dklen=len(expected_digest),
             )
-            return hmac.compare_digest(actual_digest, expected_digest)
+            result = hmac.compare_digest(actual_digest, expected_digest)
+            # If we used the dummy hash, always return False
+            return result and bool(password_hash)
         except Exception:
             return False
 

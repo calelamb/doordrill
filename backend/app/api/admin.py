@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.auth import Actor, require_manager
+from app.core.auth import Actor, require_admin
 from app.db.session import get_db
 from app.models.grading import GradingRun
 from app.models.prompt_version import PromptVersion
@@ -107,7 +107,7 @@ def _serialize_prompt_experiment(experiment: PromptExperiment) -> dict:
 @router.post("/prompt-experiments")
 def create_prompt_experiment(
     payload: PromptExperimentCreateRequest,
-    actor: Actor = Depends(require_manager),
+    actor: Actor = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
     control = db.get(PromptVersion, payload.control_version_id)
@@ -133,7 +133,7 @@ def create_prompt_experiment(
 @router.get("/prompt-experiments/{experiment_id}")
 def get_prompt_experiment(
     experiment_id: str,
-    actor: Actor = Depends(require_manager),
+    actor: Actor = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
     experiment = db.get(PromptExperiment, experiment_id)
@@ -145,7 +145,7 @@ def get_prompt_experiment(
 @router.post("/prompt-experiments/{experiment_id}/evaluate")
 def evaluate_prompt_experiment(
     experiment_id: str,
-    actor: Actor = Depends(require_manager),
+    actor: Actor = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -160,7 +160,7 @@ def evaluate_prompt_experiment(
 @router.post("/prompt-experiments/{experiment_id}/promote")
 def promote_prompt_experiment_winner(
     experiment_id: str,
-    actor: Actor = Depends(require_manager),
+    actor: Actor = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
     try:
@@ -176,7 +176,7 @@ def promote_prompt_experiment_winner(
 
 @router.get("/training-signals/export")
 def export_training_signals(
-    actor: Actor = Depends(require_manager),
+    actor: Actor = Depends(require_admin),
     db: Session = Depends(get_db),
     quality: Literal["high", "medium", "all"] = Query(default="all"),
     prompt_type: str = Query(default="grading_v2"),

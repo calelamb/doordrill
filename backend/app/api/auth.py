@@ -107,7 +107,10 @@ def register(payload: AuthRegisterRequest, db: Session = Depends(get_db)) -> Aut
 @router.post("/login", response_model=AuthTokenResponse)
 def login(payload: AuthLoginRequest, db: Session = Depends(get_db)) -> AuthTokenResponse:
     user = db.scalar(select(User).where(User.email == payload.email.lower()))
-    if user is None or not auth_service.verify_password(payload.password, user.password_hash):
+    # Always run verify to prevent timing oracle user enumeration
+    password_hash = user.password_hash if user else None
+    valid = auth_service.verify_password(payload.password, password_hash)
+    if not user or not valid:
         raise HTTPException(status_code=401, detail="invalid credentials")
 
     tokens = auth_service.issue_tokens(user)

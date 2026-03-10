@@ -197,6 +197,12 @@ def require_manager(actor: Actor = Depends(get_actor)) -> Actor:
     return actor
 
 
+def require_admin(actor: Actor = Depends(get_actor)) -> Actor:
+    if actor.role != "admin":
+        raise HTTPException(status_code=403, detail="admin role required")
+    return actor
+
+
 def require_rep_or_manager(actor: Actor = Depends(get_actor)) -> Actor:
     if actor.role not in {"rep", "manager", "admin"}:
         raise HTTPException(status_code=403, detail="rep or manager role required")
