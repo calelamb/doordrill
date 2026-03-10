@@ -160,8 +160,8 @@ def seed_test_data(client: httpx.Client) -> dict[str, Any]:
     rep_token = rep_resp["access_token"]
     rep_id = rep_resp["user"]["id"]
 
-    # Create a scenario via manager endpoint
-    scenario_resp = post(client, "/manager/scenarios", {
+    # Create a scenario via scenarios endpoint
+    scenario_resp = post(client, "/scenarios", {
         "name": "E2E Skeptical Homeowner",
         "industry": "pest_control",
         "difficulty": 2,
@@ -175,6 +175,7 @@ def seed_test_data(client: httpx.Client) -> dict[str, Any]:
             "professionalism": 10,
         },
         "stages": ["door_knock", "initial_pitch", "objection_handling", "close_attempt"],
+        "created_by_id": mgr_id,
     }, token=mgr_token)
     scenario_id = scenario_resp["id"]
 
@@ -236,7 +237,7 @@ async def run_drill(session_id: str, rep_token: str) -> dict[str, Any]:
         "server_events": [],
     }
 
-    async with websockets.connect(ws_uri, open_timeout=15, close_timeout=10) as ws:
+    async with websockets.connect(ws_uri, open_timeout=15, close_timeout=10, ping_interval=None) as ws:
         # Expect server.session.state connected
         raw = await asyncio.wait_for(ws.recv(), timeout=10)
         msg = json.loads(raw)
@@ -278,7 +279,7 @@ async def run_drill(session_id: str, rep_token: str) -> dict[str, Any]:
 
             # Drain events until server.turn.committed (AI has responded)
             turn_done = False
-            drain_deadline = time.time() + 30  # 30s per turn max
+            drain_deadline = time.time() + 60  # 60s per turn — real ElevenLabs streaming can be slow
             while not turn_done and time.time() < drain_deadline:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -289,13 +290,16 @@ async def run_drill(session_id: str, rep_token: str) -> dict[str, Any]:
                     if etype == "server.turn.committed":
                         summary["turns_committed"] += 1
                         turn_done = True
-                    elif etype in ("server.ai.text_chunk", "server.ai.audio_chunk"):
+                    elif etype in ("server.ai.audio.chunk", "server.ai.text.delta", "server.ai.text.done"):
                         summary["ai_responses"] += 1
                     elif etype == "server.error":
                         summary["errors"].append(event.get("payload", {}).get("message", "unknown error"))
                         turn_done = True  # skip to next turn on error
                 except asyncio.TimeoutError:
-                    break  # move on, turn may have been swallowed
+                    continue  # keep waiting up to drain_deadline for real provider latency
+
+        # Brief pause so the last turn's AI response can finish before we end
+        await asyncio.sleep(3)
 
         # End the session
         await ws.send(json.dumps({
@@ -391,9 +395,19 @@ async def main() -> None:
         section("3. Session Create (REST)")
         session_id = ""
         try:
+            # Manager creates the assignment so the session appears in manager's view
+            assign_resp = post(client, "/manager/assignments", {
+                "scenario_id": ctx["scenario_id"],
+                "rep_id": ctx["rep_id"],
+                "assigned_by": ctx["manager_id"],
+            }, token=ctx["manager_token"])
+            assignment_id = assign_resp.get("id", "")
+            check("Manager creates assignment", bool(assignment_id), assignment_id[:8] + "…" if assignment_id else "no id")
+
             sess_resp = post(client, "/rep/sessions", {
                 "rep_id": ctx["rep_id"],
                 "scenario_id": ctx["scenario_id"],
+                "assignment_id": assignment_id,
             }, token=ctx["rep_token"])
             session_id = sess_resp.get("id", "")
             check("POST /rep/sessions → 200", bool(session_id), session_id[:8] + "…" if session_id else "no id")
@@ -487,8 +501,9 @@ async def main() -> None:
         try:
             # The rep sessions list seen by the manager should include this session
             # Manager activity feed / recent sessions
-            mgr_sessions = get(client, f"/manager/reps/{ctx['rep_id']}/sessions", ctx["manager_token"])
-            session_ids = [s.get("id") or s.get("session_id") for s in (mgr_sessions if isinstance(mgr_sessions, list) else mgr_sessions.get("sessions", []))]
+            mgr_resp = get(client, f"/manager/sessions?manager_id={ctx['manager_id']}&rep_id={ctx['rep_id']}", ctx["manager_token"])
+            mgr_sessions = mgr_resp if isinstance(mgr_resp, list) else mgr_resp.get("sessions", [])
+            session_ids = [s.get("id") or s.get("session_id") for s in mgr_sessions]
             check(
                 "Session visible to manager",
                 session_id in session_ids,

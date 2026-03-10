@@ -17,30 +17,8 @@ const SPEAKING_THRESHOLD_DB = -45;
 const STATUS_UPDATE_MS = 80;
 
 const RECORDING_OPTIONS: Audio.RecordingOptions = {
+  ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
   isMeteringEnabled: true,
-  android: {
-    extension: ".m4a",
-    outputFormat: Audio.AndroidOutputFormat.MPEG_4,
-    audioEncoder: Audio.AndroidAudioEncoder.AAC,
-    sampleRate: 16000,
-    numberOfChannels: 1,
-    bitRate: 64000
-  },
-  ios: {
-    extension: ".m4a",
-    outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
-    audioQuality: Audio.IOSAudioQuality.HIGH,
-    sampleRate: 16000,
-    numberOfChannels: 1,
-    bitRate: 64000,
-    linearPCMBitDepth: 16,
-    linearPCMIsBigEndian: false,
-    linearPCMIsFloat: false
-  },
-  web: {
-    mimeType: "audio/webm",
-    bitsPerSecond: 64000
-  }
 };
 
 export class AudioCaptureService {
@@ -51,31 +29,51 @@ export class AudioCaptureService {
   private speaking = false;
   private permissionGranted = false;
   private startedAtMs = 0;
+  private startPromise: Promise<void> | null = null;
 
   async start(): Promise<void> {
     if (this.recording) {
       return;
     }
+    if (this.startPromise) {
+      return this.startPromise;
+    }
 
-    await this.ensurePermission();
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-      shouldDuckAndroid: true,
-      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-      playThroughEarpieceAndroid: false
-    });
+    this.startPromise = (async () => {
+      await this.ensurePermission();
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        shouldDuckAndroid: true,
+        interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+        playThroughEarpieceAndroid: false
+      });
 
-    const recording = new Audio.Recording();
-    recording.setOnRecordingStatusUpdate((status) => this.handleStatus(status));
-    recording.setProgressUpdateInterval(STATUS_UPDATE_MS);
+      try {
+        const { recording } = await Audio.Recording.createAsync(
+          RECORDING_OPTIONS,
+          (status) => this.handleStatus(status),
+          STATUS_UPDATE_MS
+        );
+        this.recording = recording;
+        this.startedAtMs = Date.now();
+      } catch (error) {
+        this.recording = null;
+        const message = error instanceof Error ? error.message : "Microphone failed to initialize";
+        if (/recorder not prepared/i.test(message) || /prepare encountered an error/i.test(message)) {
+          throw new Error("Microphone failed to initialize. Try pressing the mic again.");
+        }
+        throw error;
+      }
+    })();
 
-    await recording.prepareToRecordAsync(RECORDING_OPTIONS);
-    await recording.startAsync();
-    this.recording = recording;
-    this.startedAtMs = Date.now();
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
   }
 
   async stop(): Promise<AudioChunk | null> {

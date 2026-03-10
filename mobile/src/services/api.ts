@@ -48,6 +48,7 @@ type RawRepSessionDetail = Omit<RepSessionDetail, "scorecard" | "transcript" | "
 };
 
 let refreshInFlight: Promise<boolean> | null = null;
+const API_TIMEOUT_MS = 10_000;
 
 async function buildHeaders(headers: HeaderMap | undefined, auth: boolean): Promise<HeaderMap> {
   const mergedHeaders = { ...(headers ?? {}) };
@@ -99,11 +100,25 @@ async function apiRequest<T>(
   hasRetried = false
 ): Promise<T> {
   const auth = options.auth !== false;
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    method,
-    headers: await buildHeaders(options.headers, auth),
-    body: options.body,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  let response: Response;
+
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers: await buildHeaders(options.headers, auth),
+      body: options.body,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Request timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (response.status === 401 && auth && options.retryOn401 !== false && !hasRetried) {
     const refreshed = await attemptSilentRefresh();

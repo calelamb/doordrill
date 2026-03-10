@@ -61,6 +61,14 @@ def _score_value(value: Any) -> float | None:
     return None
 
 
+def _has_meaningful_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    meaningful_chars = [char for char in text if char.isalnum()]
+    return len(meaningful_chars) >= 3
+
+
 class GradingPromptBuilder:
     @classmethod
     def template_blueprint(cls) -> str:
@@ -372,6 +380,9 @@ class GradingService:
         rep_turns: list[Any],
         ai_turns: list[Any],
     ) -> dict[str, Any]:
+        if not self._has_meaningful_rep_evidence(rep_turns):
+            return self._grade_with_no_rep_evidence(session=session)
+
         depth = max(1, len(rep_turns))
         opening = min(10.0, 6.0 + depth * 0.3)
         pitch = min(10.0, 5.5 + depth * 0.35)
@@ -446,12 +457,56 @@ class GradingService:
         base["evidence_quality"] = self._evidence_quality(confidence)
         return base
 
+    def _has_meaningful_rep_evidence(self, rep_turns: list[Any]) -> bool:
+        return any(_has_meaningful_text(turn.text) for turn in rep_turns)
+
+    def _grade_with_no_rep_evidence(self, *, session: DrillSession) -> dict[str, Any]:
+        category_scores = {
+            key: {
+                "score": 0.0,
+                "confidence": 0.0,
+                "rationale_summary": "No rep speech was captured.",
+                "rationale_detail": "This session did not capture enough rep speech to support grading in this category.",
+                "evidence_turn_ids": [],
+                "behavioral_signals": [],
+                "improvement_target": self._fallback_improvement_target(key, score=0.0),
+            }
+            for key in CATEGORY_KEYS
+        }
+
+        return {
+            "overall_score": 0.0,
+            "category_scores": category_scores,
+            "highlights": [
+                {
+                    "type": "improve",
+                    "note": "No rep speech was captured, so this drill could not be meaningfully graded.",
+                    "turn_id": None,
+                },
+                {
+                    "type": "improve",
+                    "note": "Run the drill again and speak through your opening, pitch, objections, and close.",
+                    "turn_id": None,
+                },
+            ],
+            "ai_summary": "No rep speech was captured in this drill, so there is not enough evidence to grade your performance.",
+            "evidence_turn_ids": [],
+            "weakness_tags": ["no_rep_speech", *CATEGORY_KEYS],
+            "evidence_quality": "weak",
+            "session_complexity": self._compute_session_complexity(session),
+            "confidence_score": 0.0,
+        }
+
     def _normalize_grading(self, payload: dict[str, Any], *, session: DrillSession) -> dict[str, Any]:
         turns = list(session.turns)
+        rep_turns = [turn for turn in turns if turn.speaker.value == "rep"]
+        if not self._has_meaningful_rep_evidence(rep_turns):
+            return self._grade_with_no_rep_evidence(session=session)
+
         valid_turn_ids = {turn.id for turn in turns}
         fallback = self._grade_with_fallback(
             session=session,
-            rep_turns=[turn for turn in turns if turn.speaker.value == "rep"],
+            rep_turns=rep_turns,
             ai_turns=[turn for turn in turns if turn.speaker.value == "ai"],
         )
 
@@ -578,6 +633,8 @@ class GradingService:
 
     def compute_confidence(self, session: DrillSession, grading: dict[str, Any]) -> float:
         rep_turns = [t for t in session.turns if t.speaker.value == "rep"]
+        if not self._has_meaningful_rep_evidence(rep_turns):
+            return 0.0
         evidence_ids = set(grading.get("evidence_turn_ids", []))
         turn_factor = min(1.0, len(rep_turns) / 10.0)
         evidence_density = min(1.0, len(evidence_ids) / max(1, len(rep_turns)))

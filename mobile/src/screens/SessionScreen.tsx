@@ -30,6 +30,7 @@ const HOLD_END_MS = 500;
 const NUDGE_DELAY_MS = 4000;
 const INTERRUPT_BANNER_MS = 2200;
 const WAVE_BAR_COUNT = 12;
+const START_DING = require("../../assets/record-start-ding.wav");
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -174,6 +175,7 @@ export function SessionScreen({ route, navigation }: Props) {
   const waitingNudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const interruptionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentSoundRef = useRef<Audio.Sound | null>(null);
+  const startCueSoundRef = useRef<Audio.Sound | null>(null);
   const audioQueueRef = useRef<Array<{ payload: string; codec: string }>>([]);
   const drainingAudioRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
@@ -271,6 +273,18 @@ export function SessionScreen({ route, navigation }: Props) {
       await currentSound.unloadAsync();
     } catch {
       // Ignore unload failures.
+    }
+  }
+
+  async function playStartCue(): Promise<void> {
+    const sound = startCueSoundRef.current;
+    if (!sound) {
+      return;
+    }
+    try {
+      await sound.replayAsync();
+    } catch {
+      // Best-effort cue only; recording should continue even if playback fails.
     }
   }
 
@@ -534,10 +548,12 @@ export function SessionScreen({ route, navigation }: Props) {
       recordingRef.current = true;
       setRecording(true);
       setStatusLabel("Listening...");
+      void playStartCue();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start microphone capture");
       recordingRef.current = false;
       setRecording(false);
+      scheduleWaitingNudge();
     }
   }
 
@@ -618,7 +634,12 @@ export function SessionScreen({ route, navigation }: Props) {
     });
     audioCaptureRef.current = audioCapture;
 
-    void configurePlaybackAudioMode();
+    void Audio.Sound.createAsync(START_DING, { volume: 0.35, shouldPlay: false })
+      .then(({ sound }) => {
+        startCueSoundRef.current = sound;
+      })
+      .catch(() => undefined);
+
     void connectSocket();
 
     return () => {
@@ -632,6 +653,8 @@ export function SessionScreen({ route, navigation }: Props) {
       wsClientRef.current?.close();
       wsClientRef.current = null;
       void cancelAudioPlayback();
+      void startCueSoundRef.current?.unloadAsync().catch(() => undefined);
+      startCueSoundRef.current = null;
       void audioCaptureRef.current?.stop().catch(() => undefined);
       audioCaptureRef.current = null;
     };
