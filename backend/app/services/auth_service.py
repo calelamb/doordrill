@@ -14,6 +14,11 @@ from app.core.config import get_settings
 from app.models.user import User
 
 _password_hasher = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
+_DUMMY_ARGON2_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$"
+    "IWyL3I+Cuiyuc8NO/MtM5g$"
+    "IJm9zjXYGa8VxLX4VRbGkSfIFbqPyUN+YK+FLewD/w0"
+)
 
 
 class AuthService:
@@ -25,6 +30,10 @@ class AuthService:
 
     def verify_password(self, password: str, password_hash: str | None) -> bool:
         if not password_hash:
+            try:
+                _password_hasher.verify(_DUMMY_ARGON2_HASH, password)
+            except (VerifyMismatchError, VerificationError, Argon2Error):
+                pass
             return False
         if password_hash.startswith("pbkdf2_sha256$"):
             return self._verify_pbkdf2(password, password_hash)

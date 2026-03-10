@@ -107,7 +107,8 @@ def register(payload: AuthRegisterRequest, db: Session = Depends(get_db)) -> Aut
 @router.post("/login", response_model=AuthTokenResponse)
 def login(payload: AuthLoginRequest, db: Session = Depends(get_db)) -> AuthTokenResponse:
     user = db.scalar(select(User).where(User.email == payload.email.lower()))
-    if user is None or not auth_service.verify_password(payload.password, user.password_hash):
+    password_is_valid = auth_service.verify_password(payload.password, user.password_hash if user else None)
+    if user is None or not password_is_valid:
         raise HTTPException(status_code=401, detail="invalid credentials")
 
     if auth_service.needs_rehash(user.password_hash):

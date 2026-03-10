@@ -67,3 +67,31 @@ def test_decode_bearer_token_rejects_unsupported_algorithms():
             raise AssertionError("expected unsupported algorithm to be rejected")
     finally:
         settings.jwt_algorithm = original_algorithm
+
+
+def test_register_rejects_admin_role(client):
+    response = client.post(
+        "/auth/register",
+        json={
+            "email": "admin-register@example.com",
+            "password": "SecretPass123",
+            "name": "Admin User",
+            "role": "admin",
+            "org_name": "Admin Org",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_invitation_rejects_admin_role(client, seed_org):
+    response = client.post(
+        "/manager/invitations",
+        headers={"x-user-id": seed_org["manager_id"], "x-user-role": "manager"},
+        json={
+            "email": "admin-invite@example.com",
+            "role": "admin",
+        },
+    )
+
+    assert response.status_code == 422
