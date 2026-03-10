@@ -3,15 +3,16 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.manager import router as manager_router
 from app.api.rep import router as rep_router
 from app.api.scenarios import router as scenarios_router
+from app.core.auth import get_actor
 from app.core.config import get_settings
 from app.core.logging_config import configure_logging
 from app.db.init_db import init_db
@@ -57,4 +58,17 @@ app.include_router(auth_router)
 app.include_router(scenarios_router)
 app.include_router(ws_router)
 
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+@app.get("/uploads/{file_path:path}")
+def serve_upload(
+    file_path: str,
+    actor=Depends(get_actor),
+):
+    import os
+
+    safe_path = os.path.normpath(file_path)
+    if safe_path.startswith("..") or safe_path.startswith("/"):
+        raise HTTPException(status_code=400, detail="invalid path")
+    full_path = os.path.join("uploads", safe_path)
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(full_path)

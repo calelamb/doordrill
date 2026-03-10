@@ -77,7 +77,9 @@ def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
 
 
 def _ensure_same_org(actor: Actor, org_id: str | None) -> None:
-    if actor.org_id and org_id and actor.org_id != org_id:
+    if not actor.org_id:
+        raise HTTPException(status_code=403, detail="actor organization not set")
+    if not org_id or actor.org_id != org_id:
         raise HTTPException(status_code=403, detail="cross-organization access denied")
 
 

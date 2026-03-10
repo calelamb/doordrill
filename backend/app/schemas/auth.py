@@ -5,7 +5,7 @@ class AuthRegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     name: str = Field(min_length=1, max_length=255)
-    role: str = Field(pattern="^(rep|manager|admin)$")
+    role: str = Field(pattern="^(rep|manager)$")
     org_id: str | None = None
     team_id: str | None = None
     org_name: str | None = Field(default=None, max_length=255)

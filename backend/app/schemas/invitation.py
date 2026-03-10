@@ -6,7 +6,7 @@ from pydantic import BaseModel, EmailStr, Field
 class InviteRepRequest(BaseModel):
     email: EmailStr
     team_id: str | None = None
-    role: str = Field(default="rep", pattern="^(rep|manager|admin)$")
+    role: str = Field(default="rep", pattern="^(rep|manager)$")
 
 
 class InviteRepResponse(BaseModel):
