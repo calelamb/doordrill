@@ -488,7 +488,7 @@ export function ProfileScreen({ navigation }: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   safeArea: { flex: 1 },
-  content: { flex: 1, padding: 20 },
+  content: { flexGrow: 1, padding: 20, paddingBottom: 32 },
   profileCard: { 
     alignItems: "center", 
     marginTop: 12, 
@@ -548,6 +548,7 @@ const styles = StyleSheet.create({
   },
   preferencesCard: {
     marginTop: 32,
+    width: "100%",
     borderRadius: 28,
     backgroundColor: "rgba(255, 255, 255, 0.6)",
     borderWidth: StyleSheet.hairlineWidth,
@@ -653,7 +654,7 @@ const styles = StyleSheet.create({
   },
   error: { color: "#991B1B", fontWeight: "600", flex: 1 },
   retryText: { color: "#991B1B", fontWeight: "800", textDecorationLine: "underline" },
-  statsContainer: { flex: 1 },
+  statsContainer: { width: "100%" },
   sectionTitle: { fontSize: 18, fontFamily: "Poppins_700Bold", color: colors.ink, marginBottom: 16 },
   statGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   statCardWrapper: {
@@ -727,7 +728,7 @@ const styles = StyleSheet.create({
   actionBtn: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
   saveBtn: { backgroundColor: colors.accent },
   cancelBtn: { backgroundColor: "rgba(0,0,0,0.05)", borderWidth: 1, borderColor: "rgba(0,0,0,0.1)" },
-  hierarchyContainer: { marginTop: 32 },
+  hierarchyContainer: { marginTop: 32, width: "100%" },
   hierarchyWrapper: {
     paddingLeft: 16,
     paddingTop: 8,

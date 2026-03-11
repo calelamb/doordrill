@@ -115,9 +115,8 @@ export function AssignmentsScreen({ navigation }: Props) {
     void loadData();
   }, [loadData]);
 
-  const sortedAssignments = useMemo(() => {
+  const openAssignments = useMemo(() => {
     const open = assignments.filter((a) => a.status !== "completed");
-    const completed = assignments.filter((a) => a.status === "completed");
 
     // Sort open: past due first, then closest due date, then no due date
     open.sort((a, b) => {
@@ -134,7 +133,7 @@ export function AssignmentsScreen({ navigation }: Props) {
       return 0;
     });
 
-    return { open, completed };
+    return open;
   }, [assignments]);
 
   const streakBanner = useMemo(() => {
@@ -258,32 +257,47 @@ export function AssignmentsScreen({ navigation }: Props) {
                     <Zap size={24} color="#fff" fill="#fff" />
                   </View>
                   <View style={styles.quickTrainTextContainer}>
-                    <Text style={styles.quickTrainTitle}>{isFirstTimer ? "Choose Your First Drill" : "Quick Train"}</Text>
+                    <Text style={styles.quickTrainTitle}>{isFirstTimer ? "Choose Your First Drill" : "Open Practice"}</Text>
                     <Text style={styles.quickTrainSubtitle}>
-                      {isFirstTimer ? "Pick a beginner-friendly conversation to get started" : "Start an open practice session"}
+                      {isFirstTimer ? "Pick a beginner-friendly conversation to get started" : "Start an unassigned practice session anytime"}
                     </Text>
                   </View>
                 </LinearGradient>
               </Pressable>
             )}
 
-            <Text style={styles.sectionHeader}>Up Next</Text>
+            <BlurView intensity={40} tint="light" style={styles.assignmentSectionIntro}>
+              <View style={styles.assignmentSectionIcon}>
+                <ClipboardList size={18} color={colors.accent} />
+              </View>
+              <View style={styles.assignmentSectionCopy}>
+                <Text style={styles.assignmentSectionTitle}>Manager Assignments</Text>
+                <Text style={styles.assignmentSectionSubtitle}>
+                  Assigned to you by your manager. Completed drills stay in History.
+                </Text>
+              </View>
+              <View style={styles.assignmentCountChip}>
+                <Text style={styles.assignmentCountText}>{openAssignments.length}</Text>
+              </View>
+            </BlurView>
 
             {loading && assignments.length === 0 ? (
               <ActivityIndicator size="large" color={colors.accent} style={{ marginTop: 40 }} />
             ) : (
               <>
-                {sortedAssignments.open.length === 0 && sortedAssignments.completed.length === 0 ? (
+                {openAssignments.length === 0 ? (
                   <View style={styles.emptyState}>
                     <View style={styles.emptyIconContainer}>
                       <ClipboardList size={32} color={colors.accent} />
                     </View>
-                    <Text style={styles.emptyText}>No drills assigned.</Text>
-                    <Text style={styles.emptySubtext}>Your manager will assign scenarios here. Use Quick Train to practice freely.</Text>
+                    <Text style={styles.emptyText}>No manager assignments right now.</Text>
+                    <Text style={styles.emptySubtext}>
+                      When your manager assigns a drill, it will show up here with its due date and score target. Use Open Practice to keep training in the meantime.
+                    </Text>
                   </View>
                 ) : null}
 
-                {sortedAssignments.open.map((assignment) => (
+                {openAssignments.map((assignment) => (
                   <AssignmentCard
                     key={assignment.id}
                     assignment={assignment}
@@ -294,26 +308,6 @@ export function AssignmentsScreen({ navigation }: Props) {
                     }}
                   />
                 ))}
-
-                {sortedAssignments.completed.length > 0 && (
-                  <View style={styles.completedSection}>
-                    <View style={styles.completedHeader}>
-                      <BookOpenCheck size={18} color={colors.success} />
-                      <Text style={styles.sectionTitle}>Completed Drills</Text>
-                    </View>
-                    {sortedAssignments.completed.map((assignment) => (
-                      <AssignmentCard
-                        key={assignment.id}
-                        assignment={assignment}
-                        scenario={scenarios[assignment.scenario_id]}
-                        disabled={loading}
-                        onStart={() => {
-                          void startDrill(assignment);
-                        }}
-                      />
-                    ))}
-                  </View>
-                )}
               </>
             )}
           </ScrollView>
@@ -503,14 +497,57 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "500",
   },
-  sectionHeader: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: colors.muted,
-    textTransform: "uppercase",
-    letterSpacing: 1,
+  assignmentSectionIntro: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+    borderRadius: 22,
+    backgroundColor: "rgba(255, 255, 255, 0.62)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
     marginTop: 8,
     marginBottom: 4,
+  },
+  assignmentSectionIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.accentSoft,
+  },
+  assignmentSectionCopy: {
+    flex: 1,
+  },
+  assignmentSectionTitle: {
+    fontSize: 17,
+    fontFamily: "Poppins_700Bold",
+    color: colors.ink,
+    marginBottom: 2,
+  },
+  assignmentSectionSubtitle: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.muted,
+    fontFamily: "Inter_400Regular",
+  },
+  assignmentCountChip: {
+    minWidth: 34,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(22, 101, 52, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(22, 101, 52, 0.2)",
+  },
+  assignmentCountText: {
+    fontSize: 13,
+    fontFamily: "Poppins_700Bold",
+    color: colors.accent,
   },
   errorContainer: {
     backgroundColor: "#FEE2E2",
@@ -537,24 +574,18 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(22, 101, 52, 0.2)"
   },
-  emptyText: { fontSize: 20, fontFamily: "Poppins_700Bold", color: colors.ink },
-  emptySubtext: { fontSize: 15, color: colors.muted, textAlign: "center", paddingHorizontal: 20 },
-  completedSection: {
-    marginTop: 24,
-    gap: 12,
+  emptyText: {
+    fontSize: 20,
+    fontFamily: "Poppins_700Bold",
+    color: colors.ink,
+    textAlign: "center",
   },
-  completedHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    marginBottom: 8,
-  },
-  sectionTitle: {
+  emptySubtext: {
     fontSize: 14,
-    fontWeight: "700",
-    color: colors.muted,
-    textTransform: "uppercase",
-    letterSpacing: 1,
-  }
+    lineHeight: 20,
+    color: "rgba(108, 98, 85, 0.8)",
+    textAlign: "center",
+    paddingHorizontal: 12,
+    maxWidth: 320,
+  },
 });
