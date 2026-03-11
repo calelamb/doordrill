@@ -9,6 +9,15 @@ class Settings(BaseSettings):
 
     app_name: str = "DoorDrill Backend"
     environment: str = "dev"
+    cors_origins: list[str] = Field(
+        default=[
+            "http://localhost:5174",
+            "http://127.0.0.1:5174",
+            "http://localhost:4173",
+            "http://127.0.0.1:4173",
+        ],
+        alias="CORS_ORIGINS",
+    )
     database_url: str = Field(default="sqlite:///./doordrill.db", alias="DATABASE_URL")
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
     storage_bucket: str = Field(default="doordrill-session-artifacts", alias="STORAGE_BUCKET")

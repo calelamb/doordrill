@@ -71,6 +71,8 @@ export class SessionWsClient {
       codec: chunk.codec,
       audio_base64: chunk.payload,
       content_type: chunk.contentType,
+      sample_rate: chunk.sampleRate,
+      channels: chunk.channels,
       utterance_duration_ms: chunk.durationMs,
       captured_at: chunk.createdAt
     };

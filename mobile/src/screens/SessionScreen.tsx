@@ -305,7 +305,6 @@ export function SessionScreen({ route, navigation }: Props) {
     const filePath = `${baseDir}doordrill-ai-${Date.now()}-${Math.random().toString(16).slice(2)}.${extension}`;
 
     try {
-      await configurePlaybackAudioMode();
       await FileSystem.writeAsStringAsync(filePath, payload, {
         encoding: FileSystem.EncodingType.Base64,
       });
@@ -338,6 +337,7 @@ export function SessionScreen({ route, navigation }: Props) {
 
     drainingAudioRef.current = true;
     setPlayingAudio(true);
+    await configurePlaybackAudioMode();
 
     while (audioQueueRef.current.length > 0) {
       const nextChunk = audioQueueRef.current.shift();

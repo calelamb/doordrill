@@ -431,7 +431,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     segments=[fallback_segment],
                 )
 
-        async def stream_tts_for_plan(plan: MicroBehaviorPlan, first_audio_started: asyncio.Event) -> None:
+        async def stream_tts_for_plan(plan: MicroBehaviorPlan) -> None:
             nonlocal audio_frame_count, total_audio_duration_ms, turn_audio_duration_ms, ai_interrupted
             _task_start_time = asyncio.get_event_loop().time()
             sentence_text = plan.transformed_text.strip()
@@ -503,16 +503,6 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                                     if interrupt_signal_at is not None:
                                         ai_interrupted = True
                                         return
-                                    if not first_audio_started.is_set():
-                                        logger.info(
-                                            "first_audio_set_by_tts_task",
-                                            extra={
-                                                "session_id": session_id,
-                                                "sentence": sentence_text[:40],
-                                                "elapsed_ms": _elapsed_ms(),
-                                            },
-                                        )
-                                        first_audio_started.set()
                                     if not _first_chunk_logged:
                                         _t_before = asyncio.get_event_loop().time()
                                         logger.info(
@@ -601,16 +591,6 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         "ai_interrupted": ai_interrupted,
                     },
                 )
-                if not first_audio_started.is_set():
-                    logger.info(
-                        "first_audio_set_by_finally",
-                        extra={
-                            "session_id": session_id,
-                            "sentence": sentence_text[:40],
-                            "elapsed_ms": _elapsed_ms(),
-                        },
-                    )
-                    first_audio_started.set()
 
         async def process_sentence(raw_sentence: str) -> None:
             nonlocal ai_started_at, last_behavior_plan
@@ -649,31 +629,13 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 },
             )
             await maybe_flush()
-            first_audio_started = asyncio.Event()
-            tts_tasks.append(asyncio.create_task(stream_tts_for_plan(plan, first_audio_started)))
+            tts_tasks.append(asyncio.create_task(stream_tts_for_plan(plan)))
             logger.info(
                 "tts_task_created",
                 extra={
                     "session_id": session_id,
                     "sentence": sentence[:40],
                     "lock_locked": tts_emit_lock.locked(),
-                },
-            )
-            logger.info(
-                "awaiting_first_audio_started",
-                extra={
-                    "session_id": session_id,
-                    "sentence": sentence[:40],
-                    "elapsed_ms": _elapsed_ms(),
-                },
-            )
-            await first_audio_started.wait()
-            logger.info(
-                "first_audio_started_returned",
-                extra={
-                    "session_id": session_id,
-                    "sentence": sentence[:40],
-                    "elapsed_ms": _elapsed_ms(),
                 },
             )
 

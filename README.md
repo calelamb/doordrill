@@ -1,104 +1,96 @@
 # DoorDrill
 
-An AI-powered voice training platform for door-to-door sales reps.
+DoorDrill is a multi-surface AI training platform for door-to-door sales teams. Reps practice live objection handling against AI homeowners, sessions are graded automatically, and managers review performance through workflow and analytics tools.
 
-## The Problem
+## Repository Status
 
-Door-to-door sales — pest control, solar, home security — is one of the few industries where training still relies almost entirely on repetition, ride-alongs, and trial by fire. Companies invest weeks or months ramping new reps before summer selling season, and the feedback loop during that ramp is painfully slow.
+DoorDrill is in active pre-production development. Core backend contracts, the manager dashboard, and the mobile drill experience are implemented and under active iteration. Production hardening, deployment readiness, and operational maturity are being developed in parallel.
 
-The current process looks like this: a rep records a voice memo of their pitch and texts it to their manager. The manager listens when they get a chance, types out feedback in a text thread, and the rep tries again. This cycle might happen once or twice a day if the manager is on top of it. If they're managing a team of 15-20 reps, most recordings don't get listened to at all.
+## Repository Layout
 
-The real problem isn't that managers don't care — it's that the process doesn't scale. There's no structured way to practice the hundreds of edge cases that come up at the door. A homeowner who says their spouse isn't home. Someone who already has a pest control provider. A person who's interested but wants to think about it. Each of these requires a different response, and the only way reps learn to handle them today is by failing in front of real customers.
+| Path | Purpose |
+|---|---|
+| `backend/` | FastAPI service, realtime voice gateway, grading pipeline, auth, and manager/rep APIs |
+| `dashboard/` | React manager console for assignment, replay, analytics, and coaching workflows |
+| `mobile/` | Expo React Native client for the rep training experience |
+| `docs/` | Conformance notes, gap analyses, and operational documentation |
+| `scenarios/` | Seed scenario and rubric definitions |
+| `.github/` | CI workflow and GitHub collaboration metadata |
 
-By the time a rep gets meaningful feedback on a bad interaction, they've already repeated the same mistake a dozen more times.
+## Quick Start
 
-## The Solution
+### Prerequisites
 
-DoorDrill replaces the voice-memo-and-text-feedback loop with a real-time AI training partner. Reps open the app, start a session, and have a live voice conversation with an AI homeowner who responds naturally, raises realistic objections, and reacts to what the rep actually says.
+- Python 3.11+
+- Node.js 20+
+- npm 10+
 
-The AI doesn't follow a script. It plays a character — a skeptical retiree, a busy parent, someone who just signed with a competitor — and the rep has to adapt in real time, just like they would on an actual porch. Managers build the training path by assigning specific scenarios to their reps based on the skills they need to develop. A new rep might start with a friendly homeowner and a simple pitch. A more experienced rep might get thrown into a hostile interaction with multiple objections stacked on top of each other.
+### Backend
 
-After each session, the conversation is graded automatically against a rubric that evaluates the things managers actually care about: did the rep open well, did they handle the objection, did they ask for the sale, were they professional throughout. The rep gets a scorecard with specific feedback. The manager gets a notification with scores and a summary, and can listen to the audio or read the transcript if they want to dig deeper. They can override the AI's grade or add their own notes.
+```bash
+cd backend
+python -m pip install -e .[dev]
+cp .env.example .env
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
 
-The result is that reps can practice dozens of realistic interactions per day instead of waiting hours for feedback on one. Managers can track their entire team's progress at a glance instead of drowning in voice memos. And when summer hits, reps show up on day one having already worked through the scenarios that used to take weeks of real-world stumbling to learn.
+The default local configuration uses SQLite and mock STT/LLM/TTS providers, so the service can run without external API credentials.
 
-## Why This Matters
+Run backend tests:
 
-The door-to-door sales industry is massive and largely underserved by technology. Companies spend real money on training — flights, hotels, multi-week boot camps — and still lose a significant percentage of new reps in their first summer because they weren't ready. If DoorDrill can demonstrably shorten ramp time or improve close rates, the ROI case for sales orgs is straightforward.
+```bash
+cd backend
+pytest
+```
 
-The platform starts with pest control because that's where the deepest domain expertise and early testing relationships are. But the underlying system — AI roleplay, structured rubrics, manager oversight — applies directly to solar, home security, roofing, and any other industry where reps are selling face-to-face at the door. The scenario library and persona system are designed to expand across verticals without rebuilding the core product.
+### Dashboard
 
-## How It Works
+```bash
+cd dashboard
+npm install
+cp .env.example .env
+npm run dev
+```
 
-1. A manager assigns a scenario to a rep (or a group of reps) through the platform.
-2. The rep opens the mobile app, sees their assignment, and starts a session.
-3. The rep speaks naturally into their phone. Their voice is transcribed in real time and fed to an LLM that's playing the role of a homeowner with a specific personality, set of concerns, and objections.
-4. The AI homeowner responds with synthesized speech. The conversation flows back and forth like a real interaction at the door.
-5. When the session ends, the full transcript is evaluated against a grading rubric by a separate AI agent. Scores are generated across categories like opening, pitch delivery, objection handling, closing technique, and professionalism.
-6. The rep sees their scorecard with specific feedback and highlighted moments from the conversation.
-7. The manager receives a summary with scores. They can review the transcript, listen to audio, override grades, or add notes.
-8. Over time, both the rep and the manager can see progress trends — which skills are improving, which still need work.
+The dashboard runs on port `5174` and proxies `/api` traffic to `http://127.0.0.1:8000` during local development.
 
-## Technical Overview
+### Mobile
 
-The platform consists of three main pieces:
+```bash
+cd mobile
+npm install
+cp .env.example .env
+npm run start
+```
 
-**Mobile app** (React Native) — where reps practice. The core screen is a real-time voice interface that streams audio to the backend over WebSockets and plays back the AI's responses.
+Use `npm run ios` or `npm run android` for native runs after the local Expo environment is configured.
 
-**Backend** (Python / FastAPI) — handles the real-time voice pipeline, conversation logic, grading, and all API endpoints. The voice pipeline chains together streaming speech-to-text, an LLM for conversation, and text-to-speech for the AI homeowner's voice. Grading runs asynchronously after each session using a separate LLM call with structured rubrics.
+## System Summary
 
-**Manager dashboard** (web) — where managers assign scenarios, review sessions, track team progress, and provide manual feedback.
+DoorDrill currently consists of three user-facing surfaces backed by a shared service layer:
 
-See `architecture.md` for the full system design, data model, API specification, cost analysis, and implementation roadmap.
-See `ARCHITECTURE_CONFORMANCE.md` for current backend endpoint/service parity tracking.
+- `backend/`: FastAPI REST and WebSocket APIs, provider abstractions, session persistence, grading, analytics, and operational harnesses
+- `dashboard/`: manager workflows for assignment, replay, action history, and progress tracking
+- `mobile/`: rep login, assignment intake, live drill execution, and post-session scorecards
 
-## Status
+The deeper architecture, contract, and rollout details are documented separately to keep the root README focused on repository usage.
 
-Early stage. Currently in design and prototyping.
+## Quality and Operations
 
-## Backend Progress
+- Backend CI is defined in [`.github/workflows/backend-slo-gate.yml`](./.github/workflows/backend-slo-gate.yml) and covers tests, auth smoke, migration smoke, realtime websocket load gates, and management analytics load gates.
+- Backend operational references live under [`backend/docs/ops/`](./backend/docs/ops).
+- Load and SLO tooling is documented in [`backend/scripts/README.md`](./backend/scripts/README.md).
 
-The initial FastAPI backend foundation has been implemented in [`backend/`](./backend):
+## Documentation Index
 
-- Assignment workflow (`manager -> rep`)
-- Auth endpoint contract (`/auth/register`, `/auth/login`, `/auth/refresh`)
-- Scenario CRUD contract (`/scenarios`)
-- Realtime WebSocket voice session contract
-- Immutable session interaction ledger
-- Post-session grading + manager override workflow
-- Manager/rep listing contracts (`/manager/team`, `/manager/assignments`, `/manager/sessions`, `/rep/sessions`, `/rep/progress`)
-- Manager replay endpoint with transcript + artifact links
-- Manager analytics + rep progress endpoints
-- Manager action audit logging (`manager_action_logs`)
-- Org-scoped access control with header/JWT actor resolution
-- Provider adapters for Deepgram/OpenAI/ElevenLabs (real API paths + fallback)
-- LLM-judge grading path with deterministic fallback normalization
-- Interruption-aware WS replay traces (`barge_in_detected`) + transport metrics
-- Structured tracing logs with request/session correlation IDs
-- Ramp/SLO websocket load harness (`backend/scripts/load_test_ws.py`)
-- External IdP JWT readiness via JWKS (`JWT_JWKS_URL`)
-- Celery post-session task scaffolding (cleanup, grading, manager notification)
+- [`architecture.md`](./architecture.md): system architecture, data model, and implementation roadmap
+- [`docs/ARCHITECTURE_CONFORMANCE.md`](./docs/ARCHITECTURE_CONFORMANCE.md): current endpoint and service parity tracking
+- [`docs/README.md`](./docs/README.md): documentation map and source-of-truth guidance
+- [`SECURITY.md`](./SECURITY.md): security reporting expectations
+- [`backend/README.md`](./backend/README.md): backend setup, test, and operational entry points
+- [`dashboard/README.md`](./dashboard/README.md): manager console setup and local development workflow
+- [`mobile/README.md`](./mobile/README.md): mobile app setup and runtime configuration
 
-## Dashboard Progress
+## Contributing
 
-A manager web scaffold has been implemented in [`dashboard/`](./dashboard):
-
-- Feed view (`/manager/feed`)
-- Session replay detail (`/manager/sessions/{id}/replay`)
-- Score override action (`PATCH /manager/scorecards/{id}`)
-- Follow-up assignment action (`POST /manager/scorecards/{id}/followup-assignment`)
-- Analytics + rep progress panel (`/manager/analytics`, `/manager/reps/{id}/progress`)
-- Manager action timeline (`/manager/actions`)
-- Rep mode live drill console (session WS connect, turn send, live event stream, score refresh)
-
-## Mobile Progress (iOS + Android)
-
-A mobile-first Expo React Native app has been added in [`mobile/`](./mobile):
-
-- Rep login bootstrap
-- Assignment list + start session
-- Live drill session screen using websocket contract (`WS /ws/sessions/{id}`)
-- Scorecard feedback screen
-- Service layer for REST + websocket backend integration
-
-This is the active client direction for v1 delivery.
+This repository expects small, reviewable branches, accurate docs, and validation tied to the surface area being changed. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for branch, testing, and pull request expectations.

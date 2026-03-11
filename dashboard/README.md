@@ -1,38 +1,53 @@
-# DoorDrill Manager Dashboard (React)
+# DoorDrill Manager Dashboard
 
-Vite + React manager console scaffold for:
-- manager feed
-- replay details
-- score override
-- follow-up assignment creation
-- manager analytics
-- rep progress snapshot
-- manager action timeline
-- rep mode (assignment list + session start + score fetch + live WS drill console)
+The dashboard is a Vite + React application for manager workflows across assignments, replay, analytics, and coaching actions.
 
-## Run
+## Requirements
+
+- Node.js 20+
+- npm 10+
+
+## Local Setup
 
 ```bash
 cd dashboard
 npm install
+cp .env.example .env
 npm run dev
 ```
 
-By default the app calls backend at `http://127.0.0.1:8000`.
+The development server runs on port `5174`.
 
-Optional env:
+## Runtime Configuration
+
+The dashboard reads the following optional environment variables:
 
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:8000
 VITE_WS_BASE_URL=ws://127.0.0.1:8000
 ```
 
-## Current scope
+During local development, the Vite dev server proxies `/api` to `http://127.0.0.1:8000`.
 
-- Designed as a fast integration shell against backend contracts.
-- Uses manager header auth scaffold (`x-user-id`, `x-user-role=manager`).
-- Enter a manager ID in the UI to load data.
-- Rep mode includes a live websocket console (`/ws/sessions/{id}`) with:
-  - connection controls (connect/end)
-  - utterance send controls (VAD + audio chunk contract)
-  - live event stream for STT/AI/session state and turn commits
+## Validation
+
+```bash
+cd dashboard
+npm run build
+```
+
+## Current Surface Area
+
+- manager feed
+- session replay and transcript review
+- score override
+- follow-up assignment creation
+- manager analytics
+- rep progress snapshots
+- manager action timeline
+- rep-mode drill console backed by `WS /ws/sessions/{id}`
+
+## Local Auth Notes
+
+- Local development supports the backend's header-based auth scaffold.
+- Enter a manager identifier in the UI to load manager-scoped data when running against the local backend.

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.db.session import SessionLocal
 from app.models.session import SessionArtifact, SessionEvent, SessionTurn
 from app.models.types import EventDirection, TurnSpeaker
 from app.services.ledger_buffer import BaseEventBuffer
+
+logger = logging.getLogger(__name__)
 
 
 class SessionLedgerService:
@@ -23,36 +29,70 @@ class SessionLedgerService:
             event["timestamp"] = datetime.now(timezone.utc).isoformat()
         await self.buffer.push(session_id, event)
 
+    def _flush_sync(self, db: Session, events: list[dict[str, Any]]) -> int:
+        worker_db = SessionLocal()
+        try:
+            try:
+                persisted = 0
+                seen_event_ids: set[str] = set()
+                for raw in events:
+                    event_id = raw.get("event_id", str(uuid.uuid4()))
+                    if event_id in seen_event_ids:
+                        continue
+                    exists = worker_db.scalar(
+                        select(SessionEvent).where(SessionEvent.event_id == event_id)
+                    )
+                    if exists:
+                        continue
+                    direction = raw.get("direction", EventDirection.SYSTEM.value)
+                    if direction not in {d.value for d in EventDirection}:
+                        direction = EventDirection.SYSTEM.value
+                    payload = raw.get("payload", {})
+                    if not isinstance(payload, dict):
+                        payload = {"raw": payload}
+                    worker_db.add(
+                        SessionEvent(
+                            session_id=raw.get("session_id", ""),
+                            event_id=event_id,
+                            event_type=raw.get("type", "unknown"),
+                            direction=EventDirection(direction),
+                            sequence=int(raw.get("sequence", 0)),
+                            event_ts=_parse_iso(raw.get("timestamp")),
+                            payload=payload,
+                        )
+                    )
+                    seen_event_ids.add(event_id)
+                    persisted += 1
+                worker_db.commit()
+                return persisted
+            except OperationalError as exc:
+                logger.warning(
+                    "ledger_flush_db_error",
+                    extra={"error": str(exc), "unflushed_events": len(events)},
+                )
+                return 0
+        finally:
+            worker_db.close()
+
     async def flush_buffered_events(self, db: Session, session_id: str, max_n: int = 200) -> int:
         events = await self.buffer.drain(session_id, max_n=max_n)
         if not events:
             return 0
-        persisted = 0
-        for raw in events:
-            event_id = raw.get("event_id", str(uuid.uuid4()))
-            exists = db.scalar(select(SessionEvent).where(SessionEvent.event_id == event_id))
-            if exists:
-                continue
-            direction = raw.get("direction", EventDirection.SYSTEM.value)
-            if direction not in {d.value for d in EventDirection}:
-                direction = EventDirection.SYSTEM.value
-            payload = raw.get("payload", {})
-            if not isinstance(payload, dict):
-                payload = {"raw": payload}
-            db.add(
-                SessionEvent(
-                    session_id=session_id,
-                    event_id=event_id,
-                    event_type=raw.get("type", "unknown"),
-                    direction=EventDirection(direction),
-                    sequence=int(raw.get("sequence", 0)),
-                    event_ts=_parse_iso(raw.get("timestamp")),
-                    payload=payload,
-                )
+        for event in events:
+            event.setdefault("session_id", session_id)
+        try:
+            loop = asyncio.get_running_loop()
+            flush_future = loop.run_in_executor(None, self._flush_sync, db, events)
+            try:
+                return await asyncio.shield(flush_future)
+            except asyncio.CancelledError:
+                return await asyncio.shield(flush_future)
+        except Exception as exc:
+            logger.warning(
+                "ledger_flush_unexpected_error",
+                extra={"error": str(exc), "session_id": session_id, "unflushed_events": len(events)},
             )
-            persisted += 1
-        db.commit()
-        return persisted
+            return 0
 
     def commit_turn(
         self,

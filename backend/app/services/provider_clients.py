@@ -189,12 +189,13 @@ class DeepgramSttClient(BaseSttClient):
             "punctuate": "true",
             "interim_results": "true",
             "endpointing": "300",
+            "utterance_end_ms": "1000",
         }
-        if content_type:
-            params["mimetype"] = content_type
         if codec == "opus" or "opus" in content_type:
             params["encoding"] = "opus"
             params["sample_rate"] = str(int(payload.get("sample_rate") or 16000))
+        elif content_type in ("audio/mp4", "audio/webm", "audio/mpeg"):
+            params["mimetype"] = content_type
         else:
             params["encoding"] = "linear16"
             params["sample_rate"] = str(int(payload.get("sample_rate") or 16000))
@@ -249,7 +250,8 @@ class DeepgramSttClient(BaseSttClient):
         session_id = str(payload.get("session_id") or "")
         if not session_id:
             raise RuntimeError("deepgram session_id required")
-        retried = False
+        MAX_RETRIES = 2
+        retry_count = 0
         reopened_state: _DeepgramSessionState | None = None
 
         while True:
@@ -261,10 +263,11 @@ class DeepgramSttClient(BaseSttClient):
 
             if getattr(state.ws, "closed", False):
                 await self.end_session(session_id)
-                if retried:
+                if retry_count >= MAX_RETRIES:
                     raise RuntimeError("deepgram_connection_closed")
+                retry_count += 1
+                await asyncio.sleep(min(0.5 * retry_count, 1.0))
                 reopened_state = await self._open_session(session_id, payload)
-                retried = True
                 continue
 
             async def consume_results() -> None:
@@ -319,10 +322,11 @@ class DeepgramSttClient(BaseSttClient):
                     await consume_results()
             except websockets.ConnectionClosed as exc:
                 await self.end_session(session_id)
-                if retried:
+                if retry_count >= MAX_RETRIES:
                     raise RuntimeError("deepgram_connection_closed") from exc
+                retry_count += 1
+                await asyncio.sleep(min(0.5 * retry_count, 1.0))
                 reopened_state = await self._open_session(session_id, payload)
-                retried = True
                 continue
             except Exception:
                 await self.end_session(session_id)

@@ -1,48 +1,61 @@
-# DoorDrill Mobile (iOS + Android)
+# DoorDrill Mobile
 
-Expo + React Native client focused on the rep workflow.
+The mobile app is an Expo React Native client for the rep training workflow on iOS and Android.
 
-## Implemented v1 flow
+## Requirements
 
-- Rep sign-in bootstrap (`rep_id`)
-- Assignment list (`GET /rep/assignments`) with status filters
-- Start drill session (`POST /rep/sessions`)
-- Live drill screen using websocket contract (`WS /ws/sessions/{id}`)
-  - hold-to-talk microphone capture (Expo AV)
-  - VAD state signaling (`client.vad.state`)
-  - audio payload send (`client.audio.chunk` with `audio_base64`)
-  - interruption cue + reconnect controls
-- Scorecard screen (`GET /rep/sessions/{id}`) with category bars/highlights/weakness tags
+- Node.js 20+
+- npm 10+
+- Xcode for iOS simulator runs
+- Android Studio for Android emulator runs
 
-## Environment
-
-Use either Expo public env vars or `app.json` extras:
-
-- `EXPO_PUBLIC_API_BASE_URL`
-- `EXPO_PUBLIC_WS_BASE_URL`
-- `EXPO_PUBLIC_PROJECT_ID` (required on a physical device to fetch an Expo push token)
-
-Defaults are set for local backend:
-
-- `http://127.0.0.1:8000`
-- `ws://127.0.0.1:8000`
-
-## Run
+## Local Setup
 
 ```bash
 cd mobile
 npm install
+cp .env.example .env
 npm run start
 ```
 
 For native runs:
 
 ```bash
+cd mobile
 npm run ios
 npm run android
 ```
 
-## Notes
+## Runtime Configuration
 
-- The rep can provide an optional transcript hint while sending real mic audio; backend STT uses the hint only as fallback.
-- AI audio playback is best-effort chunk playback in v1 and can be replaced with a dedicated streaming player in a later pass.
+The app reads Expo public environment variables or falls back to `app.json` extras:
+
+- `EXPO_PUBLIC_API_BASE_URL`
+- `EXPO_PUBLIC_WS_BASE_URL`
+- `EXPO_PUBLIC_PROJECT_ID` for physical-device Expo push token registration
+
+Default local values point at:
+
+- `http://127.0.0.1:8000`
+- `ws://127.0.0.1:8000`
+
+## Validation
+
+```bash
+cd mobile
+npm run typecheck
+```
+
+## Implemented Workflow
+
+- rep sign-in bootstrap
+- assignment list with status filters
+- drill session creation
+- live drill screen backed by `WS /ws/sessions/{id}`
+- scorecard review with category bars, highlights, and weakness tags
+
+## Session Notes
+
+- The mobile client supports hold-to-talk microphone capture through Expo AV.
+- VAD state, audio chunks, and interruption cues are sent over the session WebSocket contract.
+- A transcript hint can be attached with mic audio as a fallback for local development and degraded STT conditions.

@@ -2,8 +2,10 @@ import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from "expo-av";
 import * as FileSystem from "expo-file-system/legacy";
 
 export type AudioChunk = {
-  codec: "m4a" | "wav";
+  codec: "wav";
   contentType: string;
+  sampleRate: number;
+  channels: number;
   payload: string;
   durationMs: number;
   createdAt: string;
@@ -14,11 +16,35 @@ type VadListener = (speaking: boolean) => void;
 type MeterListener = (db: number) => void;
 
 const SPEAKING_THRESHOLD_DB = -45;
+const VAD_ATTACK_FRAMES = 2;
+const VAD_RELEASE_FRAMES = 5;
 const STATUS_UPDATE_MS = 80;
 
 const RECORDING_OPTIONS: Audio.RecordingOptions = {
-  ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
   isMeteringEnabled: true,
+  android: {
+    extension: ".wav",
+    outputFormat: Audio.AndroidOutputFormat.DEFAULT,
+    audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
+    sampleRate: 16000,
+    numberOfChannels: 1,
+    bitRate: 256000,
+  },
+  ios: {
+    extension: ".wav",
+    outputFormat: Audio.IOSOutputFormat.LINEARPCM,
+    audioQuality: Audio.IOSAudioQuality.MAX,
+    sampleRate: 16000,
+    numberOfChannels: 1,
+    bitRate: 256000,
+    linearPCMBitDepth: 16,
+    linearPCMIsBigEndian: false,
+    linearPCMIsFloat: false,
+  },
+  web: {
+    mimeType: "audio/wav",
+    bitsPerSecond: 256000,
+  },
 };
 
 export class AudioCaptureService {
@@ -30,6 +56,8 @@ export class AudioCaptureService {
   private permissionGranted = false;
   private startedAtMs = 0;
   private startPromise: Promise<void> | null = null;
+  private activePendingFrames = 0;
+  private silentPendingFrames = 0;
 
   async start(): Promise<void> {
     if (this.recording) {
@@ -59,6 +87,8 @@ export class AudioCaptureService {
         );
         this.recording = recording;
         this.startedAtMs = Date.now();
+        this.activePendingFrames = 0;
+        this.silentPendingFrames = 0;
       } catch (error) {
         this.recording = null;
         const message = error instanceof Error ? error.message : "Microphone failed to initialize";
@@ -111,8 +141,10 @@ export class AudioCaptureService {
     });
 
     const chunk: AudioChunk = {
-      codec: "m4a",
-      contentType: "audio/mp4",
+      codec: "wav",
+      contentType: "audio/wav",
+      sampleRate: 16000,
+      channels: 1,
       payload,
       durationMs: Math.max(180, durationMs),
       createdAt: new Date().toISOString()
@@ -157,13 +189,27 @@ export class AudioCaptureService {
 
   private handleStatus(status: Audio.RecordingStatus): void {
     if (!status.canRecord) {
+      this.activePendingFrames = 0;
+      this.silentPendingFrames = 0;
       this.updateSpeaking(false);
       return;
     }
-
     const metering = status.metering ?? -160;
     this.meterListener?.(metering);
-    this.updateSpeaking(metering > SPEAKING_THRESHOLD_DB);
+
+    if (metering > SPEAKING_THRESHOLD_DB) {
+      this.activePendingFrames++;
+      this.silentPendingFrames = 0;
+      if (this.activePendingFrames >= VAD_ATTACK_FRAMES) {
+        this.updateSpeaking(true);
+      }
+    } else {
+      this.silentPendingFrames++;
+      this.activePendingFrames = 0;
+      if (this.silentPendingFrames >= VAD_RELEASE_FRAMES) {
+        this.updateSpeaking(false);
+      }
+    }
   }
 
   private updateSpeaking(next: boolean): void {

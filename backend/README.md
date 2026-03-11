@@ -1,13 +1,47 @@
-## Test
+# DoorDrill Backend
+
+The backend is a FastAPI service that provides DoorDrill's REST APIs, realtime WebSocket session gateway, grading pipeline, and manager analytics workflows.
+
+## Requirements
+
+- Python 3.11+
+
+## Local Setup
+
+```bash
+cd backend
+python -m pip install -e .[dev]
+cp .env.example .env
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Default local development uses:
+
+- `sqlite:///./doordrill.db`
+- header-based auth unless configured otherwise
+- mock STT, LLM, and TTS providers so local runs do not require external credentials
+
+See [`.env.example`](./.env.example) for the minimum local configuration surface.
+
+## Validation
+
+Run the backend test suite:
 
 ```bash
 cd backend
 pytest
 ```
 
-## Load / SLO Harness
+Run migration smoke when changing schema or alembic behavior:
 
-Seed deterministic IDs for local/staging harness runs:
+```bash
+cd backend
+alembic upgrade head
+```
+
+## Load and SLO Harness
+
+Seed deterministic IDs for local or staging harness runs:
 
 ```bash
 cd backend
@@ -16,7 +50,7 @@ python scripts/seed_load_data.py --field rep_id
 python scripts/seed_load_data.py --field scenario_id
 ```
 
-Run staged SLO gate:
+Run the staged websocket SLO gate:
 
 ```bash
 cd backend
@@ -34,17 +68,17 @@ python scripts/load_test_ws.py \
   --report-json ./load-reports/ws-ramp.json
 ```
 
-## Ops Docs
+Additional harness details are documented in [`scripts/README.md`](./scripts/README.md).
 
-- Environment matrix: `docs/ops/staging-prod-env-matrix.md`
-- Incident runbook: `docs/ops/incident-runbook.md`
+## Operational Notes
 
-## Notes
+- Redis buffering is enabled automatically when `REDIS_URL` is set.
+- Post-session workflows can be routed through Celery with `USE_CELERY=true`.
+- Object storage presigning supports S3-compatible endpoints when storage credentials are configured.
+- Auth supports both header-based local development and JWT-based flows, including JWKS-backed validation.
+- Structured logs include request and session correlation fields for HTTP and WebSocket traffic.
 
-- Redis buffering is enabled automatically if `REDIS_URL` is provided.
-- Post-session workflow can run via Celery (`USE_CELERY=true`) with Redis broker/backend.
-- Storage URLs now support S3/R2 presigning when object storage credentials are configured; otherwise fallback URLs are returned for local dev.
-- Provider adapters for Deepgram/OpenAI/ElevenLabs are wired with real API paths plus mock fallback behavior to keep local development deterministic.
-- Grading uses OpenAI judge mode when API credentials are present, with normalized JSON output and deterministic fallback scoring.
-- Whisper transcript cleanup hook is implemented and runs when `WHISPER_CLEANUP_ENABLED=true`.
-- Structured JSON logs now include request/session trace fields (`trace_id`, `request_id`) for HTTP and websocket flows.
+## Operations References
+
+- Environment matrix: [`docs/ops/staging-prod-env-matrix.md`](./docs/ops/staging-prod-env-matrix.md)
+- Incident runbook: [`docs/ops/incident-runbook.md`](./docs/ops/incident-runbook.md)
