@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     default_presign_ttl_seconds: int = Field(default=3600, alias="DEFAULT_PRESIGN_TTL_SECONDS")
     ws_flush_interval_ms: int = Field(default=350, alias="WS_FLUSH_INTERVAL_MS")
     max_ws_event_batch: int = Field(default=200, alias="MAX_WS_EVENT_BATCH")
+    sentry_dsn: str | None = Field(default=None, alias="SENTRY_DSN")
+    sentry_traces_sample_rate: float = Field(default=0.1, alias="SENTRY_TRACES_SAMPLE_RATE")
 
     auth_required: bool = Field(default=False, alias="AUTH_REQUIRED")
     auth_mode: str = Field(default="headers", alias="AUTH_MODE")

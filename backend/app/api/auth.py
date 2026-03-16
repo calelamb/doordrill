@@ -1,11 +1,17 @@
 from datetime import datetime, timezone
+import asyncio
+from datetime import timedelta
+import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.rate_limit import limiter
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.invitation import Invitation
+from app.models.password_reset import PasswordResetToken
 from app.models.types import UserRole
 from app.models.user import Organization, Team, User
 from app.schemas.auth import (
@@ -14,12 +20,17 @@ from app.schemas.auth import (
     AuthRegisterRequest,
     AuthTokenResponse,
     AuthUserResponse,
+    PasswordResetConfirm,
+    PasswordResetRequest,
 )
 from app.schemas.invitation import AcceptInviteRequest, ValidateInviteResponse
 from app.services.auth_service import AuthService
+from app.services.notification_providers import build_email_provider
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 auth_service = AuthService()
+settings = get_settings()
+password_reset_email_provider = build_email_provider(settings)
 
 
 def _to_auth_response(user: User, tokens: dict) -> AuthTokenResponse:
@@ -51,6 +62,32 @@ def _get_pending_invitation(db: Session, token: str) -> Invitation | None:
         db.commit()
         return None
     return invitation
+
+
+def _run_async(coro):
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+
+def _send_password_reset_email(*, email: str, token: str) -> None:
+    reset_url = f"doordrill://reset-password?token={token}"
+    _run_async(
+        password_reset_email_provider.send(
+            to_email=email,
+            subject="Reset your DoorDrill password",
+            body=(
+                "Tap the link to reset your password (expires in 2 hours):\n\n"
+                f"{reset_url}\n\n"
+                "If you didn't request this, ignore this email."
+            ),
+        )
+    )
 
 
 @router.post("/register", response_model=AuthTokenResponse)
@@ -135,6 +172,62 @@ def refresh(payload: AuthRefreshRequest, db: Session = Depends(get_db)) -> AuthT
 
     tokens = auth_service.issue_tokens(user)
     return _to_auth_response(user, tokens)
+
+
+@router.post("/request-password-reset", status_code=204)
+@limiter.limit("3/minute")
+def request_password_reset(
+    request: Request,
+    payload: PasswordResetRequest,
+    db: Session = Depends(get_db),
+) -> None:
+    del request
+
+    user = db.scalar(select(User).where(User.email == payload.email.lower()))
+    if user is None:
+        return
+
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=2)
+    reset = PasswordResetToken(
+        user_id=user.id,
+        token=token,
+        expires_at=expires_at,
+    )
+    db.add(reset)
+    db.commit()
+    _send_password_reset_email(email=user.email, token=token)
+
+
+@router.post("/reset-password", status_code=204)
+@limiter.limit("5/minute")
+def reset_password(
+    request: Request,
+    payload: PasswordResetConfirm,
+    db: Session = Depends(get_db),
+) -> None:
+    del request
+
+    reset = db.scalar(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token == payload.token,
+            PasswordResetToken.used_at.is_(None),
+        )
+    )
+    if reset is None:
+        raise HTTPException(status_code=400, detail="Reset link is invalid or expired")
+
+    expires_at = reset.expires_at if reset.expires_at.tzinfo else reset.expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Reset link is invalid or expired")
+
+    user = db.get(User, reset.user_id)
+    if user is None:
+        raise HTTPException(status_code=400, detail="User not found")
+
+    user.password_hash = auth_service.hash_password(payload.new_password)
+    reset.used_at = datetime.now(timezone.utc)
+    db.commit()
 
 
 @router.get("/validate-invite", response_model=ValidateInviteResponse)

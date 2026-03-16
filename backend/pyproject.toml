@@ -5,6 +5,8 @@ description = "DoorDrill v1 backend with realtime voice ledger and manager workf
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",
+  "slowapi>=0.1.9",
+  "sentry-sdk[fastapi]>=2.0.0",
   "uvicorn[standard]>=0.30.0",
   "sqlalchemy>=2.0.36",
   "alembic>=1.14.0",

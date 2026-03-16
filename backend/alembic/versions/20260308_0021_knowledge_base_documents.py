@@ -53,6 +53,7 @@ def _document_file_type_enum(bind):
 
 def upgrade() -> None:
     bind = op.get_bind()
+    inspector = sa.inspect(bind)
     status_enum = _document_status_enum(bind)
     file_type_enum = _document_file_type_enum(bind)
 
@@ -61,40 +62,52 @@ def upgrade() -> None:
         status_enum.create(bind, checkfirst=True)
         file_type_enum.create(bind, checkfirst=True)
 
-    op.create_table(
-        "org_documents",
-        sa.Column("id", sa.String(length=36), primary_key=True, nullable=False),
-        sa.Column("org_id", sa.String(length=36), sa.ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("original_filename", sa.String(length=255), nullable=False),
-        sa.Column("file_type", file_type_enum, nullable=False),
-        sa.Column("storage_key", sa.String(length=600), nullable=False),
-        sa.Column("status", status_enum, nullable=False),
-        sa.Column("chunk_count", sa.Integer(), nullable=True),
-        sa.Column("token_count", sa.Integer(), nullable=True),
-        sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("uploaded_by", sa.String(length=36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-    )
-    op.create_index("ix_org_documents_org_created", "org_documents", ["org_id", "created_at"])
-    op.create_index("ix_org_documents_org_status", "org_documents", ["org_id", "status"])
+    if "org_documents" not in inspector.get_table_names():
+        op.create_table(
+            "org_documents",
+            sa.Column("id", sa.String(length=36), primary_key=True, nullable=False),
+            sa.Column("org_id", sa.String(length=36), sa.ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
+            sa.Column("name", sa.String(length=255), nullable=False),
+            sa.Column("original_filename", sa.String(length=255), nullable=False),
+            sa.Column("file_type", file_type_enum, nullable=False),
+            sa.Column("storage_key", sa.String(length=600), nullable=False),
+            sa.Column("status", status_enum, nullable=False),
+            sa.Column("chunk_count", sa.Integer(), nullable=True),
+            sa.Column("token_count", sa.Integer(), nullable=True),
+            sa.Column("error_message", sa.Text(), nullable=True),
+            sa.Column("uploaded_by", sa.String(length=36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+            sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        )
+
+    inspector = sa.inspect(bind)
+    org_document_indexes = {index["name"] for index in inspector.get_indexes("org_documents")}
+    if "ix_org_documents_org_created" not in org_document_indexes:
+        op.create_index("ix_org_documents_org_created", "org_documents", ["org_id", "created_at"])
+    if "ix_org_documents_org_status" not in org_document_indexes:
+        op.create_index("ix_org_documents_org_status", "org_documents", ["org_id", "status"])
 
     embedding_type = VectorType() if bind.dialect.name == "postgresql" else sa.JSON()
-    op.create_table(
-        "org_document_chunks",
-        sa.Column("id", sa.String(length=36), primary_key=True, nullable=False),
-        sa.Column("document_id", sa.String(length=36), sa.ForeignKey("org_documents.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("org_id", sa.String(length=36), sa.ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("chunk_index", sa.Integer(), nullable=False),
-        sa.Column("text", sa.Text(), nullable=False),
-        sa.Column("token_count", sa.Integer(), nullable=False),
-        sa.Column("embedding", embedding_type, nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.UniqueConstraint("document_id", "chunk_index", name="uq_org_document_chunks_doc_idx"),
-    )
-    op.create_index("ix_org_document_chunks_org_document", "org_document_chunks", ["org_id", "document_id"])
-    op.create_index("ix_org_document_chunks_document_idx", "org_document_chunks", ["document_id", "chunk_index"])
+    if "org_document_chunks" not in inspector.get_table_names():
+        op.create_table(
+            "org_document_chunks",
+            sa.Column("id", sa.String(length=36), primary_key=True, nullable=False),
+            sa.Column("document_id", sa.String(length=36), sa.ForeignKey("org_documents.id", ondelete="CASCADE"), nullable=False),
+            sa.Column("org_id", sa.String(length=36), sa.ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
+            sa.Column("chunk_index", sa.Integer(), nullable=False),
+            sa.Column("text", sa.Text(), nullable=False),
+            sa.Column("token_count", sa.Integer(), nullable=False),
+            sa.Column("embedding", embedding_type, nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+            sa.UniqueConstraint("document_id", "chunk_index", name="uq_org_document_chunks_doc_idx"),
+        )
+
+    inspector = sa.inspect(bind)
+    chunk_indexes = {index["name"] for index in inspector.get_indexes("org_document_chunks")}
+    if "ix_org_document_chunks_org_document" not in chunk_indexes:
+        op.create_index("ix_org_document_chunks_org_document", "org_document_chunks", ["org_id", "document_id"])
+    if "ix_org_document_chunks_document_idx" not in chunk_indexes:
+        op.create_index("ix_org_document_chunks_document_idx", "org_document_chunks", ["document_id", "chunk_index"])
 
     if bind.dialect.name == "postgresql":
         op.execute(

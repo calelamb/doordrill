@@ -13,7 +13,7 @@ import { OnboardingScreen } from "./src/screens/OnboardingScreen";
 import { SplashScreen } from "./src/screens/SplashScreen";
 import { SessionProvider } from "./src/store/session";
 import { MessagesProvider } from "./src/store/messages";
-import { primeInitialInviteUrl, setupInviteLinkListener } from "./src/services/inviteLinking";
+import { primeInitialAuthUrl, setupAuthLinkListener } from "./src/services/inviteLinking";
 import { handleForegroundNotification, setupNotificationResponseListener } from "./src/services/notifications";
 import { hasSeenOnboarding, markOnboardingComplete } from "./src/services/onboarding";
 import { useSession } from "./src/store/session";
@@ -45,14 +45,14 @@ function AppRoot() {
 
   useEffect(() => {
     void useSession.getState().restoreSession();
-    void primeInitialInviteUrl();
+    void primeInitialAuthUrl();
     void hasSeenOnboarding().then((seen) => {
       setShowOnboarding(!seen);
     });
   }, []);
 
   useEffect(() => {
-    const inviteCleanup = setupInviteLinkListener();
+    const authLinkCleanup = setupAuthLinkListener();
     const responseCleanup = setupNotificationResponseListener();
     const foregroundSub = Notifications.addNotificationReceivedListener((notification) => {
       handleForegroundNotification(notification);
@@ -61,7 +61,7 @@ function AppRoot() {
     return () => {
       foregroundSub.remove();
       responseCleanup();
-      inviteCleanup();
+      authLinkCleanup();
     };
   }, []);
 

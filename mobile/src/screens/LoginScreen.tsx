@@ -1,25 +1,39 @@
-import { useState } from "react";
+import { NativeStackScreenProps } from "@react-navigation/native-stack";
+import { useEffect, useState } from "react";
 import { Pressable, SafeAreaView, StyleSheet, Text, TextInput, View, KeyboardAvoidingView, Platform, ActivityIndicator } from "react-native";
 import { BlurView } from "expo-blur";
 import { LinearGradient } from "expo-linear-gradient";
 import { TreePine, Mail, Lock } from "lucide-react-native";
 
+import { RootStackParamList } from "../navigation/types";
 import { useSession } from "../store/session";
 import { loginWithCredentials } from "../services/api";
 import { registerPushTokenIfAuthorized } from "../services/notifications";
 
-export function LoginScreen() {
+type Props = NativeStackScreenProps<RootStackParamList, "Login">;
+
+export function LoginScreen({ navigation, route }: Props) {
   const { setSession } = useSession();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
+
+  useEffect(() => {
+    if (!route.params?.message) {
+      return;
+    }
+    setSuccessMessage(route.params.message);
+    navigation.setParams({ message: undefined });
+  }, [navigation, route.params?.message]);
 
   const canContinue = email.trim().length > 0 && password.trim().length > 0 && !loading;
 
   const handleLogin = async () => {
     setLoading(true);
     setError("");
+    setSuccessMessage("");
     try {
       const result = await loginWithCredentials(email.trim(), password);
       await setSession(result.user, {
@@ -90,6 +104,8 @@ export function LoginScreen() {
                 <Text style={styles.errorText}>{error}</Text>
               ) : null}
 
+              {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
+
               <Pressable
                 style={({ pressed }) => [
                   styles.button,
@@ -104,6 +120,14 @@ export function LoginScreen() {
                 ) : (
                   <Text style={styles.buttonLabel}>Sign In</Text>
                 )}
+              </Pressable>
+
+              <Pressable
+                onPress={() => navigation.navigate("ForgotPassword")}
+                style={styles.secondaryAction}
+                accessibilityLabel="Go to forgot password screen"
+              >
+                <Text style={styles.secondaryActionText}>Forgot password?</Text>
               </Pressable>
             </BlurView>
           </View>
@@ -225,5 +249,20 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     textAlign: "center",
     fontWeight: "500",
-  }
+  },
+  successText: {
+    color: "#166534",
+    marginBottom: 16,
+    textAlign: "center",
+    fontWeight: "600",
+  },
+  secondaryAction: {
+    marginTop: 20,
+    alignItems: "center",
+  },
+  secondaryActionText: {
+    color: "#166534",
+    fontWeight: "700",
+    fontSize: 15,
+  },
 });

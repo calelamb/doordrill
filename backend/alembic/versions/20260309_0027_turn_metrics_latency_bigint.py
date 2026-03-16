@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.
 revision = "20260309_0027"
@@ -18,6 +19,13 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    columns = {column["name"]: column for column in inspector.get_columns("analytics_fact_session_turn_metrics")}
+    existing = str(columns["first_response_latency_ms"]["type"]).lower()
+    if "bigint" in existing or "biginteger" in existing:
+        return
+
     with op.batch_alter_table("analytics_fact_session_turn_metrics") as batch_op:
         batch_op.alter_column(
             "first_response_latency_ms",

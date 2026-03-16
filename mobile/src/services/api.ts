@@ -333,6 +333,24 @@ export async function refreshTokens(refreshToken: string): Promise<AuthTokenResp
   );
 }
 
+export async function requestPasswordReset(email: string): Promise<void> {
+  return apiJsonRequest<void>(
+    "POST",
+    "/auth/request-password-reset",
+    { email },
+    { auth: false, retryOn401: false }
+  );
+}
+
+export async function resetPassword(token: string, newPassword: string): Promise<void> {
+  return apiJsonRequest<void>(
+    "POST",
+    "/auth/reset-password",
+    { token, new_password: newPassword },
+    { auth: false, retryOn401: false }
+  );
+}
+
 export async function validateInvite(token: string): Promise<InviteValidationResponse> {
   return apiRequest<InviteValidationResponse>(
     "GET",

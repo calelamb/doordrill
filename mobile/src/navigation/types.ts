@@ -8,11 +8,20 @@ export type BottomTabParamList = {
 };
 
 export type RootStackParamList = {
-  Login: undefined;
+  Login:
+    | {
+        message?: string;
+      }
+    | undefined;
   Register: {
     token: string;
     email: string;
   };
+  ForgotPassword:
+    | {
+        token?: string;
+      }
+    | undefined;
   MainTabs: NavigatorScreenParams<BottomTabParamList>;
   ScenarioPicker: {
     isFirstTimer?: boolean;

@@ -1,6 +1,15 @@
 # DoorDrill — Production Checklist Codex Prompts
 
-Organized into **4 batches**. Within each batch, all prompts are independent and can be pasted into simultaneous Codex agents. Wait for a batch to finish before starting the next — later batches depend on changes made by earlier ones.
+Organized into **5 batches**. Within each batch, all prompts are independent and can be pasted into simultaneous Codex agents. Wait for a batch to finish before starting the next — later batches depend on changes made by earlier ones.
+
+## Production Readiness Reference
+
+Every Codex agent working on this codebase should treat **`backend/docs/ops/staging-prod-env-matrix.md`** as the source of truth for production requirements. Before marking any task complete, verify your change satisfies the relevant rows in the Release Readiness Gate and Observability Minimum sections of that document.
+
+**Audit status as of 2026-03-10:**
+- ✅ DONE: JWT auth (mobile + backend), invite flow, push notifications, manager dashboard, onboarding screens, DB migrations (32 total, up to date)
+- ⚠️ PARTIAL: RAG infrastructure ready, zero documents uploaded; secrets in plaintext .env (acceptable locally, must not be committed)
+- ❌ MISSING — addressed in Batch 5 below: Dockerfile/fly.toml, Sentry error monitoring, password reset flow
 
 ---
 
@@ -694,7 +703,345 @@ Do not delete any .db files from disk. Only remove them from git tracking.
 
 ---
 
-## Summary: Which prompts touch which files
+## BATCH 5 — Deployment, observability, and password reset (run all 3 simultaneously, after Batch 1)
+
+---
+
+### Prompt 5-A: Dockerfile + fly.toml — Backend deployment config
+
+```
+You are working in the DoorDrill repository. Read backend/docs/ops/staging-prod-env-matrix.md before starting — it defines the service topology and required environment variables for production.
+
+Create the following two files exactly as specified.
+
+---
+
+FILE: backend/Dockerfile
+
+    FROM python:3.12-slim
+
+    WORKDIR /app
+
+    # System deps for psycopg2 + build tools
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential libpq-dev curl git \
+        && rm -rf /var/lib/apt/lists/*
+
+    COPY pyproject.toml .
+    RUN pip install --no-cache-dir -e ".[standard]" 2>/dev/null || pip install --no-cache-dir .
+
+    COPY . .
+
+    # Run as non-root
+    RUN useradd -m appuser && chown -R appuser /app
+    USER appuser
+
+    EXPOSE 8000
+
+    # Production: no --reload, use multiple workers
+    CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+
+---
+
+FILE: fly.toml (in the repo root, not backend/)
+
+    app = "doordrill-api"
+    primary_region = "iad"
+
+    [build]
+      dockerfile = "backend/Dockerfile"
+      build_target = ""
+
+    [env]
+      ENVIRONMENT = "production"
+      PORT = "8000"
+
+    [http_service]
+      internal_port = 8000
+      force_https = true
+      auto_stop_machines = "stop"
+      auto_start_machines = true
+      min_machines_running = 1
+      processes = ["app"]
+
+      [[http_service.checks]]
+        grace_period = "10s"
+        interval = "15s"
+        method = "GET"
+        path = "/health"
+        protocol = "http"
+        timeout = "5s"
+
+    [[vm]]
+      size = "shared-cpu-2x"
+      memory = "1gb"
+
+    [mounts]
+      # No persistent disk needed — all state is in Supabase + Redis
+
+After creating both files, verify:
+1. backend/Dockerfile exists and has CMD with uvicorn
+2. fly.toml exists at repo root with health check path /health
+3. Do not commit .env or any secrets
+4. Cross-reference backend/docs/ops/staging-prod-env-matrix.md — confirm every required env var listed there is documented in backend/.env.example (add any that are missing)
+```
+
+---
+
+### Prompt 5-B: Sentry — Error monitoring for FastAPI backend
+
+```
+You are working in the backend of a FastAPI application called DoorDrill. Read backend/docs/ops/staging-prod-env-matrix.md — the Observability Minimum section defines what must be monitored in production.
+
+Add Sentry error monitoring to the FastAPI backend.
+
+---
+
+STEP 1: Add dependency
+
+Add `sentry-sdk[fastapi]>=2.0.0` to pyproject.toml dependencies.
+
+---
+
+STEP 2: Add SENTRY_DSN to Settings
+
+In backend/app/core/config.py, add to the Settings class:
+
+    sentry_dsn: str | None = Field(default=None, alias="SENTRY_DSN")
+    sentry_traces_sample_rate: float = Field(default=0.1, alias="SENTRY_TRACES_SAMPLE_RATE")
+
+---
+
+STEP 3: Initialize Sentry in main.py
+
+In backend/app/main.py, at the top of the file after imports, add:
+
+    import sentry_sdk
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
+    from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+    from sentry_sdk.integrations.logging import LoggingIntegration
+    import logging as _logging
+
+    def _init_sentry(settings) -> None:
+        if not settings.sentry_dsn:
+            return
+        sentry_sdk.init(
+            dsn=settings.sentry_dsn,
+            environment=settings.environment,
+            traces_sample_rate=settings.sentry_traces_sample_rate,
+            integrations=[
+                FastApiIntegration(transaction_style="endpoint"),
+                SqlalchemyIntegration(),
+                LoggingIntegration(
+                    level=_logging.INFO,
+                    event_level=_logging.ERROR,
+                ),
+            ],
+            # Never send auth tokens or passwords to Sentry
+            before_send=lambda event, hint: _scrub_sentry_event(event, hint),
+        )
+
+    def _scrub_sentry_event(event: dict, hint: dict) -> dict:
+        """Strip Authorization headers and password fields from Sentry events."""
+        request = event.get("request", {})
+        headers = request.get("headers", {})
+        if "authorization" in headers:
+            headers["authorization"] = "[Filtered]"
+        if "cookie" in headers:
+            headers["cookie"] = "[Filtered]"
+        data = request.get("data", {})
+        if isinstance(data, dict):
+            for key in ("password", "password_hash", "token", "refresh_token", "access_token"):
+                if key in data:
+                    data[key] = "[Filtered]"
+        return event
+
+Call `_init_sentry(settings)` inside the `lifespan` context manager, before `yield`, after `validate_production_config()`.
+
+---
+
+STEP 4: Add SENTRY_DSN to .env.example
+
+In backend/.env.example, add:
+
+    # Error monitoring (get DSN from sentry.io → Project Settings → Client Keys)
+    SENTRY_DSN=
+    SENTRY_TRACES_SAMPLE_RATE=0.1
+
+---
+
+STEP 5: Verify
+
+1. When SENTRY_DSN is empty/unset, Sentry must NOT be initialized (silent skip)
+2. The _scrub_sentry_event function strips Authorization headers and password fields
+3. The FastAPI and SQLAlchemy integrations are registered
+4. No existing tests should fail — Sentry init is a no-op when DSN is absent
+
+Do not add Sentry to the mobile app or dashboard in this prompt.
+```
+
+---
+
+### Prompt 5-C: Password reset flow — Backend + Mobile
+
+```
+You are working in the DoorDrill codebase. Password reset is a production blocker — users who forget their password currently have no recovery path.
+
+Implement a full password reset flow: request → email with token → mobile screen to set new password.
+
+---
+
+BACKEND — backend/app/api/auth.py
+
+Add two new endpoints.
+
+1. POST /auth/request-password-reset
+
+    class PasswordResetRequest(BaseModel):
+        email: EmailStr
+
+    @router.post("/request-password-reset", status_code=204)
+    def request_password_reset(
+        payload: PasswordResetRequest,
+        db: Session = Depends(get_db),
+    ) -> None:
+        user = db.scalar(select(User).where(User.email == payload.email.lower()))
+        # Always return 204 regardless — do not reveal whether email exists
+        if user is None:
+            return
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=2)
+        reset = PasswordResetToken(
+            user_id=user.id,
+            token=token,
+            expires_at=expires_at,
+        )
+        db.add(reset)
+        db.commit()
+        # Send email
+        email_provider = get_email_provider()
+        reset_url = f"doordrill://reset-password?token={token}"
+        asyncio.get_event_loop().run_until_complete(
+            email_provider.send(
+                to=user.email,
+                subject="Reset your DoorDrill password",
+                body=f"Tap the link to reset your password (expires in 2 hours):\n\n{reset_url}\n\nIf you didn't request this, ignore this email.",
+            )
+        )
+
+2. POST /auth/reset-password
+
+    class PasswordResetConfirm(BaseModel):
+        token: str
+        new_password: str = Field(min_length=8)
+
+    @router.post("/reset-password", status_code=204)
+    def reset_password(
+        payload: PasswordResetConfirm,
+        db: Session = Depends(get_db),
+    ) -> None:
+        reset = db.scalar(
+            select(PasswordResetToken).where(
+                PasswordResetToken.token == payload.token,
+                PasswordResetToken.used_at.is_(None),
+                PasswordResetToken.expires_at > datetime.now(timezone.utc),
+            )
+        )
+        if reset is None:
+            raise HTTPException(status_code=400, detail="Reset link is invalid or expired")
+        user = db.get(User, reset.user_id)
+        if user is None:
+            raise HTTPException(status_code=400, detail="User not found")
+        user.password_hash = auth_service.hash_password(payload.new_password)
+        reset.used_at = datetime.now(timezone.utc)
+        db.commit()
+
+Add rate limiting to both endpoints (use the existing slowapi limiter from app.core.rate_limit):
+- POST /request-password-reset: @limiter.limit("3/minute")
+- POST /reset-password: @limiter.limit("5/minute")
+
+---
+
+BACKEND — New model: backend/app/models/password_reset.py
+
+    from datetime import datetime
+    import uuid
+    from sqlalchemy import Column, String, DateTime, ForeignKey
+    from sqlalchemy.dialects.postgresql import UUID
+    from app.db.base import Base
+
+    class PasswordResetToken(Base):
+        __tablename__ = "password_reset_tokens"
+        id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+        user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+        token = Column(String(64), nullable=False, unique=True, index=True)
+        expires_at = Column(DateTime(timezone=True), nullable=False)
+        used_at = Column(DateTime(timezone=True), nullable=True)
+        created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(__import__('datetime').timezone.utc))
+
+---
+
+BACKEND — New Alembic migration
+
+Create backend/alembic/versions/20260310_0033_password_reset_tokens.py
+
+    def upgrade():
+        op.create_table(
+            "password_reset_tokens",
+            sa.Column("id", sa.dialects.postgresql.UUID(as_uuid=True), primary_key=True),
+            sa.Column("user_id", sa.dialects.postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+            sa.Column("token", sa.String(64), nullable=False, unique=True),
+            sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        )
+        op.create_index("ix_prt_token", "password_reset_tokens", ["token"], unique=True)
+        op.create_index("ix_prt_user_id", "password_reset_tokens", ["user_id"])
+
+    def downgrade():
+        op.drop_table("password_reset_tokens")
+
+Set down_revision to the current latest migration ID found in backend/alembic/versions/.
+
+---
+
+MOBILE — mobile/src/screens/ForgotPasswordScreen.tsx (new file)
+
+Create a new screen with two states: REQUEST state (email input) and RESET state (new password input, shown when app opens via doordrill://reset-password?token=...).
+
+REQUEST state UI:
+- Email input field (same style as LoginScreen)
+- "Send Reset Link" button
+- On submit: POST /auth/request-password-reset → show success message "Check your email for a reset link"
+- "Back to Sign In" link
+
+RESET state UI (when token param is present in navigation):
+- New password input (secureTextEntry)
+- Confirm password input (secureTextEntry)
+- "Set New Password" button
+- Validates passwords match before submitting
+- On submit: POST /auth/reset-password → navigate to LoginScreen with success message
+
+Add the screen to the navigation stack in the root navigator. Add a "Forgot password?" link below the Sign In button in LoginScreen.tsx that navigates to ForgotPasswordScreen.
+
+Handle the deep link doordrill://reset-password?token=... in App.tsx alongside the existing invite link handler:
+    if (parsed.path === "reset-password" && parsed.queryParams?.token) {
+        navigationRef.navigate("ForgotPassword", { token: parsed.queryParams.token as string });
+    }
+
+---
+
+After implementing, verify:
+1. POST /request-password-reset always returns 204 (no email enumeration)
+2. POST /reset-password returns 400 for expired or used tokens
+3. Token is single-use (used_at set on first use, second use rejected)
+4. Rate limiting applied to both endpoints
+5. ForgotPasswordScreen renders in both request and reset states
+6. "Forgot password?" link visible on LoginScreen
+7. Run alembic upgrade head against dev DB and confirm migration applies cleanly
+```
+
+---
 
 | Prompt | Files Modified | Can run with |
 |--------|---------------|--------------|
@@ -710,18 +1057,46 @@ Do not delete any .db files from disk. Only remove them from git tracking.
 | 3-B | `main.py`, `ledger_service.py` | 3-A — but 1-A and 1-E must finish first |
 | 4-A | `api/*.py` (upload endpoints) | All of Batch 1 |
 | 4-B | `.gitignore`, git index | Everything |
+| 5-A | `backend/Dockerfile`, `fly.toml` | 5-B, 5-C |
+| 5-B | `main.py`, `config.py`, `.env.example` | 5-A, 5-C — but 1-A must finish first |
+| 5-C | `api/auth.py`, new model, new migration, `ForgotPasswordScreen.tsx`, `LoginScreen.tsx`, `App.tsx` | 5-A, 5-B |
+
+## Codex Validation Checklist
+
+Before marking any Batch 5 prompt complete, Codex must verify the following against `backend/docs/ops/staging-prod-env-matrix.md`:
+
+**5-A (Dockerfile / fly.toml)**
+- [ ] `docker build -t doordrill-backend backend/` completes without error
+- [ ] `docker run --env-file backend/.env doordrill-backend` starts and `/health` returns 200
+- [ ] `fly.toml` has `[http_service]` pointing at port 8000 with `force_https = true`
+- [ ] Image runs as non-root user (`USER appuser` or equivalent)
+
+**5-B (Sentry)**
+- [ ] `SENTRY_DSN` present in `.env.example` (value redacted) and loaded in `config.py`
+- [ ] Sentry initialised before first request in `main.py` with `traces_sample_rate`, `environment`, and `_scrub_sentry_event` `before_send` hook
+- [ ] SQLAlchemy integration enabled (`SqlalchemyIntegration()`)
+- [ ] Passwords, tokens, and API keys do NOT appear in Sentry breadcrumbs (verified by `_scrub_sentry_event` unit test)
+
+**5-C (Password Reset)**
+- [ ] `password_reset_tokens` table migration applies cleanly: `alembic upgrade head`
+- [ ] `POST /auth/request-password-reset` always returns 204 regardless of whether email exists (no enumeration)
+- [ ] `POST /auth/reset-password` marks token used after one successful reset; second attempt returns 400
+- [ ] Token expires after 2 hours; expired token returns 400
+- [ ] `ForgotPasswordScreen.tsx` reachable from `LoginScreen.tsx` via "Forgot password?" link
+- [ ] Deep link `doordrill://reset-password?token=...` opens `ResetPasswordScreen` in Expo
 
 ## Remaining items that are NOT Codex prompts
 
-These must be done manually or by your ops/infra team:
+See `backend/docs/ops/staging-prod-env-matrix.md` for the full **Release Readiness Gate** (9 items) and **Observability Minimum** checklist. Key manual steps:
 
 - Rotate `JWT_SECRET` → edit `.env` directly (never commit)
 - Set `AUTH_REQUIRED=true`, `ENVIRONMENT=production` → edit `.env`
-- Set `REDIS_URL`, `DATABASE_URL` (PostgreSQL), `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` → edit `.env`
+- Populate all required env vars listed in the ops matrix (DATABASE_URL pooler, REDIS_URL, DEEPGRAM_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, SENTRY_DSN)
 - Run `alembic upgrade head` against production database
 - Set Redis password in connection string (`redis://:password@host:6379/0`)
 - Configure S3 bucket CORS policy via AWS console
 - Set up Deepgram and ElevenLabs usage alerts in each provider's dashboard
-- Switch production server to `gunicorn -k uvicorn.workers.UvicornWorker` (not `--reload`)
+- **Fly.io deploy**: `fly auth login` → `fly launch` (or `fly deploy` if app already exists) from repo root
+- Verify Fly health check passes: `fly status` shows `running`, `GET /health` returns `{"status":"ok"}`
 - Run stress tests: `python stress_test.py --turns 4` and `--concurrent 3`
-- Run the Section 20 smoke test protocol manually against production
+- Run `backend/scripts/e2e_smoke_test.py` against staging URL before every production deploy

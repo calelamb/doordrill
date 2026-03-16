@@ -27,6 +27,7 @@ from app.models.invitation import Invitation
 from app.models.knowledge import OrgDocument, OrgDocumentChunk
 from app.models.manager_action import ManagerActionLog
 from app.models.notification_delivery import NotificationDelivery
+from app.models.password_reset import PasswordResetToken
 from app.models.postprocess_run import PostprocessRun
 from app.models.predictive import ManagerCoachingImpact, RepCohortBenchmark, RepRiskScore, RepSkillForecast, ScenarioOutcomeAggregate
 from app.models.prompt_version import PromptVersion
@@ -79,6 +80,7 @@ __all__ = [
     "ObjectionType",
     "Organization",
     "OverrideLabel",
+    "PasswordResetToken",
     "PromptExperiment",
     "PostprocessRun",
     "PromptVersion",

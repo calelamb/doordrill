@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
+from app.core.rate_limit import limiter
 from app.main import app
 from app.db.session import SessionLocal, engine
 from app.models import Base
@@ -55,6 +56,8 @@ def initialize_test_db() -> None:
 @pytest.fixture(autouse=True)
 def reset_db(configure_test_runtime, initialize_test_db) -> None:
     invalidate_objection_cache()
+    if hasattr(limiter, "reset"):
+        limiter.reset()
     with engine.begin() as connection:
         if connection.dialect.name == "postgresql":
             table_names = [table.name for table in Base.metadata.sorted_tables]

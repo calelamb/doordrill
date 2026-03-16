@@ -9,7 +9,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+import sentry_sdk
 from sqlalchemy import text
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.logging import LoggingIntegration
+from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 
 from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
@@ -18,12 +22,49 @@ from app.api.rep import router as rep_router
 from app.api.scenarios import router as scenarios_router
 from app.core.config import get_settings
 from app.core.logging_config import configure_logging
+from app.core.rate_limit import RateLimitExceeded, limiter, rate_limit_exceeded_handler
 from app.db.init_db import init_db
 from app.middleware.request_logging import RequestLoggingMiddleware
 from app.voice.ws import router as ws_router
 
 settings = get_settings()
 configure_logging()
+
+
+def _scrub_sentry_event(event: dict, hint: dict) -> dict:
+    """Strip Authorization headers and password fields from Sentry events."""
+    del hint
+
+    request = event.get("request", {})
+    headers = request.get("headers", {})
+    for key in ("authorization", "Authorization", "cookie", "Cookie"):
+        if key in headers:
+            headers[key] = "[Filtered]"
+    data = request.get("data", {})
+    if isinstance(data, dict):
+        for key in ("password", "password_hash", "token", "refresh_token", "access_token"):
+            if key in data:
+                data[key] = "[Filtered]"
+    return event
+
+
+def _init_sentry(app_settings) -> None:
+    if not app_settings.sentry_dsn:
+        return
+    sentry_sdk.init(
+        dsn=app_settings.sentry_dsn,
+        environment=app_settings.environment,
+        traces_sample_rate=app_settings.sentry_traces_sample_rate,
+        integrations=[
+            FastApiIntegration(transaction_style="endpoint"),
+            SqlalchemyIntegration(),
+            LoggingIntegration(
+                level=logging.INFO,
+                event_level=logging.ERROR,
+            ),
+        ],
+        before_send=lambda event, hint: _scrub_sentry_event(event, hint),
+    )
 
 
 def validate_production_config() -> None:
@@ -60,6 +101,7 @@ def validate_production_config() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     validate_production_config()
+    _init_sentry(settings)
     init_db()
     yield
 
@@ -72,6 +114,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.logger = logging.getLogger("doordrill.api")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

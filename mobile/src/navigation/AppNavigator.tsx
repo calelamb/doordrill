@@ -12,6 +12,7 @@ import { HistoryScreen } from "../screens/HistoryScreen";
 import { LoginScreen } from "../screens/LoginScreen";
 import { SplashScreen } from "../screens/SplashScreen";
 import { RegisterScreen } from "../screens/RegisterScreen";
+import { ForgotPasswordScreen } from "../screens/ForgotPasswordScreen";
 import { ScenarioPickerScreen } from "../screens/ScenarioPickerScreen";
 import { ScoreScreen } from "../screens/ScoreScreen";
 import { SessionScreen } from "../screens/SessionScreen";
@@ -21,7 +22,7 @@ import { MessageThreadScreen } from "../screens/MessageThreadScreen";
 import { NewMessageScreen } from "../screens/NewMessageScreen";
 import { RootStackParamList, BottomTabParamList } from "./types";
 import { colors } from "../theme/tokens";
-import { flushPendingInviteNavigation } from "../services/inviteLinking";
+import { flushPendingAuthLinkNavigation } from "../services/inviteLinking";
 import { flushPendingNotificationNavigation, navigationRef } from "../services/notifications";
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -92,7 +93,7 @@ export function AppNavigator() {
     if (isAuthenticated && repId) {
       flushPendingNotificationNavigation();
     }
-    flushPendingInviteNavigation();
+    flushPendingAuthLinkNavigation();
   }, [isAuthenticated, repId]);
 
   if (isFirstLaunch) {
@@ -104,12 +105,13 @@ export function AppNavigator() {
       ref={navigationRef}
       onReady={() => {
         flushPendingNotificationNavigation();
-        flushPendingInviteNavigation();
+        flushPendingAuthLinkNavigation();
       }}
     >
       {!isAuthenticated ? (
         <Stack.Navigator>
           <Stack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
+          <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} options={{ headerShown: false }} />
           <Stack.Screen name="Register" component={RegisterScreen} options={{ headerShown: false }} />
         </Stack.Navigator>
       ) : (
