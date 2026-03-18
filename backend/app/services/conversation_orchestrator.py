@@ -13,9 +13,15 @@ from sqlalchemy.orm import Session
 from app.models.prompt_version import PromptVersion
 from app.models.transcript import ObjectionType
 from app.models.user import User
+from app.services.micro_behavior_engine import (
+    DEFAULT_TONE_BY_EMOTION,
+    SENTENCE_LENGTH_BY_EMOTION,
+    TONE_BY_TRANSITION,
+)
 
 if TYPE_CHECKING:
     from app.models.scenario import Scenario
+    from app.services.micro_behavior_engine import MicroBehaviorPlan
 
 
 logger = logging.getLogger(__name__)
@@ -343,7 +349,16 @@ class RepTurnPlan:
     objection_pressure_before: int
     objection_pressure_after: int
     resistance_level: int
+    behavior_directives: "BehaviorDirectives"
     system_prompt: str
+
+
+@dataclass
+class BehaviorDirectives:
+    tone: str
+    sentence_length: str
+    interruption_mode: bool
+    directive_text: str
 
 
 @dataclass
@@ -488,6 +503,7 @@ class SessionPromptContext:
     org_id: str | None = None
     territory_context: str | None = None
     company_context: str | None = None
+    last_mb_plan: dict[str, Any] | None = None
 
 
 @dataclass
@@ -538,6 +554,8 @@ class PromptBuilder:
             "Layer 2: persona fields: name, attitude, concerns, objection_queue, buy_likelihood, softening_condition, household_type, home_ownership_years, pest_history, price_sensitivity, communication_style.\n"
             "Layer 3: stage-aware instructions covering DOOR_OPEN, LISTENING, OBJECTING, CONSIDERING, CLOSE_WINDOW, ENDED.\n"
             "Layer 3B: emotional state machine framing with resistance level, objection pressure, active objections, and latent objections.\n"
+            "Layer 3B-CONT: prior-turn behavioral register for tonal continuity.\n"
+            "Layer 3C: precomputed behavioral directives for tone, length, and interruption posture.\n"
             "Layer 4: anti-pattern guards for aggressive reps, off-topic reps, and reps asking for hints or coaching.\n"
             "Layer 4B: edge case directives for missing intros, premature close attempts, repeated objection neglect, and spouse handoff moments.\n"
             "Layer 5: optional company context the homeowner may have seen before the interaction."
@@ -561,6 +579,8 @@ class PromptBuilder:
         active_edge_cases: list[str] | None = None,
         company_context: str | None = None,
         behavioral_signals: list[str] | None = None,
+        behavior_directives: BehaviorDirectives | None = None,
+        last_mb_context: dict[str, Any] | None = None,
     ) -> str:
         snapshot = scenario_snapshot or ScenarioSnapshot.from_scenario(scenario)
         canonical_stage = self._normalize_stage(stage)
@@ -583,8 +603,10 @@ class PromptBuilder:
         transition_hint = EMOTION_TRANSITION_HINTS.get(emotional_state, EMOTION_TRANSITION_HINTS["neutral"])
         response_cap = self._response_cap_rule(canonical_stage)
         internal_rule = self._internal_thought_rule(canonical_stage)
+        sentence_rule = self._response_sentence_rule(behavior_directives)
+        hard_rule_sentence = self._hard_rule_sentence(behavior_directives)
         hard_rule = (
-            f"RULE: Respond in ONE sentence only. {response_cap} "
+            f"RULE: {hard_rule_sentence} {response_cap} "
             "You are a busy homeowner at your front door. Be blunt and brief."
         )
 
@@ -592,7 +614,7 @@ class PromptBuilder:
             "LAYER 1 - IMMERSION CONTRACT\n"
             "You are a real homeowner in a live door-to-door roleplay.\n"
             "Never break character.\n"
-            "Respond in one sentence only.\n"
+            f"{sentence_rule}\n"
             f"{response_cap}\n"
             "React only to what the rep actually says.\n"
             "Do not volunteer extra information the rep has not earned.\n"
@@ -645,6 +667,16 @@ class PromptBuilder:
             f"Response style: {emotional_guidance}\n"
             f"Transition rule: {transition_hint}"
         )
+        layer_three_b_cont = None
+        if last_mb_context:
+            tone = str(last_mb_context.get("tone") or "measured")
+            sentence_length = str(last_mb_context.get("sentence_length") or "medium")
+            interruption_suffix = ", you interrupted" if last_mb_context.get("interruption_type") else ""
+            layer_three_b_cont = (
+                "LAYER 3B-CONT - PRIOR TURN REGISTER\n"
+                f"In your last response: tone was {tone}, length was {sentence_length}{interruption_suffix}.\n"
+                "Maintain tonal continuity unless the rep's behavior explicitly warrants a shift."
+            )
         layer_four = (
             "LAYER 4 - ANTI-PATTERN GUARDS\n"
             "If the rep is aggressive, become shorter, firmer, and more skeptical.\n"
@@ -681,7 +713,12 @@ class PromptBuilder:
                 f"{company_context.strip()}"
             )
         version_line = f"Prompt version: {prompt_version or 'conversation_v1'}"
-        parts = [version_line, layer_one, layer_two, layer_three, layer_three_b, layer_four]
+        parts = [version_line, layer_one, layer_two, layer_three, layer_three_b]
+        if layer_three_b_cont:
+            parts.append(layer_three_b_cont)
+        if behavior_directives is not None:
+            parts.append(behavior_directives.directive_text)
+        parts.append(layer_four)
         if layer_four_b:
             parts.append(layer_four_b)
         if layer_five_override:
@@ -720,6 +757,24 @@ class PromptBuilder:
         if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW"}:
             return "Maximum 30 words. You may think out loud briefly."
         return "Maximum 20 words."
+
+    def _response_sentence_rule(self, behavior_directives: BehaviorDirectives | None) -> str:
+        if behavior_directives is None:
+            return "Respond in one sentence only."
+        if behavior_directives.sentence_length == "short":
+            return "Respond in one sentence only."
+        if behavior_directives.sentence_length == "medium":
+            return "Respond in no more than two sentences."
+        return "Respond in no more than three sentences."
+
+    def _hard_rule_sentence(self, behavior_directives: BehaviorDirectives | None) -> str:
+        if behavior_directives is None:
+            return "Respond in ONE sentence only."
+        if behavior_directives.sentence_length == "short":
+            return "Respond in ONE sentence only."
+        if behavior_directives.sentence_length == "medium":
+            return "Respond in no more than two sentences."
+        return "Respond in no more than three sentences."
 
     def _internal_thought_rule(self, canonical_stage: str) -> str:
         if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW"}:
@@ -829,6 +884,7 @@ class ConversationOrchestrator:
             conversation_prompt_content=conversation_prompt_content,
             org_id=resolved_org_id,
             company_context=company_context,
+            last_mb_plan=self._contexts.get(session_id).last_mb_plan if session_id in self._contexts else None,
         )
         context.persona = self._enrich_persona(context.persona, context.scenario_snapshot)
         self._contexts[session_id] = context
@@ -891,7 +947,18 @@ class ConversationOrchestrator:
         state.last_behavior_signals = assessment.signals
         state.last_updated = datetime.now(timezone.utc)
 
-        system_prompt = self._build_system_prompt(stage_after=stage_after, session_id=session_id)
+        behavior_directives = self.compute_behavior_directives(
+            emotion_before=emotion_before,
+            emotion_after=state.emotion,
+            behavioral_signals=assessment.signals,
+            active_objections=list(state.active_objections),
+        )
+        system_prompt = self._build_system_prompt(
+            stage_after=stage_after,
+            session_id=session_id,
+            behavior_directives=behavior_directives,
+            last_mb_context=context.last_mb_plan if context is not None else None,
+        )
 
         return RepTurnPlan(
             stage_before=stage_before,
@@ -909,6 +976,7 @@ class ConversationOrchestrator:
             objection_pressure_before=objection_pressure_before,
             objection_pressure_after=state.objection_pressure,
             resistance_level=state.resistance_level,
+            behavior_directives=behavior_directives,
             system_prompt=system_prompt,
         )
 
@@ -916,6 +984,18 @@ class ConversationOrchestrator:
         state = self.get_state(session_id)
         state.ai_turns += 1
         state.last_updated = datetime.now(timezone.utc)
+
+    def update_last_mb_plan(self, session_id: str, plan: "MicroBehaviorPlan") -> None:
+        context = self._contexts.get(session_id)
+        if context is None:
+            return
+        context.last_mb_plan = {
+            "tone": plan.tone,
+            "sentence_length": plan.sentence_length,
+            "interruption_type": plan.interruption_type,
+            "behaviors": list(plan.behaviors),
+            "realism_score": plan.realism_score,
+        }
 
     def _initialize_state_from_context(self, context: SessionPromptContext) -> ConversationState:
         context.persona = self._enrich_persona(context.persona, context.scenario_snapshot)
@@ -943,9 +1023,73 @@ class ConversationOrchestrator:
             objection_pressure=self._initial_objection_pressure(starting_emotion, active_count),
         )
 
-    def _build_system_prompt(self, stage_after: str, session_id: str | None = None) -> str:
+    def compute_behavior_directives(
+        self,
+        *,
+        emotion_before: str,
+        emotion_after: str,
+        behavioral_signals: list[str],
+        active_objections: list[str],
+    ) -> BehaviorDirectives:
+        del active_objections
+
+        tone = TONE_BY_TRANSITION.get((emotion_before, emotion_after))
+        if tone is None:
+            if "ignores_objection" in behavioral_signals and emotion_after in {"annoyed", "hostile"}:
+                tone = "cutting"
+            elif "acknowledges_concern" in behavioral_signals and emotion_after in {"curious", "interested"}:
+                tone = "warming"
+            else:
+                tone = DEFAULT_TONE_BY_EMOTION.get(emotion_after, "measured")
+
+        sentence_length = SENTENCE_LENGTH_BY_EMOTION.get(emotion_after, "medium")
+        if "pushes_close" in behavioral_signals and emotion_after in {"annoyed", "hostile"}:
+            sentence_length = "short"
+
+        interruption_mode = emotion_after in {"annoyed", "hostile"} and any(
+            signal in {"ignores_objection", "pushes_close", "dismisses_concern"}
+            for signal in behavioral_signals
+        )
+
+        length_instruction = {
+            "short": "One sentence only.",
+            "medium": "Two sentences max.",
+            "long": "Up to three sentences.",
+        }.get(sentence_length, "Two sentences max.")
+        interruption_instruction = ""
+        if interruption_mode:
+            interruption_instruction = (
+                "\nInterrupt the rep: Begin your response cutting off whatever they were saying. "
+                "Use an opener like 'Hold on,' or 'Wait,' or 'Look,'."
+            )
+        directive_text = (
+            "LAYER 3C - BEHAVIORAL DIRECTIVES\n"
+            f"Tone for this response: {tone}. Write in this register throughout.\n"
+            f"Response length: {sentence_length}. {length_instruction}"
+            f"{interruption_instruction}\n"
+            "Do not exceed these constraints. The delivery will match exactly what you write."
+        )
+
+        return BehaviorDirectives(
+            tone=tone,
+            sentence_length=sentence_length,
+            interruption_mode=interruption_mode,
+            directive_text=directive_text,
+        )
+
+    def _build_system_prompt(
+        self,
+        stage_after: str,
+        session_id: str | None = None,
+        *,
+        behavior_directives: BehaviorDirectives | None = None,
+        last_mb_context: dict[str, Any] | None = None,
+    ) -> str:
         context = self._contexts.get(session_id or "")
         state = self._states.get(session_id or "")
+        resolved_last_mb_context = last_mb_context
+        if resolved_last_mb_context is None and context is not None:
+            resolved_last_mb_context = context.last_mb_plan
 
         if context is not None:
             prompt = self._prompt_builder.build(
@@ -964,6 +1108,8 @@ class ConversationOrchestrator:
                 active_edge_cases=list(state.active_edge_cases) if state is not None else [],
                 company_context=context.company_context,
                 behavioral_signals=list(state.last_behavior_signals) if state is not None else [],
+                behavior_directives=behavior_directives,
+                last_mb_context=resolved_last_mb_context,
             )
             return prompt
 
@@ -986,6 +1132,8 @@ class ConversationOrchestrator:
             resolved_objections=list(state.resolved_objections) if state is not None else [],
             active_edge_cases=list(state.active_edge_cases) if state is not None else [],
             behavioral_signals=list(state.last_behavior_signals) if state is not None else [],
+            behavior_directives=behavior_directives,
+            last_mb_context=resolved_last_mb_context,
         )
 
     def _enrich_persona(self, persona: HomeownerPersona, snapshot: ScenarioSnapshot) -> HomeownerPersona:

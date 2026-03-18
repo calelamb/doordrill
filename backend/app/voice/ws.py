@@ -23,7 +23,7 @@ from app.models.types import AssignmentStatus, EventDirection, SessionStatus, Tu
 from app.models.user import User
 from app.schemas.knowledge import RetrievedChunk
 from app.schemas.ws import WsEvent
-from app.services.conversation_orchestrator import ConversationOrchestrator
+from app.services.conversation_orchestrator import BehaviorDirectives, ConversationOrchestrator
 from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.ledger_buffer import InMemoryEventBuffer, RedisEventBuffer
 from app.services.ledger_service import SessionLedgerService
@@ -132,6 +132,14 @@ def _serialize_micro_behavior(plan: MicroBehaviorPlan, *, segment: MicroBehavior
             }
         )
     return payload
+
+
+def _serialize_behavior_directives(directives: BehaviorDirectives) -> dict[str, Any]:
+    return {
+        "tone": directives.tone,
+        "sentence_length": directives.sentence_length,
+        "interruption_mode": directives.interruption_mode,
+    }
 
 
 @router.websocket("/ws/sessions/{session_id}")
@@ -607,6 +615,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             )
             plan = build_behavior_plan(sentence)
             last_behavior_plan = plan
+            orchestrator.update_last_mb_plan(session_id, plan)
             transformed_text = plan.transformed_text.strip()
             if not transformed_text:
                 return
@@ -956,6 +965,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "emotion_after": plan.emotion_after,
                     "emotion_changed": plan.emotion_changed,
                     "behavioral_signals": plan.behavioral_signals,
+                    "behavior_directives": _serialize_behavior_directives(plan.behavior_directives),
                     "objection_tags": plan.objection_tags,
                     "resolved_objections_this_turn": plan.resolved_objections,
                     "objection_pressure_before": plan.objection_pressure_before,
