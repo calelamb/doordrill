@@ -14,6 +14,7 @@ from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionTurn
+from app.models.training import ConversationQualitySignal
 from app.models.user import Organization, User
 from app.models.warehouse import DimRep, DimScenario, DimTime, FactRepDaily, FactSession
 from app.models.types import TurnSpeaker, UserRole
@@ -52,6 +53,7 @@ class SessionWarehouseBundle:
     reviews: list[ManagerReview]
     coaching_notes: list[ManagerCoachingNote]
     grading_run: GradingRun | None
+    conversation_quality_signal: ConversationQualitySignal | None
 
 
 class WarehouseEtlService:
@@ -138,6 +140,11 @@ class WarehouseEtlService:
             .where(GradingRun.session_id == session_id)
             .order_by(GradingRun.completed_at.desc(), GradingRun.created_at.desc())
         )
+        conversation_quality_signal = db.scalar(
+            select(ConversationQualitySignal)
+            .where(ConversationQualitySignal.session_id == session_id)
+            .order_by(ConversationQualitySignal.created_at.desc())
+        )
 
         return SessionWarehouseBundle(
             session=session,
@@ -151,6 +158,7 @@ class WarehouseEtlService:
             reviews=reviews,
             coaching_notes=coaching_notes,
             grading_run=grading_run,
+            conversation_quality_signal=conversation_quality_signal,
         )
 
     def _session_date(self, session: DrillSession) -> date:
@@ -306,6 +314,15 @@ class WarehouseEtlService:
                 else None
             ),
             "has_coaching_note": bool(bundle.coaching_notes),
+            "has_conversation_quality_signal": bool(bundle.conversation_quality_signal),
+            "conversation_realism_rating": (
+                bundle.conversation_quality_signal.realism_rating if bundle.conversation_quality_signal is not None else None
+            ),
+            "conversation_signal_responsiveness": (
+                bundle.conversation_quality_signal.signal_responsiveness
+                if bundle.conversation_quality_signal is not None
+                else None
+            ),
             "weakness_tag_1": weakness_tags[0] if len(weakness_tags) > 0 else None,
             "weakness_tag_2": weakness_tags[1] if len(weakness_tags) > 1 else None,
             "weakness_tag_3": weakness_tags[2] if len(weakness_tags) > 2 else None,

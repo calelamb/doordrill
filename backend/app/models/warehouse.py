@@ -109,6 +109,9 @@ class FactSession(Base, TimestampMixin):
     override_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     override_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
     has_coaching_note: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    has_conversation_quality_signal: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    conversation_realism_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    conversation_signal_responsiveness: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     weakness_tag_1: Mapped[str | None] = mapped_column(String(64), nullable=True)
     weakness_tag_2: Mapped[str | None] = mapped_column(String(64), nullable=True)

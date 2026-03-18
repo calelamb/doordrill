@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import re
 import time
 import uuid
+import zlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -99,6 +101,10 @@ def _resolve_trace_id(headers: Any) -> str:
     if trace_id:
         return trace_id
     return uuid.uuid4().hex
+
+
+def _compress_prompt(text: str) -> str:
+    return base64.b64encode(zlib.compress(text.encode("utf-8"), level=6)).decode("ascii")
 
 
 async def _send_event(websocket: WebSocket, event_type: str, payload: dict[str, Any], sequence: int) -> None:
@@ -779,6 +785,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 ended_at=max(ai_started_at + timedelta(milliseconds=filler_result["duration_ms"]), now),
                 objection_tags=["silence_filler"],
             )
+            if ai_turn.speaker == TurnSpeaker.AI:
+                ai_turn.system_prompt_snapshot = _compress_prompt(system_prompt)
+                db.commit()
+                db.refresh(ai_turn)
             await emit_server_event(
                 "server.turn.committed",
                 {
@@ -1030,6 +1040,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 ended_at=max(ai_ended_at, ai_now),
                 objection_tags=[],
             )
+            if ai_turn.speaker == TurnSpeaker.AI:
+                ai_turn.system_prompt_snapshot = _compress_prompt(plan.system_prompt)
+                db.commit()
+                db.refresh(ai_turn)
 
             turn_payload = {
                 "rep_turn_id": rep_turn.id,

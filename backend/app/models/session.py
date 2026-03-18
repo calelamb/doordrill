@@ -79,6 +79,7 @@ class SessionTurn(Base):
     speaker: Mapped[TurnSpeaker] = mapped_column(Enum(TurnSpeaker), nullable=False)
     stage: Mapped[str] = mapped_column(String(72), nullable=False, default="objection_handling")
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    system_prompt_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     objection_tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)

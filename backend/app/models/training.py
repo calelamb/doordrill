@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -62,6 +62,33 @@ class PromptExperiment(Base, TimestampMixin):
     challenger_session_count: Mapped[int] = mapped_column(nullable=False, default=0)
     p_value: Mapped[float | None] = mapped_column(nullable=True)
     min_sessions_for_decision: Mapped[int] = mapped_column(nullable=False, default=200)
+
+
+class ConversationQualitySignal(Base, TimestampMixin):
+    __tablename__ = "conversation_quality_signals"
+    __table_args__ = (
+        Index("ix_conv_quality_signals_session", "session_id"),
+        Index("ix_conv_quality_signals_manager_created", "manager_id", "created_at"),
+        Index("ix_conv_quality_signals_exported", "exported_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    manager_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    org_id: Mapped[str | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    realism_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    difficulty_appropriate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    signal_responsiveness: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    flagged_turn_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    export_batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class AdaptiveRecommendationOutcome(Base, TimestampMixin):

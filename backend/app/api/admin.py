@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import uuid
+import zlib
 from datetime import date, datetime, time, timezone
 from typing import Literal
 
@@ -18,7 +20,9 @@ from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionTurn
-from app.models.training import OverrideLabel, PromptExperiment
+from app.models.training import ConversationQualitySignal, OverrideLabel, PromptExperiment
+from app.models.types import SessionStatus, TurnSpeaker
+from app.models.user import User
 from app.services.prompt_experiment_service import PromptExperimentService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -94,6 +98,10 @@ def _quality_filter(label_quality: str) -> set[str]:
     if label_quality == "medium":
         return {"high", "medium"}
     return {"high", "medium", "low"}
+
+
+def _decompress_prompt(text: str) -> str:
+    return zlib.decompress(base64.b64decode(text.encode("ascii"))).decode("utf-8")
 
 
 def _serialize_prompt_experiment(experiment: PromptExperiment) -> dict:
@@ -387,6 +395,129 @@ def export_training_signals(
                 },
             }
         )
+
+    db.commit()
+
+    if format == "json":
+        return Response(content=json.dumps(examples, ensure_ascii=True), media_type="application/json")
+
+    body = "\n".join(json.dumps(item, ensure_ascii=True) for item in examples)
+    return Response(content=body, media_type="application/x-ndjson")
+
+
+@router.get("/training-signals/conversation-export")
+def export_conversation_training_signals(
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    min_realism_score: float | None = Query(default=None),
+    quality_signal_only: bool = Query(default=False),
+    format: Literal["jsonl", "json"] = Query(default="jsonl"),
+) -> Response:
+    batch_id = str(uuid.uuid4())
+    start_at = _to_start_of_day(from_date)
+    end_at = _to_end_of_day(to_date)
+
+    stmt = (
+        select(DrillSession, Scenario, User)
+        .join(User, User.id == DrillSession.rep_id)
+        .outerjoin(Scenario, Scenario.id == DrillSession.scenario_id)
+        .where(DrillSession.status == SessionStatus.GRADED)
+    )
+    if actor.org_id is not None:
+        stmt = stmt.where(User.org_id == actor.org_id)
+    if start_at is not None:
+        stmt = stmt.where(DrillSession.started_at >= start_at)
+    if end_at is not None:
+        stmt = stmt.where(DrillSession.started_at <= end_at)
+
+    session_rows = db.execute(stmt.order_by(DrillSession.started_at.asc())).all()
+    session_ids = [session.id for session, _, _ in session_rows]
+    turns_by_session: dict[str, list[SessionTurn]] = {}
+    if session_ids:
+        turn_rows = db.scalars(
+            select(SessionTurn)
+            .where(SessionTurn.session_id.in_(session_ids))
+            .order_by(SessionTurn.session_id.asc(), SessionTurn.turn_index.asc())
+        ).all()
+        for turn in turn_rows:
+            turns_by_session.setdefault(turn.session_id, []).append(turn)
+
+    quality_signals_by_session: dict[str, ConversationQualitySignal] = {}
+    if session_ids:
+        quality_signal_rows = db.scalars(
+            select(ConversationQualitySignal)
+            .where(ConversationQualitySignal.session_id.in_(session_ids))
+            .order_by(ConversationQualitySignal.session_id.asc(), ConversationQualitySignal.created_at.desc())
+        ).all()
+        for signal in quality_signal_rows:
+            quality_signals_by_session.setdefault(signal.session_id, signal)
+
+    examples: list[dict] = []
+    exported_at = datetime.now(timezone.utc)
+    updated_signal_ids: set[str] = set()
+    for session, scenario, rep in session_rows:
+        quality_signal = quality_signals_by_session.get(session.id)
+        if quality_signal_only and quality_signal is None:
+            continue
+
+        turns = turns_by_session.get(session.id, [])
+        for index, turn in enumerate(turns):
+            if turn.speaker != TurnSpeaker.AI or turn.system_prompt_snapshot is None:
+                continue
+            if min_realism_score is not None and (
+                turn.mb_realism_score is None or float(turn.mb_realism_score) < float(min_realism_score)
+            ):
+                continue
+
+            if quality_signal is not None and quality_signal.id not in updated_signal_ids:
+                quality_signal.exported_at = exported_at
+                quality_signal.export_batch_id = batch_id
+                updated_signal_ids.add(quality_signal.id)
+
+            examples.append(
+                {
+                    "session_id": session.id,
+                    "turn_id": turn.id,
+                    "turn_index": turn.turn_index,
+                    "input": {
+                        "system_prompt": _decompress_prompt(turn.system_prompt_snapshot),
+                        "conversation_history": [
+                            {
+                                "speaker": previous_turn.speaker.value,
+                                "text": previous_turn.text,
+                            }
+                            for previous_turn in turns[:index]
+                        ],
+                    },
+                    "output": {
+                        "text": turn.text,
+                        "emotion_before": turn.emotion_before,
+                        "emotion_after": turn.emotion_after,
+                        "stage": turn.stage,
+                    },
+                    "signals": {
+                        "mb_realism_score": turn.mb_realism_score,
+                        "mb_tone": turn.mb_tone,
+                        "mb_behaviors": list(turn.mb_behaviors or []),
+                        "was_graded": bool(turn.was_graded),
+                        "is_high_quality": turn.is_high_quality,
+                        "manager_realism_rating": quality_signal.realism_rating if quality_signal is not None else None,
+                        "manager_flagged": bool(
+                            quality_signal is not None and turn.id in (quality_signal.flagged_turn_ids or [])
+                        ),
+                    },
+                    "metadata": {
+                        "scenario_id": session.scenario_id,
+                        "scenario_name": scenario.name if scenario is not None else None,
+                        "scenario_difficulty": scenario.difficulty if scenario is not None else None,
+                        "prompt_version": session.prompt_version,
+                        "org_id": rep.org_id,
+                        "session_date": session.started_at.date().isoformat() if session.started_at is not None else None,
+                    },
+                }
+            )
 
     db.commit()
 

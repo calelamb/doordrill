@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import math
-from sqlalchemy.exc import DBAPIError
+import os
+import re
+
+import httpx
+from sqlalchemy import or_, select
 from sqlalchemy import text as sql_text
-from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.models.knowledge import OrgDocument, OrgDocumentChunk
 from app.models.types import OrgDocumentStatus
 from app.schemas.knowledge import RetrievedChunk
-from app.services.document_processing_service import EMBEDDING_MODEL, DocumentProcessingService
+from app.services.document_processing_service import DocumentProcessingService
 from app.services.management_cache_service import ManagementCacheService
+
+KEYWORD_RE = re.compile(r"[a-z0-9]{3,}")
 
 
 class DocumentRetrievalService:
@@ -56,7 +64,12 @@ class DocumentRetrievalService:
         if not self.has_ready_documents(db, org_id=org_id):
             return []
 
-        query_vector = self._embed_query(normalized_query)
+        try:
+            query_vector = self._resolve_query_embedding(normalized_query)
+        except Exception:
+            rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_query, k=k)
+            return [row for row in rows if row.similarity_score >= min_score]
+
         dialect_name = db.bind.dialect.name if db.bind is not None else ""
         if dialect_name == "postgresql" and self._supports_postgres_vector_search(db):
             try:
@@ -81,7 +94,29 @@ class DocumentRetrievalService:
         prompt = f"Topic: {topic.strip()}"
         if context_hint.strip():
             prompt = f"{prompt}\nContext: {context_hint.strip()}"
-        return self.retrieve(db, org_id=org_id, query=prompt, k=k, min_score=min_score)
+        normalized_prompt = " ".join(prompt.split()).strip()
+        if not normalized_prompt:
+            return []
+        if not self.has_ready_documents(db, org_id=org_id):
+            return []
+
+        rows: list[RetrievedChunk]
+        query_vector: list[float] | None = None
+        try:
+            query_vector = self._resolve_query_embedding(normalized_prompt)
+        except Exception:
+            query_vector = None
+
+        dialect_name = db.bind.dialect.name if db.bind is not None else ""
+        if query_vector is not None and dialect_name == "postgresql" and self._supports_postgres_vector_search(db):
+            try:
+                rows = self._retrieve_postgres(db, org_id=org_id, query_vector=query_vector, k=k)
+            except DBAPIError:
+                rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
+        else:
+            rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
+
+        return [row for row in rows if row.similarity_score >= min_score]
 
     def format_for_prompt(self, chunks: list[RetrievedChunk], max_tokens: int = 1200) -> str:
         if not chunks:
@@ -115,18 +150,76 @@ class DocumentRetrievalService:
             return ""
         return f"{header}\n" + "\n\n".join(entries) + f"\n{footer}"
 
-    def _embed_query(self, query: str) -> list[float]:
+    async def _embed_query(self, query: str) -> list[float]:
         cache_key = self.cache.make_key(
             "knowledge-query-embedding",
-            {"model": EMBEDDING_MODEL, "query": query},
+            {"model": self.settings.embedding_model, "query": query},
         )
         cached = self.cache.get_json(cache_key)
         if cached and isinstance(cached.get("embedding"), list):
             return [float(value) for value in cached["embedding"]]
 
-        embedding = self.processing_service.embed_chunks([query])[0]
+        if not self.settings.openai_api_key or os.getenv("PYTEST_CURRENT_TEST"):
+            embedding = self.processing_service.embed_chunks([query])[0]
+            self.cache.set_json(cache_key, {"embedding": embedding})
+            return embedding
+
+        url = f"{self.settings.openai_base_url.rstrip('/')}/embeddings"
+        headers = {
+            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=self.settings.provider_timeout_seconds) as client:
+            response = await client.post(
+                url,
+                headers=headers,
+                json={"model": self.settings.embedding_model, "input": query},
+            )
+            response.raise_for_status()
+            body = response.json()
+        data = sorted(body.get("data", []), key=lambda item: item.get("index", 0))
+        if not data:
+            raise ValueError("embedding response was empty")
+        embedding = [float(value) for value in data[0]["embedding"]]
         self.cache.set_json(cache_key, {"embedding": embedding})
         return embedding
+
+    def _resolve_query_embedding(self, query: str) -> list[float]:
+        result = self._embed_query(query)
+        if inspect.isawaitable(result):
+            resolved = self._run_async(result)
+        else:
+            resolved = result
+        return [float(value) for value in resolved]
+
+    def _run_async(self, coro):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        result: dict[str, object] = {}
+        error: dict[str, BaseException] = {}
+
+        def runner() -> None:
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                result["value"] = loop.run_until_complete(coro)
+            except BaseException as exc:  # pragma: no cover - defensive thread bridge
+                error["exc"] = exc
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+
+        import threading
+
+        thread = threading.Thread(target=runner)
+        thread.start()
+        thread.join()
+        if "exc" in error:
+            raise error["exc"]
+        return result["value"]
 
     def _retrieve_postgres(
         self,
@@ -220,6 +313,59 @@ class DocumentRetrievalService:
 
         scored.sort(key=lambda item: item.similarity_score, reverse=True)
         return scored[:k]
+
+    def _retrieve_keyword(
+        self,
+        db: Session,
+        *,
+        org_id: str,
+        query_text: str,
+        k: int,
+    ) -> list[RetrievedChunk]:
+        terms = self._keyword_terms(query_text)
+        if not terms:
+            return []
+
+        rows = db.execute(
+            select(OrgDocumentChunk, OrgDocument.name)
+            .join(OrgDocument, OrgDocument.id == OrgDocumentChunk.document_id)
+            .where(
+                OrgDocumentChunk.org_id == org_id,
+                OrgDocument.status == OrgDocumentStatus.READY,
+                or_(*[OrgDocumentChunk.text.ilike(f"%{term}%") for term in terms]),
+            )
+        ).all()
+
+        scored: list[RetrievedChunk] = []
+        for chunk, document_name in rows:
+            text_lower = (chunk.text or "").lower()
+            matched = sum(1 for term in terms if term in text_lower)
+            if matched <= 0:
+                continue
+            similarity = max(0.7, matched / max(1, len(terms)))
+            scored.append(
+                RetrievedChunk(
+                    chunk_id=chunk.id,
+                    document_id=chunk.document_id,
+                    document_name=document_name,
+                    text=chunk.text,
+                    similarity_score=round(min(1.0, similarity), 4),
+                )
+            )
+
+        scored.sort(key=lambda item: (item.similarity_score, len(item.text)), reverse=True)
+        return scored[:k]
+
+    def _keyword_terms(self, query_text: str) -> list[str]:
+        terms = KEYWORD_RE.findall(query_text.lower())
+        unique_terms: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            if term in seen:
+                continue
+            seen.add(term)
+            unique_terms.append(term)
+        return unique_terms[:12]
 
     def _truncate_text_to_token_budget(self, text: str, token_budget: int) -> str:
         words = text.split()

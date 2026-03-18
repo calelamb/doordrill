@@ -34,7 +34,7 @@ from app.models.prompt_version import PromptVersion
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.scenario import Scenario
 from app.models.session import Session, SessionArtifact, SessionEvent, SessionTurn
-from app.models.training import AdaptiveRecommendationOutcome, OverrideLabel, PromptExperiment
+from app.models.training import AdaptiveRecommendationOutcome, ConversationQualitySignal, OverrideLabel, PromptExperiment
 from app.models.transcript import FactTurnEvent, ObjectionType
 from app.models.user import Organization, Team, User
 from app.models.warehouse import DimRep, DimScenario, DimTime, FactRepDaily, FactSession
@@ -62,6 +62,7 @@ __all__ = [
     "AnalyticsRefreshRun",
     "AdaptiveRecommendationOutcome",
     "Base",
+    "ConversationQualitySignal",
     "DeviceToken",
     "DimRep",
     "DimScenario",

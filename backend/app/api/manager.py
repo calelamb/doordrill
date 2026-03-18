@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, case, delete, func, select
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,7 @@ from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionArtifact, SessionEvent, SessionTurn
+from app.models.training import ConversationQualitySignal
 from app.models.types import AssignmentStatus, OrgDocumentFileType, OrgDocumentStatus, ReviewReason, SessionStatus, UserRole
 from app.models.user import Organization, Team, User
 from app.schemas.adaptive_training import (
@@ -125,6 +127,14 @@ RUBRIC_CATEGORY_KEYS = {
     "professionalism": "professionalism",
 }
 TEAM_RISK_CATEGORY_KEYS = ("opening", "pitch", "objection_handling", "closing", "professionalism")
+
+
+class ConversationQualitySignalRequest(BaseModel):
+    realism_rating: int | None = Field(default=None, ge=1, le=5)
+    difficulty_appropriate: bool | None = None
+    signal_responsiveness: int | None = Field(default=None, ge=1, le=5)
+    notes: str | None = None
+    flagged_turn_ids: list[str] = Field(default_factory=list)
 
 
 def _run_async(coro):
@@ -385,6 +395,24 @@ def _manager_chat_training_query(
 
 def _serialize_chat_payload(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
+
+
+def _serialize_conversation_quality_signal(signal: ConversationQualitySignal) -> dict[str, Any]:
+    return {
+        "id": signal.id,
+        "session_id": signal.session_id,
+        "manager_id": signal.manager_id,
+        "org_id": signal.org_id,
+        "realism_rating": signal.realism_rating,
+        "difficulty_appropriate": signal.difficulty_appropriate,
+        "signal_responsiveness": signal.signal_responsiveness,
+        "notes": signal.notes,
+        "flagged_turn_ids": list(signal.flagged_turn_ids or []),
+        "exported_at": signal.exported_at.isoformat() if signal.exported_at else None,
+        "export_batch_id": signal.export_batch_id,
+        "created_at": signal.created_at.isoformat() if signal.created_at else None,
+        "updated_at": signal.updated_at.isoformat() if signal.updated_at else None,
+    }
 
 
 def _list_manager_team_reps(db: Session, manager: User) -> list[User]:
@@ -2339,6 +2367,87 @@ def get_manager_session_detail(
             else None
         ),
     }
+
+
+@router.post("/sessions/{session_id}/conversation-quality")
+def upsert_conversation_quality_signal(
+    session_id: str,
+    payload: ConversationQualitySignalRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+
+    manager = _get_user_or_404(db, actor.user_id, "manager")
+    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    rep = _get_user_or_404(db, session.rep_id, "rep")
+    _ensure_same_org(actor, manager.org_id)
+    if manager.org_id != rep.org_id:
+        raise HTTPException(status_code=403, detail="cross-organization access denied")
+
+    signal = db.scalar(
+        select(ConversationQualitySignal)
+        .where(
+            ConversationQualitySignal.session_id == session_id,
+            ConversationQualitySignal.manager_id == manager.id,
+        )
+        .order_by(ConversationQualitySignal.created_at.desc())
+    )
+    if signal is None:
+        signal = ConversationQualitySignal(
+            session_id=session_id,
+            manager_id=manager.id,
+            org_id=manager.org_id,
+        )
+        db.add(signal)
+
+    signal.realism_rating = payload.realism_rating
+    signal.difficulty_appropriate = payload.difficulty_appropriate
+    signal.signal_responsiveness = payload.signal_responsiveness
+    signal.notes = payload.notes
+    signal.flagged_turn_ids = [
+        item
+        for item in dict.fromkeys(str(turn_id).strip() for turn_id in payload.flagged_turn_ids)
+        if item
+    ]
+
+    db.commit()
+    db.refresh(signal)
+    return _serialize_conversation_quality_signal(signal)
+
+
+@router.get("/sessions/{session_id}/conversation-quality")
+def get_conversation_quality_signal(
+    session_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if not actor.user_id:
+        raise HTTPException(status_code=401, detail="authenticated actor required")
+
+    manager = _get_user_or_404(db, actor.user_id, "manager")
+    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    rep = _get_user_or_404(db, session.rep_id, "rep")
+    _ensure_same_org(actor, manager.org_id)
+    if manager.org_id != rep.org_id:
+        raise HTTPException(status_code=403, detail="cross-organization access denied")
+
+    signal = db.scalar(
+        select(ConversationQualitySignal)
+        .where(
+            ConversationQualitySignal.session_id == session_id,
+            ConversationQualitySignal.manager_id == manager.id,
+        )
+        .order_by(ConversationQualitySignal.created_at.desc())
+    )
+    if signal is None:
+        raise HTTPException(status_code=404, detail="conversation quality signal not found")
+    return _serialize_conversation_quality_signal(signal)
 
 
 @router.get("/sessions/{session_id}/audio")

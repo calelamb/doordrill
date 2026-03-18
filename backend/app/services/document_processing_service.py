@@ -139,7 +139,7 @@ class DocumentProcessingService:
                 response = client.post(
                     url,
                     headers=headers,
-                    json={"model": EMBEDDING_MODEL, "input": batch},
+                    json={"model": self.settings.embedding_model, "input": batch},
                 )
                 response.raise_for_status()
                 body = response.json()
