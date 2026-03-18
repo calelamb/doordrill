@@ -138,3 +138,64 @@ def test_document_retrieval_ranks_closest_chunk_and_enforces_org_isolation(clien
     assert all(item["document_id"] != other_document.id for item in body["chunks"])
 
 
+def test_retrieve_for_topic_uses_in_process_ttl_cache(seed_org, monkeypatch):
+    query_calls = {"count": 0}
+
+    def fake_embed(self, query):
+        query_calls["count"] += 1
+        return [0.8, 0.6, 0.0]
+
+    monkeypatch.setattr(DocumentRetrievalService, "_embed_query", fake_embed)
+
+    db = SessionLocal()
+    try:
+        document = OrgDocument(
+            org_id=seed_org["org_id"],
+            name="Pricing Cache Notes",
+            original_filename="pricing-cache.txt",
+            file_type=OrgDocumentFileType.TXT,
+            storage_key="org-documents/acme/pricing-cache.txt",
+            status=OrgDocumentStatus.READY,
+            chunk_count=1,
+            token_count=50,
+            uploaded_by=seed_org["manager_id"],
+        )
+        db.add(document)
+        db.flush()
+        db.add(
+            OrgDocumentChunk(
+                document_id=document.id,
+                org_id=seed_org["org_id"],
+                chunk_index=0,
+                text="Monthly pricing coverage and service details for homeowners.",
+                token_count=10,
+                embedding=[0.8, 0.6, 0.0],
+            )
+        )
+        db.commit()
+
+        service = DocumentRetrievalService()
+        first = service.retrieve_for_topic(
+            db,
+            org_id=seed_org["org_id"],
+            topic="monthly pricing coverage",
+            context_hint="Skeptical Homeowner",
+            k=3,
+            min_score=0.70,
+        )
+        second = service.retrieve_for_topic(
+            db,
+            org_id=seed_org["org_id"],
+            topic="monthly pricing coverage",
+            context_hint="Different Scenario Name",
+            k=3,
+            min_score=0.70,
+        )
+
+        assert first
+        assert second
+        assert query_calls["count"] == 1
+        assert second[0].chunk_id == first[0].chunk_id
+    finally:
+        db.close()
+

@@ -39,6 +39,8 @@ DEFAULT_STAGE_SEQUENCE = [
 ]
 EMOTION_ORDER = ["interested", "curious", "neutral", "skeptical", "annoyed", "hostile"]
 MAX_OBJECTION_PRESSURE = 5
+SYSTEM_PROMPT_SOFT_LIMIT_TOKENS = 1200
+SYSTEM_PROMPT_HARD_LIMIT_TOKENS = 1600
 ACKNOWLEDGEMENT_PHRASES = (
     "i understand",
     "i get it",
@@ -224,6 +226,16 @@ def invalidate_objection_cache() -> None:
     _OBJECTION_KEYWORDS_CACHE = None
 
 
+def measure_prompt_tokens(text: str) -> int:
+    try:
+        import tiktoken
+    except ImportError:
+        return max(1, len(text.split())) if text.strip() else 0
+
+    enc = tiktoken.get_encoding("cl100k_base")
+    return len(enc.encode(text))
+
+
 def _merge_keyword_tuples(*groups: tuple[str, ...]) -> tuple[str, ...]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -329,6 +341,7 @@ class ConversationState:
     objection_pressure: int = 0
     ignored_objection_streak: int = 0
     last_behavior_signals: list[str] = field(default_factory=list)
+    system_prompt_token_count: int = 0
     last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -547,6 +560,9 @@ class PromptBuilder:
         "ended": "ENDED",
     }
 
+    def __init__(self) -> None:
+        self.last_token_count = 0
+
     @classmethod
     def template_blueprint(cls) -> str:
         return (
@@ -726,7 +742,10 @@ class PromptBuilder:
         if layer_five:
             parts.append(layer_five)
         parts.append(hard_rule)
-        return "\n\n".join(parts)
+        parts = self._enforce_prompt_budget(parts)
+        prompt = "\n\n".join(parts)
+        self.last_token_count = measure_prompt_tokens(prompt)
+        return prompt
 
     def build_from_scenario(self, scenario: "Scenario | None", stage: str, prompt_version: str | None = None) -> str:
         snapshot = ScenarioSnapshot.from_scenario(scenario)
@@ -750,6 +769,21 @@ class PromptBuilder:
         if upper in self.STAGE_GUIDANCE:
             return upper
         return self.INTERNAL_STAGE_MAP.get(stage, "LISTENING")
+
+    def _enforce_prompt_budget(self, parts: list[str]) -> list[str]:
+        total = sum(measure_prompt_tokens(part) for part in parts)
+        if total > SYSTEM_PROMPT_HARD_LIMIT_TOKENS:
+            logger.warning(
+                "system_prompt_over_hard_limit",
+                extra={"token_count": total, "parts_count": len(parts)},
+            )
+            parts = [part for part in parts if "LAYER 4B" not in part]
+        elif total > SYSTEM_PROMPT_SOFT_LIMIT_TOKENS:
+            logger.info(
+                "system_prompt_over_soft_limit",
+                extra={"token_count": total},
+            )
+        return parts
 
     def _response_cap_rule(self, canonical_stage: str) -> str:
         if canonical_stage in {"DOOR_OPEN", "ENDED"}:
@@ -849,7 +883,11 @@ class ConversationOrchestrator:
             "active_objections": list(state.active_objections),
             "queued_objections": list(state.queued_objections),
             "resolved_objections": list(state.resolved_objections),
+            "system_prompt_token_count": state.system_prompt_token_count,
         }
+
+    def get_system_prompt_token_count(self, session_id: str) -> int:
+        return self.get_state(session_id).system_prompt_token_count
 
     def bind_session_context(
         self,
@@ -1111,6 +1149,8 @@ class ConversationOrchestrator:
                 behavior_directives=behavior_directives,
                 last_mb_context=resolved_last_mb_context,
             )
+            if state is not None:
+                state.system_prompt_token_count = self._prompt_builder.last_token_count
             return prompt
 
         fallback_snapshot = ScenarioSnapshot()
@@ -1118,7 +1158,7 @@ class ConversationOrchestrator:
             HomeownerPersona.from_payload(fallback_snapshot.persona_payload),
             fallback_snapshot,
         )
-        return self._prompt_builder.build(
+        prompt = self._prompt_builder.build(
             scenario=None,
             scenario_snapshot=fallback_snapshot,
             persona=fallback_persona,
@@ -1135,6 +1175,9 @@ class ConversationOrchestrator:
             behavior_directives=behavior_directives,
             last_mb_context=resolved_last_mb_context,
         )
+        if state is not None:
+            state.system_prompt_token_count = self._prompt_builder.last_token_count
+        return prompt
 
     def _enrich_persona(self, persona: HomeownerPersona, snapshot: ScenarioSnapshot) -> HomeownerPersona:
         return PersonaEnricher.enrich(persona, snapshot.difficulty, snapshot.description)

@@ -87,3 +87,38 @@ def test_bind_session_context_loads_prompt_content_from_matching_prompt_version(
 
     context = orchestrator._contexts["session-override-test"]
     assert context.conversation_prompt_content == "Use one follow-up question before returning to objection mode."
+
+
+def test_prompt_builder_trims_layer_4b_when_prompt_exceeds_hard_limit():
+    builder = PromptBuilder()
+    prompt = builder.build(
+        scenario=None,
+        persona=_persona(),
+        stage="objection_handling",
+        prompt_version="conversation_v2",
+        conversation_prompt_content="pricing proof " * 2200,
+        active_edge_cases=["premature_close"],
+    )
+
+    assert "LAYER 4B - EDGE CASE DIRECTIVES" not in prompt
+    assert builder.last_token_count > 0
+
+
+def test_prepare_rep_turn_updates_system_prompt_token_count_on_session_state():
+    orchestrator = ConversationOrchestrator()
+    orchestrator.initialize_session(
+        "session-token-count",
+        scenario_name="Skeptical Homeowner",
+        scenario_description="Rep handles monthly service concerns.",
+        difficulty=2,
+        persona={"attitude": "skeptical", "concerns": ["price", "trust"]},
+        stages=["door_knock", "initial_pitch", "objection_handling", "close_attempt"],
+    )
+
+    orchestrator.prepare_rep_turn(
+        "session-token-count",
+        "Hi, I understand price matters and I appreciate your time. We can save you money.",
+    )
+
+    payload = orchestrator.get_state_payload("session-token-count")
+    assert payload["system_prompt_token_count"] > 0

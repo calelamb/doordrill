@@ -189,3 +189,67 @@ def test_ws_vad_end_triggers_stt_finalization_and_logs_latency(client, seed_org,
     assert latency_records
     assert latency_records[0].turn_index >= 1
     assert latency_records[0].total_ms >= 0
+
+
+def test_ws_session_state_includes_system_prompt_token_count(client, seed_org, monkeypatch):
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=MockSttClient(), llm=MockLlmClient(), tts=MockTtsClient()),
+    )
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+        assert "system_prompt_token_count" in connected["payload"]
+
+        turn_messages = _run_turn(ws, text="Hi, I'm with Acme Pest Control.", sequence=1)
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    state_payloads = [message["payload"] for message in turn_messages if message["type"] == "server.session.state"]
+    assert any(payload.get("system_prompt_token_count", 0) > 0 for payload in state_payloads)
+
+
+def test_ws_barge_in_emits_audio_interrupt(client, seed_org, monkeypatch):
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=MockSttClient(), llm=MockLlmClient(), tts=MockTtsClient()),
+    )
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 1,
+                "payload": {
+                    "transcript_hint": "Hi, I'm with Acme Pest Control. We can lower your service price today.",
+                    "codec": "opus",
+                },
+            }
+        )
+
+        messages: list[dict] = []
+        barge_in_sent = False
+        for _ in range(200):
+            message = ws.receive_json()
+            messages.append(message)
+            if message["type"] == "server.ai.audio.chunk" and not barge_in_sent:
+                ws.send_json({"type": "client.vad.state", "sequence": 2, "payload": {"speaking": True}})
+                barge_in_sent = True
+            if message["type"] == "server.turn.committed":
+                break
+
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    assert barge_in_sent is True
+    assert any(message["type"] == "server.audio.interrupt" for message in messages)

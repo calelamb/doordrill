@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -61,6 +61,8 @@ storage_service = StorageService()
 
 SILENCE_FILLER_SECONDS = 4.0
 VAD_FINALIZE_DEBOUNCE_MS = 80
+FLUSH_INTERVAL_ACTIVE_MS = 200
+FLUSH_INTERVAL_IDLE_MS = 400
 MAX_RUNTIME_PAUSE_MS = 60
 TTS_STREAM_TIMEOUT_SECONDS = 6
 WS_KEEPALIVE_TIMEOUT_SECONDS = 120
@@ -72,6 +74,8 @@ class SessionRuntimeState:
     _vad_end_pending: bool = False
     vad_finalize_task: asyncio.Task[None] | None = None
     turn_latency: TurnLatencyRecord | None = None
+    active_tts_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    barge_in_started_at: float | None = None
 
 
 def homeowner_token_budget(stage: str) -> int:
@@ -189,31 +193,42 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     company_context: str | None = None
     company_context_chunk_count = 0
     if rep is not None and rep.org_id:
+        rep_org_id = rep.org_id
         retrieval_service = DocumentRetrievalService(settings=settings)
         try:
-            if retrieval_service.has_ready_documents(db, org_id=rep.org_id):
+            if retrieval_service.has_ready_documents(db, org_id=rep_org_id):
                 loop = asyncio.get_event_loop()
                 context_hint = scenario.name if scenario is not None else ""
-                pricing_chunks = await loop.run_in_executor(
-                    None,
-                    lambda: retrieval_service.retrieve_for_topic(
-                        db,
-                        org_id=rep.org_id,
-                        topic="pest control services pricing monthly plan what is included coverage",
-                        context_hint=context_hint,
-                        k=3,
-                        min_score=0.65,
+                def retrieve_topic(topic: str, *, k: int, min_score: float) -> list[RetrievedChunk]:
+                    worker_db = SessionLocal()
+                    try:
+                        return retrieval_service.retrieve_for_topic(
+                            worker_db,
+                            org_id=rep_org_id,
+                            topic=topic,
+                            context_hint=context_hint,
+                            k=k,
+                            min_score=min_score,
+                        )
+                    finally:
+                        worker_db.close()
+
+                pricing_chunks, competitor_chunks = await asyncio.gather(
+                    loop.run_in_executor(
+                        None,
+                        lambda: retrieve_topic(
+                            "pest control services pricing monthly plan what is included coverage",
+                            k=3,
+                            min_score=0.65,
+                        ),
                     ),
-                )
-                competitor_chunks = await loop.run_in_executor(
-                    None,
-                    lambda: retrieval_service.retrieve_for_topic(
-                        db,
-                        org_id=rep.org_id,
-                        topic="competitor comparison why choose us reviews common objections",
-                        context_hint=context_hint,
-                        k=2,
-                        min_score=0.65,
+                    loop.run_in_executor(
+                        None,
+                        lambda: retrieve_topic(
+                            "competitor comparison why choose us reviews common objections",
+                            k=2,
+                            min_score=0.65,
+                        ),
                     ),
                 )
                 combined_chunks = _dedupe_retrieved_chunks([*pricing_chunks, *competitor_chunks])
@@ -226,7 +241,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             logger.warning(
                 "Failed to load homeowner company context",
                 exc_info=True,
-                extra={"session_id": session_id, "trace_id": ws_trace_id, "org_id": rep.org_id},
+                extra={"session_id": session_id, "trace_id": ws_trace_id, "org_id": rep_org_id},
             )
             company_context = None
             company_context_chunk_count = 0
@@ -308,10 +323,22 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             if runtime_state.vad_finalize_task is asyncio.current_task():
                 runtime_state.vad_finalize_task = None
 
+    def _track_tts_task(task: asyncio.Task[None]) -> asyncio.Task[None]:
+        runtime_state.active_tts_tasks.add(task)
+        task.add_done_callback(runtime_state.active_tts_tasks.discard)
+        return task
+
+    def _commit_turn_updates() -> None:
+        db.commit()
+
     async def maybe_flush(force: bool = False) -> None:
         nonlocal last_flush
         now = time.monotonic()
-        interval = settings.ws_flush_interval_ms / 1000
+        record = runtime_state.turn_latency
+        active_phase = ai_speaking or runtime_state._vad_end_pending or (
+            record is not None and record.vad_end_ts is not None and record.first_audio_byte_ts is None
+        )
+        interval = (FLUSH_INTERVAL_ACTIVE_MS if active_phase else FLUSH_INTERVAL_IDLE_MS) / 1000
         if force or (now - last_flush) >= interval:
             await ledger.flush_buffered_events(db, session_id=session_id, max_n=settings.max_ws_event_batch)
             last_flush = now
@@ -345,7 +372,12 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         )
 
     async def emit_session_state(payload: dict[str, Any]) -> None:
-        await emit_server_event("server.session.state", {"session_id": session_id, "trace_id": ws_trace_id, **payload})
+        enriched_payload = dict(payload)
+        enriched_payload.setdefault("system_prompt_token_count", orchestrator.get_system_prompt_token_count(session_id))
+        await emit_server_event(
+            "server.session.state",
+            {"session_id": session_id, "trace_id": ws_trace_id, **enriched_payload},
+        )
 
     async def emit_error(code: str, message: str, *, retryable: bool = True, details: dict[str, Any] | None = None) -> None:
         payload = {"code": code, "message": message, "retryable": retryable, "trace_id": ws_trace_id}
@@ -353,12 +385,36 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             payload["details"] = details
         await emit_server_event("server.error", payload)
 
-    def set_interrupt(reason: str, ts: datetime | None = None) -> None:
+    async def set_interrupt(reason: str, ts: datetime | None = None) -> None:
         nonlocal interrupt_signal_at, interrupt_signal_reason
         if interrupt_signal_at is not None:
             return
         interrupt_signal_at = ts or datetime.now(timezone.utc)
         interrupt_signal_reason = reason
+        if not ai_speaking:
+            return
+        for task in list(runtime_state.active_tts_tasks):
+            task.cancel()
+        runtime_state.active_tts_tasks.clear()
+        if reason == "vad_speaking":
+            runtime_state.barge_in_started_at = _monotonic_ts()
+            logger.info(
+                "barge_in_detected",
+                extra={
+                    "session_id": session_id,
+                    "trace_id": ws_trace_id,
+                    "reason": reason,
+                    "ts": runtime_state.barge_in_started_at,
+                },
+            )
+        await emit_server_event(
+            "server.audio.interrupt",
+            {
+                "reason": reason,
+                "at": interrupt_signal_at.isoformat(),
+                "trace_id": ws_trace_id,
+            },
+        )
 
     def consume_interrupt() -> tuple[datetime | None, str | None]:
         nonlocal interrupt_signal_at, interrupt_signal_reason
@@ -388,6 +444,18 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             text = str(transcript).strip()
             if not text:
                 return
+            if runtime_state.barge_in_started_at is not None:
+                now = _monotonic_ts()
+                logger.info(
+                    "barge_in_stt_first_partial",
+                    extra={
+                        "session_id": session_id,
+                        "trace_id": ws_trace_id,
+                        "ts": now,
+                        "latency_ms": round((now - runtime_state.barge_in_started_at) * 1000),
+                    },
+                )
+                runtime_state.barge_in_started_at = None
             with contextlib.suppress(asyncio.QueueFull):
                 partials.put_nowait(text)
 
@@ -712,7 +780,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             await maybe_flush()
             if record is not None and record.tts_task_created_ts is None:
                 record.tts_task_created_ts = _monotonic_ts()
-            tts_tasks.append(asyncio.create_task(stream_tts_for_plan(plan)))
+            tts_tasks.append(_track_tts_task(asyncio.create_task(stream_tts_for_plan(plan))))
             logger.info(
                 "tts_task_created",
                 extra={
@@ -858,8 +926,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             )
             if ai_turn.speaker == TurnSpeaker.AI:
                 ai_turn.system_prompt_snapshot = _compress_prompt(system_prompt)
-                db.commit()
-                db.refresh(ai_turn)
+                _commit_turn_updates()
             await emit_server_event(
                 "server.turn.committed",
                 {
@@ -910,7 +977,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 if speaking:
                     runtime_state._vad_end_pending = False
                     _cancel_vad_finalize_task()
-                    set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
+                    await set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
                 else:
                     runtime_state._vad_end_pending = True
                     record = _start_turn_latency() if _should_start_new_turn_latency() else _get_turn_latency()
@@ -919,7 +986,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     _cancel_vad_finalize_task()
                     runtime_state.vad_finalize_task = asyncio.create_task(_run_vad_finalize_debounce())
             elif ai_speaking and msg.type == "client.audio.chunk":
-                set_interrupt("audio_chunk", _normalize_ts(msg.timestamp))
+                await set_interrupt("audio_chunk", _normalize_ts(msg.timestamp))
 
             if msg.type == "client.session.end":
                 disconnected.set()
@@ -982,7 +1049,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             if msg.type == "client.vad.state":
                 speaking = bool(msg.payload.get("speaking", False))
                 if speaking and ai_speaking:
-                    set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
+                    await set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
                 await emit_session_state({"state": "rep_speaking" if speaking else "rep_idle"})
                 await maybe_flush()
                 continue
@@ -999,7 +1066,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
             stt_result = await run_stt(msg)
             if stt_result is None:
+                runtime_state.barge_in_started_at = None
                 continue
+            runtime_state.barge_in_started_at = None
             rep_text = stt_result.text
             if not rep_text:
                 await emit_server_event(
@@ -1131,8 +1200,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             )
             if ai_turn.speaker == TurnSpeaker.AI:
                 ai_turn.system_prompt_snapshot = _compress_prompt(plan.system_prompt)
-                db.commit()
-                db.refresh(ai_turn)
+                _commit_turn_updates()
 
             turn_payload = {
                 "rep_turn_id": rep_turn.id,

@@ -479,6 +479,12 @@ export function SessionScreen({ route, navigation }: Props) {
       return;
     }
 
+    if (event.type === "server.audio.interrupt") {
+      showInterruptCue("You interrupted the homeowner");
+      void cancelAudioPlayback();
+      return;
+    }
+
     if (event.type === "server.error") {
       setError(String(event.payload.message ?? "Session error"));
     }

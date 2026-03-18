@@ -5,7 +5,9 @@ import inspect
 import math
 import os
 import re
+import threading
 
+from cachetools import TTLCache
 import httpx
 from sqlalchemy import or_, select
 from sqlalchemy import text as sql_text
@@ -23,6 +25,9 @@ KEYWORD_RE = re.compile(r"[a-z0-9]{3,}")
 
 
 class DocumentRetrievalService:
+    TOPIC_RESULT_CACHE_TTL_SECONDS = 300
+    TOPIC_RESULT_CACHE_MAX_ENTRIES = 256
+
     def __init__(
         self,
         *,
@@ -37,6 +42,11 @@ class DocumentRetrievalService:
             ttl_seconds=900,
             max_entries=self.settings.management_analytics_cache_max_entries,
         )
+        self._topic_result_cache: TTLCache[tuple[str, str, int], list[RetrievedChunk]] = TTLCache(
+            maxsize=self.TOPIC_RESULT_CACHE_MAX_ENTRIES,
+            ttl=self.TOPIC_RESULT_CACHE_TTL_SECONDS,
+        )
+        self._topic_result_cache_lock = threading.RLock()
 
     def has_ready_documents(self, db: Session, *, org_id: str) -> bool:
         row = db.scalar(
@@ -100,6 +110,11 @@ class DocumentRetrievalService:
         if not self.has_ready_documents(db, org_id=org_id):
             return []
 
+        cache_key = (str(org_id), " ".join(topic.split()).strip().lower(), int(k))
+        cached_rows = self._get_cached_topic_results(cache_key)
+        if cached_rows is not None:
+            return [row for row in cached_rows if row.similarity_score >= min_score]
+
         rows: list[RetrievedChunk]
         query_vector: list[float] | None = None
         try:
@@ -116,7 +131,19 @@ class DocumentRetrievalService:
         else:
             rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
 
+        self._set_cached_topic_results(cache_key, rows)
         return [row for row in rows if row.similarity_score >= min_score]
+
+    def _get_cached_topic_results(self, cache_key: tuple[str, str, int]) -> list[RetrievedChunk] | None:
+        with self._topic_result_cache_lock:
+            cached_rows = self._topic_result_cache.get(cache_key)
+            if cached_rows is None:
+                return None
+            return [row.model_copy(deep=True) for row in cached_rows]
+
+    def _set_cached_topic_results(self, cache_key: tuple[str, str, int], rows: list[RetrievedChunk]) -> None:
+        with self._topic_result_cache_lock:
+            self._topic_result_cache[cache_key] = [row.model_copy(deep=True) for row in rows]
 
     def format_for_prompt(self, chunks: list[RetrievedChunk], max_tokens: int = 1200) -> str:
         if not chunks:
