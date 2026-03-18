@@ -32,6 +32,8 @@ export function RepPanel() {
   const socketRef = useRef<WebSocket | null>(null);
   const sequenceRef = useRef(1);
   const eventIndexRef = useRef(1);
+  const endSessionResolverRef = useRef<(() => void) | null>(null);
+  const endSessionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [repId, setRepId] = useState("");
   const [assignments, setAssignments] = useState<RepAssignment[]>([]);
@@ -60,6 +62,34 @@ export function RepPanel() {
       payload
     };
     setLiveEvents((items) => [event, ...items].slice(0, MAX_LIVE_EVENTS));
+  }
+
+  function resolvePendingSessionEnd() {
+    if (endSessionTimerRef.current) {
+      clearTimeout(endSessionTimerRef.current);
+      endSessionTimerRef.current = null;
+    }
+    const resolver = endSessionResolverRef.current;
+    endSessionResolverRef.current = null;
+    if (resolver) {
+      resolver();
+    }
+  }
+
+  async function waitForSessionEnded(timeoutMs = 4000) {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      endSessionResolverRef.current = () => {
+        endSessionResolverRef.current = null;
+        resolve();
+      };
+      endSessionTimerRef.current = setTimeout(() => {
+        resolvePendingSessionEnd();
+      }, timeoutMs);
+    });
   }
 
   function closeSocket(sendSessionEnd: boolean) {
@@ -140,6 +170,7 @@ export function RepPanel() {
     };
 
     ws.onclose = () => {
+      resolvePendingSessionEnd();
       setLiveConnected(false);
       setLiveStatus("disconnected");
       addLiveEvent("client.disconnected", { session_id: activeSessionId });
@@ -172,6 +203,10 @@ export function RepPanel() {
 
       if (eventType === "server.session.state" && payload.state === "ai_speaking") {
         setAiLiveText("");
+      }
+
+      if (eventType === "server.session.state" && payload.state === "ended") {
+        resolvePendingSessionEnd();
       }
 
       if (eventType === "server.turn.committed") {
@@ -211,7 +246,12 @@ export function RepPanel() {
   }
 
   async function endLiveSession() {
-    closeSocket(true);
+    const ws = socketRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "client.session.end", sequence: nextSequence(), payload: {} }));
+      await waitForSessionEnded();
+    }
+    closeSocket(false);
     await refreshActiveSession();
     await loadAssignments();
   }

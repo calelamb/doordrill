@@ -18,8 +18,10 @@ engine = create_engine(
     echo=False,
     future=True,
     pool_pre_ping=True,
-    pool_size=10 if not is_sqlite else 1,
-    max_overflow=20 if not is_sqlite else 0,
+    # SQLite is heavily used in local dev and tests; a single pooled
+    # connection causes dashboard streams to starve normal API requests.
+    pool_size=10 if not is_sqlite else 5,
+    max_overflow=20 if not is_sqlite else 5,
     pool_timeout=30,
     pool_recycle=1800,
     connect_args=connect_args,

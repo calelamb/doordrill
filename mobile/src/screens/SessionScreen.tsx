@@ -180,6 +180,8 @@ export function SessionScreen({ route, navigation }: Props) {
   const drainingAudioRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
   const recordingRef = useRef(false);
+  const endSessionWaitResolverRef = useRef<(() => void) | null>(null);
+  const endSessionWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ignoreNextCloseRef = useRef(false);
   const manualCloseRef = useRef(false);
   const speechDetectedRef = useRef(false);
@@ -388,7 +390,35 @@ export function SessionScreen({ route, navigation }: Props) {
     }, RECONNECT_DELAYS_MS[nextAttempt - 1]);
   }
 
+  function resolveEndSessionWait() {
+    if (endSessionWaitTimerRef.current) {
+      clearTimeout(endSessionWaitTimerRef.current);
+      endSessionWaitTimerRef.current = null;
+    }
+    const resolver = endSessionWaitResolverRef.current;
+    endSessionWaitResolverRef.current = null;
+    if (resolver) {
+      resolver();
+    }
+  }
+
+  async function waitForSessionEnded(timeoutMs = 4000) {
+    if (!wsClientRef.current?.isConnected()) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      endSessionWaitResolverRef.current = () => {
+        endSessionWaitResolverRef.current = null;
+        resolve();
+      };
+      endSessionWaitTimerRef.current = setTimeout(() => {
+        resolveEndSessionWait();
+      }, timeoutMs);
+    });
+  }
+
   function handleSocketClosed() {
+    resolveEndSessionWait();
     if (ignoreNextCloseRef.current) {
       ignoreNextCloseRef.current = false;
       return;
@@ -439,6 +469,19 @@ export function SessionScreen({ route, navigation }: Props) {
       if (nextState === "rep_idle") {
         setStatusLabel("Listening...");
         scheduleWaitingNudge();
+        return;
+      }
+
+      if (nextState === "ending") {
+        setStatusLabel("Wrapping up...");
+        clearWaitingNudgeTimer();
+        return;
+      }
+
+      if (nextState === "ended") {
+        setStatusLabel("Session saved");
+        clearWaitingNudgeTimer();
+        resolveEndSessionWait();
         return;
       }
 
@@ -605,6 +648,7 @@ export function SessionScreen({ route, navigation }: Props) {
     } catch {
       // Ignore send failures during shutdown.
     }
+    await waitForSessionEnded();
     ignoreNextCloseRef.current = true;
     wsClientRef.current?.close();
     wsClientRef.current = null;
@@ -655,6 +699,7 @@ export function SessionScreen({ route, navigation }: Props) {
       if (interruptionTimerRef.current) {
         clearTimeout(interruptionTimerRef.current);
       }
+      resolveEndSessionWait();
       ignoreNextCloseRef.current = true;
       wsClientRef.current?.close();
       wsClientRef.current = null;

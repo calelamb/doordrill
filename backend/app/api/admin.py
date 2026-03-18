@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import uuid
 import zlib
 from datetime import date, datetime, time, timezone
@@ -14,19 +15,23 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_manager
 from app.db.session import get_db
+from app.models.assignment import Assignment
 from app.models.grading import GradingRun
+from app.models.postprocess_run import PostprocessRun
 from app.models.prompt_version import PromptVersion
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
-from app.models.session import SessionTurn
-from app.models.training import ConversationQualitySignal, OverrideLabel, PromptExperiment
+from app.models.session import SessionArtifact, SessionTurn
+from app.models.training import AdaptiveRecommendationOutcome, ConversationQualitySignal, OverrideLabel, PromptExperiment
 from app.models.types import SessionStatus, TurnSpeaker
 from app.models.user import User
+from app.services.conversation_orchestrator import measure_prompt_tokens
 from app.services.prompt_experiment_service import PromptExperimentService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 prompt_experiment_service = PromptExperimentService()
+COMPANY_DOC_RE = re.compile(r"\[From: ([^\]]+)\]")
 
 
 class PromptExperimentCreateRequest(BaseModel):
@@ -102,6 +107,30 @@ def _quality_filter(label_quality: str) -> set[str]:
 
 def _decompress_prompt(text: str) -> str:
     return zlib.decompress(base64.b64decode(text.encode("ascii"))).decode("utf-8")
+
+
+def _extract_company_doc_names(text: str | None) -> list[str]:
+    if not text:
+        return []
+
+    seen: set[str] = set()
+    names: list[str] = []
+    for raw in COMPANY_DOC_RE.findall(text):
+        name = str(raw).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _serialize_postprocess_run(run: PostprocessRun) -> dict:
+    return {
+        "status": run.status,
+        "attempts": int(run.attempts),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "last_error": run.last_error,
+    }
 
 
 def _serialize_prompt_experiment(experiment: PromptExperiment) -> dict:
@@ -305,6 +334,126 @@ def promote_prompt_experiment_winner(
     db.commit()
     db.refresh(experiment)
     return _serialize_prompt_experiment(experiment)
+
+
+@router.get("/sessions/{session_id}/training-loop-audit")
+def get_training_loop_audit(
+    session_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    rep = db.scalar(select(User).where(User.id == session.rep_id))
+    if actor.role != "admin" and actor.org_id is not None and rep is not None and rep.org_id != actor.org_id:
+        raise HTTPException(status_code=403, detail="cannot access session outside your organization")
+
+    assignment = db.scalar(select(Assignment).where(Assignment.id == session.assignment_id))
+    scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
+    artifacts = db.scalars(select(SessionArtifact).where(SessionArtifact.session_id == session_id)).all()
+    postprocess_runs = db.scalars(
+        select(PostprocessRun)
+        .where(PostprocessRun.session_id == session_id)
+        .order_by(PostprocessRun.task_type.asc())
+    ).all()
+    latest_ai_turn = db.scalar(
+        select(SessionTurn)
+        .where(
+            SessionTurn.session_id == session_id,
+            SessionTurn.speaker == TurnSpeaker.AI,
+            SessionTurn.system_prompt_snapshot.is_not(None),
+        )
+        .order_by(SessionTurn.turn_index.desc())
+    )
+    latest_grading_run = db.scalar(
+        select(GradingRun)
+        .where(GradingRun.session_id == session_id)
+        .order_by(GradingRun.completed_at.desc(), GradingRun.created_at.desc())
+    )
+    adaptive_outcome = db.scalar(
+        select(AdaptiveRecommendationOutcome)
+        .where(AdaptiveRecommendationOutcome.assignment_id == session.assignment_id)
+        .order_by(AdaptiveRecommendationOutcome.created_at.desc())
+    )
+
+    latest_prompt = None
+    prompt_doc_names: list[str] = []
+    if latest_ai_turn is not None and latest_ai_turn.system_prompt_snapshot:
+        latest_prompt = _decompress_prompt(latest_ai_turn.system_prompt_snapshot)
+        prompt_doc_names = _extract_company_doc_names(latest_prompt)
+
+    grading_text = latest_grading_run.raw_llm_response if latest_grading_run is not None else None
+    grading_doc_names = _extract_company_doc_names(grading_text)
+
+    adaptive_metadata: dict = {}
+    if assignment is not None and isinstance(assignment.retry_policy, dict):
+        maybe_metadata = assignment.retry_policy.get("adaptive_training")
+        if isinstance(maybe_metadata, dict):
+            adaptive_metadata = maybe_metadata
+
+    transcript_artifacts = [artifact for artifact in artifacts if artifact.artifact_type == "canonical_transcript"]
+    audio_artifacts = [artifact for artifact in artifacts if artifact.artifact_type == "audio"]
+
+    return {
+        "session": {
+            "id": session.id,
+            "assignment_id": session.assignment_id,
+            "rep_id": session.rep_id,
+            "scenario_id": session.scenario_id,
+            "status": session.status.value if isinstance(session.status, SessionStatus) else str(session.status),
+            "prompt_version": session.prompt_version,
+            "started_at": session.started_at.isoformat() if session.started_at else None,
+            "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        },
+        "finalization": {
+            "transcript_artifact_present": bool(transcript_artifacts),
+            "transcript_artifact_count": len(transcript_artifacts),
+            "audio_artifact_count": len(audio_artifacts),
+            "scorecard_present": scorecard is not None,
+            "latest_grading_run_status": latest_grading_run.status if latest_grading_run is not None else None,
+            "postprocess_runs": {
+                run.task_type: _serialize_postprocess_run(run)
+                for run in postprocess_runs
+            },
+        },
+        "prompt_audit": {
+            "has_prompt_snapshot": latest_prompt is not None,
+            "turn_id": latest_ai_turn.id if latest_ai_turn is not None else None,
+            "turn_index": latest_ai_turn.turn_index if latest_ai_turn is not None else None,
+            "has_company_context": bool(latest_prompt and "LAYER 5 - WHAT YOU MAY KNOW ABOUT THIS COMPANY" in latest_prompt),
+            "company_doc_names": prompt_doc_names,
+            "has_behavior_directives": bool(latest_prompt and "LAYER 3C - BEHAVIORAL DIRECTIVES" in latest_prompt),
+            "has_prior_turn_register": bool(latest_prompt and "LAYER 3B-CONT - PRIOR TURN REGISTER" in latest_prompt),
+            "prompt_token_count": measure_prompt_tokens(latest_prompt or "") if latest_prompt is not None else None,
+        },
+        "grading_audit": {
+            "grading_run_id": latest_grading_run.id if latest_grading_run is not None else None,
+            "grading_run_status": latest_grading_run.status if latest_grading_run is not None else None,
+            "prompt_version_id": latest_grading_run.prompt_version_id if latest_grading_run is not None else None,
+            "prompt_version": latest_grading_run.prompt_version.version if latest_grading_run is not None else None,
+            "raw_llm_response_present": bool(grading_text),
+            "has_company_training_material": bool(grading_text and "=== Company Training Material ===" in grading_text),
+            "company_doc_names": grading_doc_names,
+        },
+        "adaptive_audit": {
+            "has_adaptive_metadata": bool(adaptive_metadata),
+            "focus_skills": [
+                str(skill)
+                for skill in adaptive_metadata.get("recommended_focus_skills", [])
+                if isinstance(skill, str) and skill
+            ],
+            "baseline_skill_scores_present": bool(adaptive_metadata.get("baseline_skill_scores")),
+            "outcome_present": adaptive_outcome is not None,
+            "outcome_written_at": (
+                adaptive_outcome.outcome_written_at.isoformat()
+                if adaptive_outcome is not None and adaptive_outcome.outcome_written_at
+                else None
+            ),
+            "skill_delta_present": bool(adaptive_outcome is not None and adaptive_outcome.skill_delta),
+        },
+    }
 
 
 @router.get("/training-signals/export")

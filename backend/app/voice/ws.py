@@ -121,6 +121,16 @@ def _compress_prompt(text: str) -> str:
     return base64.b64encode(zlib.compress(text.encode("utf-8"), level=6)).decode("ascii")
 
 
+async def _await_task_resilient(task: asyncio.Task[Any]) -> Any:
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return await task
+            continue
+
+
 async def _send_event(websocket: WebSocket, event_type: str, payload: dict[str, Any], sequence: int) -> None:
     await websocket.send_json(
         {
@@ -526,6 +536,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         last_behavior_plan: MicroBehaviorPlan | None = None
         tts_tasks: list[asyncio.Task[None]] = []
         tts_emit_lock = asyncio.Lock()
+        first_tts_audio_started = asyncio.Event()
         persona_voice_id = None
         if scenario is not None and isinstance(scenario.persona, dict):
             raw_voice_id = scenario.persona.get("voice_id")
@@ -683,6 +694,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                                                 "elapsed_from_t0_ms": int((_t_after - _task_start_time) * 1000),
                                             },
                                         )
+                                        first_tts_audio_started.set()
                                     await asyncio.sleep(0)
                                     if not _first_chunk_logged:
                                         _first_chunk_logged = True
@@ -700,6 +712,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                                 },
                             )
                         except asyncio.CancelledError:
+                            if interrupt_signal_at is not None:
+                                ai_interrupted = True
                             return
                         except Exception as exc:
                             logger.exception(
@@ -789,6 +803,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "lock_locked": tts_emit_lock.locked(),
                 },
             )
+            if len(tts_tasks) == 1 and not first_tts_audio_started.is_set():
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(first_tts_audio_started.wait(), timeout=0.2)
 
         sentence_buffer = ""
         try:
@@ -845,6 +862,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 for task in tts_tasks:
                     task.cancel()
                 await asyncio.gather(*tts_tasks, return_exceptions=True)
+
+        if interrupt_signal_at is not None:
+            ai_interrupted = True
 
         duration_ms = max(
             120,
@@ -1018,6 +1038,86 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 break
 
     keepalive_task = asyncio.create_task(keepalive_loop())
+    finalization_task: asyncio.Task[None] | None = None
+
+    async def finalize_session() -> None:
+        try:
+            active_tts_tasks = list(runtime_state.active_tts_tasks)
+            if active_tts_tasks:
+                for task in active_tts_tasks:
+                    task.cancel()
+                await asyncio.gather(*active_tts_tasks, return_exceptions=True)
+                runtime_state.active_tts_tasks.clear()
+
+            await maybe_flush(force=True)
+            transcript_artifact = ledger.compact_session(db, session_id)
+            audio_storage_key = f"sessions/{session_id}/session_audio.opus"
+            audio_upload = storage_service.upload_audio(audio_storage_key, content_type="audio/ogg")
+
+            db.add(
+                SessionArtifact(
+                    session_id=session_id,
+                    artifact_type="audio",
+                    storage_key=audio_storage_key,
+                    metadata_json={
+                        "codec": "opus",
+                        "channels": 1,
+                        "frame_count": audio_frame_count,
+                        "duration_ms": total_audio_duration_ms,
+                        "barge_in_count": barge_in_count,
+                        "provider": providers.tts.provider_name,
+                        "upload": audio_upload,
+                    },
+                )
+            )
+
+            finalized_session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+            if finalized_session is not None:
+                finalized_session.status = SessionStatus.PROCESSING
+                ended_at = datetime.now(timezone.utc)
+                finalized_session.ended_at = ended_at
+                if finalized_session.started_at:
+                    started_at = finalized_session.started_at
+                    if started_at.tzinfo is None:
+                        started_at = started_at.replace(tzinfo=timezone.utc)
+                    finalized_session.duration_seconds = int((ended_at - started_at).total_seconds())
+
+            assignment = (
+                db.scalar(select(Assignment).where(Assignment.id == finalized_session.assignment_id))
+                if finalized_session is not None
+                else None
+            )
+            if assignment is not None:
+                assignment.status = AssignmentStatus.COMPLETED
+            db.commit()
+
+            postprocess_result = None
+            if finalized_session is not None:
+                postprocess_result = await postprocess_service.enqueue_or_run(db, session_id=session_id)
+
+            logger.info(
+                "Session finalized",
+                extra={
+                    "session_id": session_id,
+                    "transcript_artifact": transcript_artifact.storage_key,
+                    "audio_frames": audio_frame_count,
+                    "barge_in_count": barge_in_count,
+                    "postprocess_mode": postprocess_result["mode"] if postprocess_result else "none",
+                    "trace_id": ws_trace_id,
+                },
+            )
+        except Exception:  # pragma: no cover
+            logger.exception("Failed to finalize websocket session", extra={"session_id": session_id, "trace_id": ws_trace_id})
+            db.rollback()
+
+    async def run_finalization_once(*, resilient: bool) -> None:
+        nonlocal finalization_task
+        if finalization_task is None:
+            finalization_task = asyncio.create_task(finalize_session())
+        if resilient:
+            await _await_task_resilient(finalization_task)
+        else:
+            await finalization_task
 
     try:
         await emit_session_state({"state": "connected", **orchestrator.get_state_payload(session_id)})
@@ -1055,6 +1155,15 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 continue
 
             if msg.type == "client.session.end":
+                with contextlib.suppress(Exception):
+                    await emit_session_state({"state": "ending"})
+                    await maybe_flush(force=True)
+                await run_finalization_once(resilient=False)
+                with contextlib.suppress(Exception):
+                    await emit_session_state({"state": "ended"})
+                    await maybe_flush(force=True)
+                with contextlib.suppress(Exception):
+                    await websocket.close(code=1000)
                 break
 
             has_rep_audio = True
@@ -1244,64 +1353,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             logger.exception("Keepalive task cleanup error", extra={"session_id": session_id, "trace_id": ws_trace_id})
 
         try:
-            await maybe_flush(force=True)
-            transcript_artifact = ledger.compact_session(db, session_id)
-            audio_storage_key = f"sessions/{session_id}/session_audio.opus"
-            audio_upload = storage_service.upload_audio(audio_storage_key, content_type="audio/ogg")
-
-            db.add(
-                SessionArtifact(
-                    session_id=session_id,
-                    artifact_type="audio",
-                    storage_key=audio_storage_key,
-                    metadata_json={
-                        "codec": "opus",
-                        "channels": 1,
-                        "frame_count": audio_frame_count,
-                        "duration_ms": total_audio_duration_ms,
-                        "barge_in_count": barge_in_count,
-                        "provider": providers.tts.provider_name,
-                        "upload": audio_upload,
-                    },
-                )
-            )
-
-            session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
-            if session is not None:
-                session.status = SessionStatus.PROCESSING
-                ended_at = datetime.now(timezone.utc)
-                session.ended_at = ended_at
-                if session.started_at:
-                    started_at = session.started_at
-                    if started_at.tzinfo is None:
-                        started_at = started_at.replace(tzinfo=timezone.utc)
-                    session.duration_seconds = int((ended_at - started_at).total_seconds())
-
-            assignment = db.scalar(select(Assignment).where(Assignment.id == session.assignment_id)) if session else None
-            if assignment is not None:
-                assignment.status = AssignmentStatus.COMPLETED
-            db.commit()
-
-            postprocess_result = None
-            if session is not None:
-                postprocess_result = await postprocess_service.enqueue_or_run(db, session_id=session_id)
-
-            logger.info(
-                "Session finalized",
-                extra={
-                    "session_id": session_id,
-                    "transcript_artifact": transcript_artifact.storage_key,
-                    "audio_frames": audio_frame_count,
-                    "barge_in_count": barge_in_count,
-                    "postprocess_mode": postprocess_result["mode"] if postprocess_result else "none",
-                    "trace_id": ws_trace_id,
-                },
-            )
-        except Exception:  # pragma: no cover
-            logger.exception("Failed to finalize websocket session", extra={"session_id": session_id, "trace_id": ws_trace_id})
-            db.rollback()
+            await run_finalization_once(resilient=True)
         finally:
             micro_behavior_engine.end_session(session_id)
             orchestrator.clear_session_context(session_id)
-            await providers.stt.end_session(session_id)
+            with contextlib.suppress(asyncio.CancelledError):
+                await providers.stt.end_session(session_id)
             db.close()

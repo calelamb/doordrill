@@ -19,6 +19,14 @@ def _create_assignment(client, seed_org: dict[str, str]) -> dict:
     return response.json()
 
 
+def _await_session_ended(ws) -> None:
+    for _ in range(80):
+        message = ws.receive_json()
+        if message["type"] == "server.session.state" and message["payload"].get("state") == "ended":
+            return
+    raise AssertionError("session did not emit ended state")
+
+
 def _run_session(client, seed_org: dict[str, str], assignment_id: str, *, trigger_barge_in: bool = False) -> str:
     session_resp = client.post(
         "/rep/sessions",
@@ -56,6 +64,7 @@ def _run_session(client, seed_org: dict[str, str], assignment_id: str, *, trigge
                 break
         assert saw_commit
         ws.send_json({"type": "client.session.end", "sequence": 2, "payload": {}})
+        _await_session_ended(ws)
 
     return session_id
 
@@ -171,6 +180,7 @@ def test_live_session_endpoints(client, seed_org):
         assert transcript_body["stage_timeline"]
 
         ws.send_json({"type": "client.session.end", "sequence": 2, "payload": {}})
+        _await_session_ended(ws)
 
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
