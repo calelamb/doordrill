@@ -138,7 +138,7 @@ PHASE_ONE_SCENARIOS = [
 ]
 
 
-def _upsert_prompt_version(db, *, prompt_type: str, version: str, content: str) -> None:
+def _upsert_prompt_version(db, *, prompt_type: str, version: str, content: str, active: bool = True) -> None:
     existing = db.scalar(
         select(PromptVersion).where(
             PromptVersion.prompt_type == prompt_type,
@@ -150,15 +150,16 @@ def _upsert_prompt_version(db, *, prompt_type: str, version: str, content: str) 
             prompt_type=prompt_type,
             version=version,
             content=content,
-            active=True,
+            active=active,
         )
         db.add(existing)
     else:
         existing.content = content
-        existing.active = True
+        existing.active = active
 
-    for row in db.scalars(select(PromptVersion).where(PromptVersion.prompt_type == prompt_type)).all():
-        row.active = row.version == version
+    if active:
+        for row in db.scalars(select(PromptVersion).where(PromptVersion.prompt_type == prompt_type)).all():
+            row.active = row.version == version
 
 
 def _seed_prompt_versions(db) -> None:
@@ -170,9 +171,32 @@ def _seed_prompt_versions(db) -> None:
     )
     _upsert_prompt_version(
         db,
+        prompt_type="conversation",
+        version="conversation_v2",
+        content=(
+            "Additional directive: When the rep directly acknowledges a named concern before pivoting, "
+            "respond with at least one follow-up question before returning to objection mode. "
+            "Do not immediately soften — require two consecutive helpful signals to move emotion upward."
+        ),
+        active=False,
+    )
+    _upsert_prompt_version(
+        db,
         prompt_type="grading",
         version="grading_v1",
         content=GradingPromptBuilder.template_blueprint(),
+    )
+    _upsert_prompt_version(
+        db,
+        prompt_type="coaching",
+        version="coaching_v1",
+        content=(
+            "You are a seasoned door-to-door sales manager preparing coaching feedback for your team. "
+            "Be direct, evidence-based, and rep-focused. "
+            "When identifying weaknesses, always cite a specific transcript moment. "
+            "Avoid generic praise. Prioritize objection handling and close technique gaps."
+        ),
+        active=True,
     )
     _upsert_prompt_version(
         db,

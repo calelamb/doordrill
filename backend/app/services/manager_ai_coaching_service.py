@@ -9,8 +9,9 @@ from typing import Any, Sequence
 
 import httpx
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, object_session, selectinload
 
+from app.models.prompt_version import PromptVersion
 from app.core.config import get_settings
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
@@ -39,6 +40,10 @@ from app.services.management_cache_service import ManagementCacheService
 from app.services.predictive_modeling_service import PredictiveModelingService
 
 READINESS_THRESHOLD = 7.0
+DEFAULT_COACHING_SYSTEM_PREFIX = (
+    "You are a seasoned door-to-door sales manager preparing coaching feedback for your team. "
+    "Be direct, evidence-based, and rep-focused."
+)
 
 RUBRIC_CATEGORY_KEYS = {
     "opening": "opening",
@@ -164,6 +169,17 @@ class ManagerAiCoachingService:
             ttl_seconds=4 * 3600,
             max_entries=cache_size,
         )
+
+    def _get_coaching_system_prefix(self, db: Session) -> str:
+        row = db.scalar(
+            select(PromptVersion)
+            .where(PromptVersion.prompt_type == "coaching")
+            .where(PromptVersion.active.is_(True))
+            .order_by(PromptVersion.created_at.desc())
+        )
+        if row is not None and row.content:
+            return row.content.strip()
+        return DEFAULT_COACHING_SYSTEM_PREFIX
 
     def classify_manager_chat_intent(self, *, message: str) -> ManagerChatClassification:
         prompt = f"""
@@ -328,6 +344,7 @@ Respond with JSON only:
         cached = self.rep_insight_cache.get_json(cache_key)
         if cached is not None:
             return RepInsightResponse.model_validate(cached)
+        coaching_system_prefix = self._get_coaching_system_prefix(db)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
         rows = db.execute(
@@ -532,7 +549,10 @@ Provide a coaching analysis in this exact JSON format:
 """.strip()
 
         content_payload = self._call_claude_json(
-            system_prompt="You are a precise sales coaching analyst. Return only valid JSON.",
+            system_prompt=(
+                f"{coaching_system_prefix}\n\n"
+                "You are a precise sales coaching analyst. Return only valid JSON."
+            ),
             user_prompt=prompt,
             max_tokens=700,
         )
@@ -600,6 +620,7 @@ Provide a coaching analysis in this exact JSON format:
         cached = self.one_on_one_prep_cache.get_json(cache_key)
         if cached is not None:
             return OneOnOnePrepResponse.model_validate(cached)
+        coaching_system_prefix = self._get_coaching_system_prefix(db)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
         sessions = db.scalars(
@@ -792,7 +813,10 @@ Requirements:
 """.strip()
 
         content_payload = self._call_claude_json(
-            system_prompt="You are a precise manager prep copilot. Return only valid JSON.",
+            system_prompt=(
+                f"{coaching_system_prefix}\n\n"
+                "You are a precise manager prep copilot. Return only valid JSON."
+            ),
             user_prompt=prompt,
             max_tokens=900,
         )
@@ -841,6 +865,7 @@ Requirements:
         cached = self.weekly_team_briefing_cache.get_json(cache_key)
         if cached is not None:
             return WeeklyTeamBriefingResponse.model_validate(cached)
+        coaching_system_prefix = self._get_coaching_system_prefix(db)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=7)
         rep_ids = [rep.id for rep in reps]
@@ -1034,7 +1059,10 @@ Requirements:
 """.strip()
 
         content_payload = self._call_claude_json(
-            system_prompt="You are a precise weekly team briefing copilot. Return only valid JSON.",
+            system_prompt=(
+                f"{coaching_system_prefix}\n\n"
+                "You are a precise weekly team briefing copilot. Return only valid JSON."
+            ),
             user_prompt=prompt,
             max_tokens=900,
         )
@@ -1242,6 +1270,7 @@ Requirements:
         cached = self.session_annotations_cache.get_json(cache_key)
         if cached is not None:
             return SessionAnnotationsResponse.model_validate(cached)
+        coaching_system_prefix = self._get_coaching_system_prefix(db)
 
         turns = db.scalars(
             select(SessionTurn).where(SessionTurn.session_id == session_id).order_by(SessionTurn.turn_index.asc())
@@ -1290,7 +1319,10 @@ Return JSON array:
 """.strip()
 
         raw_items = self._call_claude_json(
-            system_prompt="You are a precise transcript coach. Return only valid JSON.",
+            system_prompt=(
+                f"{coaching_system_prefix}\n\n"
+                "You are a precise transcript coach. Return only valid JSON."
+            ),
             user_prompt=prompt,
             max_tokens=1000,
         )
@@ -1323,6 +1355,12 @@ Return JSON array:
         period_days: int,
         coaching_analytics: dict[str, Any],
     ) -> TeamCoachingSummaryResponse:
+        db = object_session(manager)
+        coaching_system_prefix = (
+            self._get_coaching_system_prefix(db)
+            if db is not None
+            else DEFAULT_COACHING_SYSTEM_PREFIX
+        )
         summary = coaching_analytics.get("summary", {}) if isinstance(coaching_analytics, dict) else {}
         weakness_items = coaching_analytics.get("weakness_tag_uplift", []) if isinstance(coaching_analytics, dict) else []
         uplift_items = coaching_analytics.get("coaching_uplift", []) if isinstance(coaching_analytics, dict) else []
@@ -1401,7 +1439,10 @@ Return JSON:
 
         content = TeamCoachingSummaryContent.model_validate(
             self._call_claude_json(
-                system_prompt="You are a precise coaching strategist. Return only valid JSON.",
+                system_prompt=(
+                    f"{coaching_system_prefix}\n\n"
+                    "You are a precise coaching strategist. Return only valid JSON."
+                ),
                 user_prompt=prompt,
                 max_tokens=320,
             )

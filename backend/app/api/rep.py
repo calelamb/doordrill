@@ -1,3 +1,4 @@
+import hashlib
 import os
 import uuid
 from typing import Any
@@ -37,6 +38,7 @@ from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.notification_service import NotificationService
 from app.services.manager_review_service import ManagerReviewService
 from app.services.predictive_modeling_service import PredictiveModelingService
+from app.services.prompt_experiment_service import PromptExperimentService
 
 router = APIRouter(prefix="/rep", tags=["rep"])
 REP_CATEGORY_KEY_MAP = {
@@ -67,6 +69,7 @@ notification_service = NotificationService()
 review_service = ManagerReviewService()
 predictive_modeling_service = PredictiveModelingService()
 adaptive_training_service = AdaptiveTrainingService()
+prompt_experiment_service = PromptExperimentService()
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -273,6 +276,34 @@ def _serialize_notification_preferences(user: User) -> NotificationPreferences:
     )
 
 
+def _get_active_conversation_prompt_version(db: Session) -> PromptVersion | None:
+    return db.scalar(
+        select(PromptVersion)
+        .where(
+            PromptVersion.prompt_type == "conversation",
+            PromptVersion.active.is_(True),
+        )
+        .order_by(PromptVersion.created_at.desc())
+    )
+
+
+def _select_conversation_prompt_version(db: Session, *, session_id: str) -> PromptVersion | None:
+    experiment = prompt_experiment_service.get_active_experiment(db, prompt_type="conversation")
+    if experiment is None:
+        return _get_active_conversation_prompt_version(db)
+
+    bucket = int(hashlib.md5(session_id.encode("utf-8")).hexdigest(), 16) % 100
+    selected_id = (
+        experiment.challenger_version_id
+        if bucket < int(experiment.challenger_traffic_pct)
+        else experiment.control_version_id
+    )
+    selected = db.get(PromptVersion, selected_id)
+    if selected is not None:
+        return selected
+    return _get_active_conversation_prompt_version(db)
+
+
 def _scenario_focus_skills(scenario: Scenario) -> list[str]:
     focus = adaptive_training_service._scenario_skill_focus(scenario)
     return [
@@ -389,19 +420,14 @@ def create_session(
         db.add(assignment)
         db.flush()
 
+    session_id = str(uuid.uuid4())
+    selected_prompt_version = _select_conversation_prompt_version(db, session_id=session_id)
     session = DrillSession(
+        id=session_id,
         assignment_id=assignment.id,
         rep_id=payload.rep_id,
         scenario_id=payload.scenario_id,
-        prompt_version=(
-            db.scalar(
-                select(PromptVersion.version).where(
-                    PromptVersion.prompt_type == "conversation",
-                    PromptVersion.active.is_(True),
-                )
-            )
-            or "conversation_v1"
-        ),
+        prompt_version=selected_prompt_version.version if selected_prompt_version is not None else "conversation_v1",
         started_at=datetime.now(timezone.utc),
         status=SessionStatus.ACTIVE,
     )

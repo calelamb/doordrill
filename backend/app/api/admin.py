@@ -33,6 +33,18 @@ class PromptExperimentCreateRequest(BaseModel):
     min_sessions_for_decision: int = Field(default=200, ge=1)
 
 
+class PromptVersionCreateRequest(BaseModel):
+    prompt_type: str = Field(max_length=64)
+    version: str = Field(max_length=64)
+    content: str = Field(min_length=1)
+    active: bool = Field(default=False)
+
+
+class PromptVersionUpdateRequest(BaseModel):
+    content: str | None = Field(default=None, min_length=1)
+    version: str | None = Field(default=None, max_length=64)
+
+
 def _to_start_of_day(value: date | None) -> datetime | None:
     if value is None:
         return None
@@ -102,6 +114,119 @@ def _serialize_prompt_experiment(experiment: PromptExperiment) -> dict:
         "p_value": experiment.p_value,
         "min_sessions_for_decision": experiment.min_sessions_for_decision,
     }
+
+
+def _serialize_prompt_version(prompt_version: PromptVersion) -> dict:
+    return {
+        "id": prompt_version.id,
+        "prompt_type": prompt_version.prompt_type,
+        "version": prompt_version.version,
+        "content": prompt_version.content,
+        "active": bool(prompt_version.active),
+        "created_at": prompt_version.created_at.isoformat(),
+        "updated_at": prompt_version.updated_at.isoformat(),
+    }
+
+
+@router.get("/prompt-versions")
+def list_prompt_versions(
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+    prompt_type: str | None = Query(default=None),
+) -> list[dict]:
+    stmt = select(PromptVersion)
+    if prompt_type is not None:
+        stmt = stmt.where(PromptVersion.prompt_type == prompt_type)
+    prompt_versions = db.scalars(stmt.order_by(PromptVersion.created_at.desc())).all()
+    return [_serialize_prompt_version(prompt_version) for prompt_version in prompt_versions]
+
+
+@router.get("/prompt-versions/{version_id}")
+def get_prompt_version(
+    version_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    prompt_version = db.get(PromptVersion, version_id)
+    if prompt_version is None:
+        raise HTTPException(status_code=404, detail="prompt version not found")
+    return _serialize_prompt_version(prompt_version)
+
+
+@router.post("/prompt-versions")
+def create_prompt_version(
+    payload: PromptVersionCreateRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    existing = db.scalar(
+        select(PromptVersion)
+        .where(PromptVersion.prompt_type == payload.prompt_type)
+        .where(PromptVersion.version == payload.version)
+    )
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="prompt version already exists")
+
+    prompt_version = PromptVersion(
+        prompt_type=payload.prompt_type,
+        version=payload.version,
+        content=payload.content,
+        active=payload.active,
+    )
+    db.add(prompt_version)
+    db.commit()
+    db.refresh(prompt_version)
+    return _serialize_prompt_version(prompt_version)
+
+
+@router.patch("/prompt-versions/{version_id}")
+def update_prompt_version(
+    version_id: str,
+    payload: PromptVersionUpdateRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    prompt_version = db.get(PromptVersion, version_id)
+    if prompt_version is None:
+        raise HTTPException(status_code=404, detail="prompt version not found")
+
+    if payload.version is not None and payload.version != prompt_version.version:
+        existing = db.scalar(
+            select(PromptVersion)
+            .where(PromptVersion.prompt_type == prompt_version.prompt_type)
+            .where(PromptVersion.version == payload.version)
+            .where(PromptVersion.id != prompt_version.id)
+        )
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="prompt version already exists")
+        prompt_version.version = payload.version
+    if payload.content is not None:
+        prompt_version.content = payload.content
+
+    db.commit()
+    db.refresh(prompt_version)
+    return _serialize_prompt_version(prompt_version)
+
+
+@router.post("/prompt-versions/{version_id}/activate")
+def activate_prompt_version(
+    version_id: str,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    prompt_version = db.get(PromptVersion, version_id)
+    if prompt_version is None:
+        raise HTTPException(status_code=404, detail="prompt version not found")
+
+    siblings = db.scalars(
+        select(PromptVersion).where(PromptVersion.prompt_type == prompt_version.prompt_type)
+    ).all()
+    for sibling in siblings:
+        sibling.active = sibling.id == prompt_version.id
+
+    db.commit()
+    db.refresh(prompt_version)
+    return _serialize_prompt_version(prompt_version)
 
 
 @router.post("/prompt-experiments")

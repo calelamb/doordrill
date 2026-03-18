@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.prompt_version import PromptVersion
 from app.models.transcript import ObjectionType
 from app.models.user import User
 
@@ -483,6 +484,7 @@ class SessionPromptContext:
     scenario_snapshot: ScenarioSnapshot
     persona: HomeownerPersona
     prompt_version: str | None = None
+    conversation_prompt_content: str | None = None
     org_id: str | None = None
     territory_context: str | None = None
     company_context: str | None = None
@@ -547,6 +549,7 @@ class PromptBuilder:
         persona: HomeownerPersona,
         stage: str,
         prompt_version: str | None = None,
+        conversation_prompt_content: str | None = None,
         *,
         scenario_snapshot: ScenarioSnapshot | None = None,
         emotion: str | None = None,
@@ -660,6 +663,13 @@ class PromptBuilder:
             ]
             if directives:
                 layer_four_b = "LAYER 4B - EDGE CASE DIRECTIVES\n" + "\n".join(directives)
+        layer_five_override = None
+        if conversation_prompt_content and conversation_prompt_content.strip():
+            layer_five_override = (
+                "LAYER 5 - PROMPT OVERRIDE DIRECTIVES\n"
+                "The following directives apply to this session and take precedence over general guidance above.\n"
+                f"{conversation_prompt_content.strip()}"
+            )
         layer_five = None
         if company_context and company_context.strip():
             layer_five = (
@@ -674,6 +684,8 @@ class PromptBuilder:
         parts = [version_line, layer_one, layer_two, layer_three, layer_three_b, layer_four]
         if layer_four_b:
             parts.append(layer_four_b)
+        if layer_five_override:
+            parts.append(layer_five_override)
         if layer_five:
             parts.append(layer_five)
         parts.append(hard_rule)
@@ -800,11 +812,21 @@ class ConversationOrchestrator:
         if resolved_org_id is None and db is not None and rep_id:
             rep = db.scalar(select(User).where(User.id == rep_id))
             resolved_org_id = rep.org_id if rep is not None else None
+        conversation_prompt_content = None
+        if db is not None and prompt_version is not None:
+            prompt_version_row = db.scalar(
+                select(PromptVersion)
+                .where(PromptVersion.prompt_type == "conversation")
+                .where(PromptVersion.version == prompt_version)
+            )
+            if prompt_version_row is not None and prompt_version_row.content.strip():
+                conversation_prompt_content = prompt_version_row.content
         context = SessionPromptContext(
             scenario=scenario,
             scenario_snapshot=snapshot,
             persona=HomeownerPersona.from_payload(snapshot.persona_payload),
             prompt_version=prompt_version,
+            conversation_prompt_content=conversation_prompt_content,
             org_id=resolved_org_id,
             company_context=company_context,
         )
@@ -932,6 +954,7 @@ class ConversationOrchestrator:
                 persona=context.persona,
                 stage=stage_after,
                 prompt_version=context.prompt_version,
+                conversation_prompt_content=context.conversation_prompt_content,
                 emotion=state.emotion if state is not None else "neutral",
                 resistance_level=state.resistance_level if state is not None else 2,
                 objection_pressure=state.objection_pressure if state is not None else 0,
