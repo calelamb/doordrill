@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 import zlib
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -37,6 +38,7 @@ from app.services.micro_behavior_engine import (
 from app.services.provider_clients import ProviderSuite
 from app.services.session_postprocess_service import SessionPostprocessService
 from app.services.storage_service import StorageService
+from app.utils.latency import TurnLatencyRecord
 
 router = APIRouter(tags=["voice"])
 settings = get_settings()
@@ -58,10 +60,18 @@ providers = ProviderSuite.from_settings(settings)
 storage_service = StorageService()
 
 SILENCE_FILLER_SECONDS = 4.0
+VAD_FINALIZE_DEBOUNCE_MS = 80
 MAX_RUNTIME_PAUSE_MS = 60
 TTS_STREAM_TIMEOUT_SECONDS = 6
 WS_KEEPALIVE_TIMEOUT_SECONDS = 120
 WS_KEEPALIVE_INTERVAL_SECONDS = 30
+
+
+@dataclass
+class SessionRuntimeState:
+    _vad_end_pending: bool = False
+    vad_finalize_task: asyncio.Task[None] | None = None
+    turn_latency: TurnLatencyRecord | None = None
 
 
 def homeowner_token_budget(stage: str) -> int:
@@ -243,11 +253,60 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     audio_frame_count = 0
     total_audio_duration_ms = 0
     barge_in_count = 0
+    runtime_state = SessionRuntimeState()
 
     ai_speaking = False
     ai_speaking_started_at: datetime | None = None
     interrupt_signal_at: datetime | None = None
     interrupt_signal_reason: str | None = None
+
+    def _monotonic_ts() -> float:
+        return time.monotonic()
+
+    def _should_start_new_turn_latency() -> bool:
+        record = runtime_state.turn_latency
+        if record is None:
+            return True
+        return bool(
+            ai_speaking
+            or record.stt_final_ts is not None
+            or record.llm_first_token_ts is not None
+            or record.tts_task_created_ts is not None
+            or record.first_audio_byte_ts is not None
+        )
+
+    def _start_turn_latency(turn_index: int | None = None) -> TurnLatencyRecord:
+        record = TurnLatencyRecord(session_id=session_id, turn_index=turn_index or 0)
+        runtime_state.turn_latency = record
+        return record
+
+    def _get_turn_latency(turn_index: int | None = None) -> TurnLatencyRecord:
+        record = runtime_state.turn_latency
+        if record is None:
+            record = _start_turn_latency(turn_index)
+        elif turn_index is not None and record.turn_index <= 0:
+            record.turn_index = turn_index
+        return record
+
+    def _cancel_vad_finalize_task() -> asyncio.Task[None] | None:
+        task = runtime_state.vad_finalize_task
+        runtime_state.vad_finalize_task = None
+        if task is not None:
+            task.cancel()
+        return task
+
+    async def _run_vad_finalize_debounce() -> None:
+        try:
+            await asyncio.sleep(VAD_FINALIZE_DEBOUNCE_MS / 1000)
+            if not runtime_state._vad_end_pending:
+                return
+            runtime_state._vad_end_pending = False
+            await providers.stt.trigger_finalization()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if runtime_state.vad_finalize_task is asyncio.current_task():
+                runtime_state.vad_finalize_task = None
 
     async def maybe_flush(force: bool = False) -> None:
         nonlocal last_flush
@@ -542,6 +601,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                                             "micro_behavior": segment_behavior,
                                         },
                                     )
+                                    record = runtime_state.turn_latency
+                                    if record is not None and record.first_audio_byte_ts is None:
+                                        record.first_audio_byte_ts = _monotonic_ts()
+                                        record.log_summary(logger)
                                     if not _first_chunk_logged:
                                         _t_after = asyncio.get_event_loop().time()
                                         logger.info(
@@ -611,6 +674,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             sentence = raw_sentence.strip()
             if not sentence:
                 return
+            record = runtime_state.turn_latency
+            if record is not None and record.first_sentence_ts is None:
+                record.first_sentence_ts = _monotonic_ts()
             logger.info(
                 "process_sentence_called",
                 extra={
@@ -644,6 +710,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 },
             )
             await maybe_flush()
+            if record is not None and record.tts_task_created_ts is None:
+                record.tts_task_created_ts = _monotonic_ts()
             tts_tasks.append(asyncio.create_task(stream_tts_for_plan(plan)))
             logger.info(
                 "tts_task_created",
@@ -667,6 +735,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     break
                 if not chunk:
                     continue
+                record = runtime_state.turn_latency
+                if record is not None and record.llm_first_token_ts is None:
+                    record.llm_first_token_ts = _monotonic_ts()
                 sentence_buffer += str(chunk)
                 while True:
                     match = re.search(r"[.?!](?:\s|$)", sentence_buffer)
@@ -834,13 +905,26 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 )
                 continue
 
-            if msg.type == "client.vad.state" and bool(msg.payload.get("speaking", False)):
-                set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
+            if msg.type == "client.vad.state":
+                speaking = bool(msg.payload.get("speaking", False))
+                if speaking:
+                    runtime_state._vad_end_pending = False
+                    _cancel_vad_finalize_task()
+                    set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
+                else:
+                    runtime_state._vad_end_pending = True
+                    record = _start_turn_latency() if _should_start_new_turn_latency() else _get_turn_latency()
+                    if record.vad_end_ts is None:
+                        record.vad_end_ts = _monotonic_ts()
+                    _cancel_vad_finalize_task()
+                    runtime_state.vad_finalize_task = asyncio.create_task(_run_vad_finalize_debounce())
             elif ai_speaking and msg.type == "client.audio.chunk":
                 set_interrupt("audio_chunk", _normalize_ts(msg.timestamp))
 
             if msg.type == "client.session.end":
                 disconnected.set()
+                runtime_state._vad_end_pending = False
+                _cancel_vad_finalize_task()
 
             await incoming.put(msg)
 
@@ -910,6 +994,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             filler_emitted_for_silence = False
             last_rep_audio_at = time.monotonic()
             consume_interrupt()
+            if _should_start_new_turn_latency():
+                _start_turn_latency()
 
             stt_result = await run_stt(msg)
             if stt_result is None:
@@ -933,6 +1019,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 await emit_server_event("server.edge_case.triggered", {"tags": plan.active_edge_cases})
                 await maybe_flush()
             next_turn_index = _next_turn_index()
+            turn_latency = _get_turn_latency(next_turn_index + 1)
+            if turn_latency.stt_final_ts is None:
+                turn_latency.stt_final_ts = _monotonic_ts()
             rep_started_at, rep_ended_at = _derive_rep_turn_window(msg)
 
             rep_turn = ledger.commit_turn(
@@ -1060,11 +1149,14 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "micro_behavior": ai_result["micro_behavior"],
             }
             await emit_server_event("server.turn.committed", turn_payload)
+            if runtime_state.turn_latency is not None and runtime_state.turn_latency.turn_index == next_turn_index + 1:
+                runtime_state.turn_latency = None
             await maybe_flush()
 
     except WebSocketDisconnect:
         pass
     finally:
+        pending_vad_finalize_task = _cancel_vad_finalize_task()
         receiver_task.cancel()
         keepalive_task.cancel()
         try:
@@ -1073,6 +1165,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             pass
         except Exception:  # pragma: no cover
             logger.exception("Receiver task cleanup error", extra={"session_id": session_id, "trace_id": ws_trace_id})
+        if pending_vad_finalize_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending_vad_finalize_task
         try:
             await keepalive_task
         except asyncio.CancelledError:

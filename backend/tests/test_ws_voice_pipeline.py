@@ -1,4 +1,6 @@
-from app.services.provider_clients import MockLlmClient, MockSttClient, MockTtsClient, ProviderSuite
+import asyncio
+
+from app.services.provider_clients import MockLlmClient, MockSttClient, MockTtsClient, ProviderSuite, SttTranscript
 from app.voice import ws as voice_ws
 
 
@@ -55,6 +57,24 @@ def _run_turn(ws, *, text: str, sequence: int) -> list[dict]:
         if message["type"] == "server.turn.committed":
             return messages
     raise AssertionError("turn was not committed")
+
+
+class _FinalizeAwareSttClient(MockSttClient):
+    def __init__(self) -> None:
+        self._finalized = asyncio.Event()
+        self.trigger_calls = 0
+
+    async def finalize_utterance(self, payload: dict) -> SttTranscript:
+        hint = str(payload.get("transcript_hint", "")).strip()
+        on_partial = payload.get("on_partial")
+        if callable(on_partial) and hint:
+            on_partial(hint, False)
+        await asyncio.wait_for(self._finalized.wait(), timeout=1)
+        return SttTranscript(text=hint, confidence=0.98 if hint else 0.0, is_final=bool(hint), source=self.provider_name)
+
+    async def trigger_finalization(self) -> None:
+        self.trigger_calls += 1
+        self._finalized.set()
 
 
 def test_ws_voice_pipeline_streams_events_in_order(client, seed_org, monkeypatch):
@@ -125,3 +145,47 @@ def test_ws_voice_pipeline_streams_events_in_order(client, seed_org, monkeypatch
 
     committed = [message for message in all_messages if message["type"] == "server.turn.committed"]
     assert len(committed) == 3
+
+
+def test_ws_vad_end_triggers_stt_finalization_and_logs_latency(client, seed_org, monkeypatch, caplog):
+    stt = _FinalizeAwareSttClient()
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=stt, llm=MockLlmClient(), tts=MockTtsClient()),
+    )
+    monkeypatch.setattr(voice_ws, "VAD_FINALIZE_DEBOUNCE_MS", 1)
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with caplog.at_level("INFO"):
+        with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+            connected = ws.receive_json()
+            assert connected["type"] == "server.session.state"
+
+            ws.send_json({"type": "client.vad.state", "sequence": 1, "payload": {"speaking": True}})
+            ws.send_json(
+                {
+                    "type": "client.audio.chunk",
+                    "sequence": 2,
+                    "payload": {"transcript_hint": "Hi, I can lower your pest control bill today.", "codec": "opus"},
+                }
+            )
+            ws.send_json({"type": "client.vad.state", "sequence": 3, "payload": {"speaking": False}})
+
+            saw_commit = False
+            for _ in range(200):
+                message = ws.receive_json()
+                if message["type"] == "server.turn.committed":
+                    saw_commit = True
+                    break
+
+            assert saw_commit
+            ws.send_json({"type": "client.session.end", "sequence": 4, "payload": {}})
+
+    assert stt.trigger_calls == 1
+    latency_records = [record for record in caplog.records if record.message == "turn_latency"]
+    assert latency_records
+    assert latency_records[0].turn_index >= 1
+    assert latency_records[0].total_ms >= 0

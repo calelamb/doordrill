@@ -16,6 +16,29 @@ async def test_deepgram_client_uses_transcript_hint_without_key():
 
 
 @pytest.mark.asyncio
+async def test_deepgram_trigger_finalization_sends_finalize_message():
+    client = DeepgramSttClient(api_key="test", base_url="https://api.deepgram.com", model="nova-2", timeout_seconds=1)
+    await client.start_session("debug-session")
+    fake_ws = _FakeDeepgramWs([])
+    keepalive_task = asyncio.create_task(asyncio.sleep(3600))
+    client._sessions["debug-session"] = _DeepgramSessionState(
+        ws=fake_ws,
+        lock=asyncio.Lock(),
+        keepalive_task=keepalive_task,
+        listen_url="wss://api.deepgram.com/v1/listen?encoding=linear16",
+    )
+
+    try:
+        await client.trigger_finalization()
+    finally:
+        keepalive_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await keepalive_task
+
+    assert fake_ws.sent == ['{"type": "Finalize"}']
+
+
+@pytest.mark.asyncio
 async def test_deepgram_listen_url_defaults_to_linear16_for_non_opus_payloads():
     client = DeepgramSttClient(api_key="test", base_url="https://api.deepgram.com", model="nova-2", timeout_seconds=1)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
 import json
 from dataclasses import dataclass
 from urllib.parse import urlencode
@@ -32,6 +33,9 @@ class BaseSttClient:
 
     async def finalize_utterance(self, payload: dict) -> SttTranscript:
         raise NotImplementedError
+
+    async def trigger_finalization(self) -> None:
+        return None
 
 
 class BaseLlmClient:
@@ -142,6 +146,10 @@ class DeepgramSttClient(BaseSttClient):
         self._fallback = MockSttClient()
         self._sessions: dict[str, _DeepgramSessionState] = {}
         self._session_ids: set[str] = set()
+        self._active_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+            "deepgram_active_session_id",
+            default=None,
+        )
 
     async def finalize_utterance(self, payload: dict) -> SttTranscript:
         hint = str(payload.get("transcript_hint", "")).strip()
@@ -165,9 +173,12 @@ class DeepgramSttClient(BaseSttClient):
         if not self.api_key:
             return
         self._session_ids.add(session_id)
+        self._active_session_id.set(session_id)
 
     async def end_session(self, session_id: str) -> None:
         self._session_ids.discard(session_id)
+        if self._active_session_id.get() == session_id:
+            self._active_session_id.set(None)
         state = self._sessions.pop(session_id, None)
         if state is None:
             return
@@ -178,6 +189,19 @@ class DeepgramSttClient(BaseSttClient):
             await state.ws.send(json.dumps({"type": "CloseStream"}))
         with contextlib.suppress(Exception):
             await state.ws.close()
+
+    async def trigger_finalization(self) -> None:
+        session_id = self._active_session_id.get()
+        if not self.api_key or not session_id:
+            return
+        state = self._sessions.get(session_id)
+        if state is None or getattr(state.ws, "closed", False):
+            return
+        try:
+            async with state.lock:
+                await state.ws.send(json.dumps({"type": "Finalize"}))
+        except Exception:
+            return
 
     def _listen_url(self, payload: dict) -> str:
         content_type = str(payload.get("content_type") or "").lower()
