@@ -93,17 +93,30 @@ def _emit_handler(payload: dict, key: str, transcript: str, is_final: bool) -> N
 
 class _TaskConversationHistoryMixin:
     def __init__(self) -> None:
-        self._history_by_task: weakref.WeakKeyDictionary[asyncio.Task[Any], list[dict[str, str]]] = weakref.WeakKeyDictionary()
+        # Keyed by session_id so history survives WebSocket reconnects.
+        self._history_by_session: dict[str, list[dict[str, str]]] = {}
+        self._active_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+            "llm_active_session_id", default=None
+        )
+
+    def set_session(self, session_id: str) -> None:
+        """Call once when a WebSocket session binds to this LLM client."""
+        self._active_session_id.set(session_id)
+        if session_id not in self._history_by_session:
+            self._history_by_session[session_id] = []
+
+    def clear_session(self, session_id: str) -> None:
+        """Call when a session ends to free memory."""
+        self._history_by_session.pop(session_id, None)
 
     def _history_for_current_task(self) -> list[dict[str, str]]:
-        task = asyncio.current_task()
-        if task is None:
+        session_id = self._active_session_id.get()
+        if not session_id:
+            # Fallback: no session context, return empty (won't be stored)
             return []
-        history = self._history_by_task.get(task)
-        if history is None:
-            history = []
-            self._history_by_task[task] = history
-        return history
+        if session_id not in self._history_by_session:
+            self._history_by_session[session_id] = []
+        return self._history_by_session[session_id]
 
     def _remember_exchange(self, *, user_text: str, assistant_text: str) -> None:
         history = self._history_for_current_task()
@@ -113,9 +126,9 @@ class _TaskConversationHistoryMixin:
                 {"role": "assistant", "content": assistant_text},
             ]
         )
-        # Keep only the most recent few turns per websocket task.
-        if len(history) > 12:
-            del history[:-12]
+        # Keep the last 16 messages (8 exchanges) to bound context size.
+        if len(history) > 16:
+            del history[:-16]
 
 
 class MockSttClient(BaseSttClient):

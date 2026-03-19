@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import Actor, require_manager, require_rep_or_manager
@@ -34,7 +34,12 @@ def list_scenarios(
     target_org = org_id or actor.org_id
     if target_org:
         _ensure_same_org(actor, target_org)
-        return db.scalars(select(Scenario).where(Scenario.org_id == target_org).order_by(Scenario.created_at.desc())).all()
+        # Return org-specific scenarios AND global scenarios (org_id IS NULL)
+        return db.scalars(
+            select(Scenario)
+            .where(or_(Scenario.org_id == target_org, Scenario.org_id.is_(None)))
+            .order_by(Scenario.created_at.desc())
+        ).all()
     return db.scalars(select(Scenario).order_by(Scenario.created_at.desc())).all()
 
 

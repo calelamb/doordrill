@@ -80,14 +80,14 @@ class SessionRuntimeState:
 
 def homeowner_token_budget(stage: str) -> int:
     stage_budgets = {
-        "door_knock": 15,
-        "initial_pitch": 28,
-        "objection_handling": 30,
-        "considering": 45,
-        "close_attempt": 40,
-        "ended": 12,
+        "door_knock": 40,
+        "initial_pitch": 70,
+        "objection_handling": 80,
+        "considering": 90,
+        "close_attempt": 80,
+        "ended": 30,
     }
-    return stage_budgets.get(stage, 28)
+    return stage_budgets.get(stage, 70)
 
 
 def _dedupe_retrieved_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
@@ -266,6 +266,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     )
     # Keep STT session-scoped to avoid Deepgram websocket cold starts on every rep turn.
     await providers.stt.start_session(session_id)
+    if hasattr(providers.llm, "set_session"):
+        providers.llm.set_session(session_id)
     micro_behavior_engine.initialize_session(
         session_id,
         persona=scenario.persona if scenario is not None and isinstance(scenario.persona, dict) else None,
@@ -651,10 +653,36 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
                         try:
                             async with asyncio.timeout(TTS_STREAM_TIMEOUT_SECONDS):
+                                # Accumulate all raw bytes for this segment into a
+                                # single complete MP3 before sending to the client.
+                                # expo-av on iOS/Android requires a complete audio
+                                # file — individual raw MP3 frame chunks are not
+                                # playable as standalone files.
+                                import base64 as _b64
+                                _accum_bytes: list[bytes] = []
+                                _accum_codec = "mp3"
+                                _accum_provider = providers.tts.provider_name
+                                _accum_duration_ms = 0
+
                                 async for audio_chunk in providers.tts.stream_audio(tts_text):
                                     if interrupt_signal_at is not None:
                                         ai_interrupted = True
                                         return
+                                    raw = audio_chunk.get("payload", "")
+                                    if raw:
+                                        _accum_bytes.append(_b64.b64decode(raw))
+                                    _accum_codec = audio_chunk.get("codec", "mp3")
+                                    _accum_provider = audio_chunk.get("provider", providers.tts.provider_name)
+                                    _accum_duration_ms += int(audio_chunk.get("duration_ms", 0) or 0)
+                                    sentence_chunk_count += 1
+                                    audio_frame_count += 1
+                                    await asyncio.sleep(0)
+
+                                if _accum_bytes and interrupt_signal_at is None:
+                                    combined_payload = _b64.b64encode(b"".join(_accum_bytes)).decode("utf-8")
+                                    total_audio_duration_ms += _accum_duration_ms
+                                    turn_audio_duration_ms += _accum_duration_ms
+
                                     if not _first_chunk_logged:
                                         _t_before = asyncio.get_event_loop().time()
                                         logger.info(
@@ -664,26 +692,24 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                                                 "elapsed_from_t0_ms": int((_t_before - _task_start_time) * 1000),
                                             },
                                         )
-                                    sentence_chunk_count += 1
-                                    chunk_duration_ms = int(audio_chunk.get("duration_ms", 0) or 0)
-                                    audio_frame_count += 1
-                                    total_audio_duration_ms += chunk_duration_ms
-                                    turn_audio_duration_ms += chunk_duration_ms
+
                                     await emit_server_event(
                                         "server.ai.audio.chunk",
                                         {
-                                            "codec": audio_chunk.get("codec", "pcm16"),
-                                            "payload": audio_chunk.get("payload", ""),
-                                            "provider": audio_chunk.get("provider", providers.tts.provider_name),
-                                            "duration_ms": chunk_duration_ms,
+                                            "codec": _accum_codec,
+                                            "payload": combined_payload,
+                                            "provider": _accum_provider,
+                                            "duration_ms": _accum_duration_ms,
                                             "trace_id": ws_trace_id,
                                             "micro_behavior": segment_behavior,
                                         },
                                     )
+
                                     record = runtime_state.turn_latency
                                     if record is not None and record.first_audio_byte_ts is None:
                                         record.first_audio_byte_ts = _monotonic_ts()
                                         record.log_summary(logger)
+
                                     if not _first_chunk_logged:
                                         _t_after = asyncio.get_event_loop().time()
                                         logger.info(
@@ -695,8 +721,6 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                                             },
                                         )
                                         first_tts_audio_started.set()
-                                    await asyncio.sleep(0)
-                                    if not _first_chunk_logged:
                                         _first_chunk_logged = True
                         except TimeoutError:
                             logger.warning(
@@ -1357,6 +1381,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         finally:
             micro_behavior_engine.end_session(session_id)
             orchestrator.clear_session_context(session_id)
+            if hasattr(providers.llm, "clear_session"):
+                providers.llm.clear_session(session_id)
             with contextlib.suppress(asyncio.CancelledError):
                 await providers.stt.end_session(session_id)
             db.close()
