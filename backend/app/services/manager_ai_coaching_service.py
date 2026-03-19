@@ -11,7 +11,6 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session, object_session, selectinload
 
-from app.models.prompt_version import PromptVersion
 from app.core.config import get_settings
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
@@ -38,6 +37,7 @@ from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.management_cache_service import ManagementCacheService
 from app.services.predictive_modeling_service import PredictiveModelingService
+from app.services.prompt_version_resolver import prompt_version_resolver
 
 READINESS_THRESHOLD = 7.0
 DEFAULT_COACHING_SYSTEM_PREFIX = (
@@ -170,12 +170,12 @@ class ManagerAiCoachingService:
             max_entries=cache_size,
         )
 
-    def _get_coaching_system_prefix(self, db: Session) -> str:
-        row = db.scalar(
-            select(PromptVersion)
-            .where(PromptVersion.prompt_type == "coaching")
-            .where(PromptVersion.active.is_(True))
-            .order_by(PromptVersion.created_at.desc())
+    def _get_coaching_system_prefix(self, db: Session, org_id: str | None = None) -> str:
+        row = prompt_version_resolver.resolve(
+            prompt_type="coaching",
+            org_id=org_id,
+            session_id=f"_coaching_{org_id or 'global'}_{id(db)}",
+            db=db,
         )
         if row is not None and row.content:
             return row.content.strip()
@@ -344,7 +344,7 @@ Respond with JSON only:
         cached = self.rep_insight_cache.get_json(cache_key)
         if cached is not None:
             return RepInsightResponse.model_validate(cached)
-        coaching_system_prefix = self._get_coaching_system_prefix(db)
+        coaching_system_prefix = self._get_coaching_system_prefix(db, rep.org_id)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
         rows = db.execute(
@@ -620,7 +620,7 @@ Provide a coaching analysis in this exact JSON format:
         cached = self.one_on_one_prep_cache.get_json(cache_key)
         if cached is not None:
             return OneOnOnePrepResponse.model_validate(cached)
-        coaching_system_prefix = self._get_coaching_system_prefix(db)
+        coaching_system_prefix = self._get_coaching_system_prefix(db, rep.org_id)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
         sessions = db.scalars(
@@ -865,7 +865,7 @@ Requirements:
         cached = self.weekly_team_briefing_cache.get_json(cache_key)
         if cached is not None:
             return WeeklyTeamBriefingResponse.model_validate(cached)
-        coaching_system_prefix = self._get_coaching_system_prefix(db)
+        coaching_system_prefix = self._get_coaching_system_prefix(db, manager.org_id)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=7)
         rep_ids = [rep.id for rep in reps]
@@ -1270,7 +1270,9 @@ Requirements:
         cached = self.session_annotations_cache.get_json(cache_key)
         if cached is not None:
             return SessionAnnotationsResponse.model_validate(cached)
-        coaching_system_prefix = self._get_coaching_system_prefix(db)
+        session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+        org_id = session.rep.org_id if session is not None and session.rep is not None else None
+        coaching_system_prefix = self._get_coaching_system_prefix(db, org_id)
 
         turns = db.scalars(
             select(SessionTurn).where(SessionTurn.session_id == session_id).order_by(SessionTurn.turn_index.asc())
@@ -1357,7 +1359,7 @@ Return JSON array:
     ) -> TeamCoachingSummaryResponse:
         db = object_session(manager)
         coaching_system_prefix = (
-            self._get_coaching_system_prefix(db)
+            self._get_coaching_system_prefix(db, manager.org_id)
             if db is not None
             else DEFAULT_COACHING_SYSTEM_PREFIX
         )

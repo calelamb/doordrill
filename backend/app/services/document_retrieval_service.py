@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.models.knowledge import OrgDocument, OrgDocumentChunk
+from app.models.org_material import OrgKnowledgeDoc, OrgMaterial
 from app.models.types import OrgDocumentStatus
 from app.schemas.knowledge import RetrievedChunk
 from app.services.document_processing_service import DocumentProcessingService
@@ -49,6 +50,19 @@ class DocumentRetrievalService:
         self._topic_result_cache_lock = threading.RLock()
 
     def has_ready_documents(self, db: Session, *, org_id: str) -> bool:
+        material_row = db.scalar(
+            select(OrgKnowledgeDoc.id)
+            .join(OrgMaterial, OrgMaterial.id == OrgKnowledgeDoc.material_id)
+            .where(
+                OrgKnowledgeDoc.org_id == org_id,
+                OrgKnowledgeDoc.embedding.is_not(None),
+                OrgMaterial.deleted_at.is_(None),
+            )
+            .limit(1)
+        )
+        if material_row is not None:
+            return True
+
         row = db.scalar(
             select(OrgDocument.id)
             .where(
@@ -74,21 +88,38 @@ class DocumentRetrievalService:
         if not self.has_ready_documents(db, org_id=org_id):
             return []
 
+        material_rows: list[RetrievedChunk] = []
         try:
             query_vector = self._resolve_query_embedding(normalized_query)
+            material_rows = self._retrieve_material_docs_python(
+                db,
+                org_id=org_id,
+                query_vector=query_vector,
+                k=k,
+                include_raw_chunks=True,
+            )
         except Exception:
-            rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_query, k=k)
+            material_rows = self._retrieve_material_docs_keyword(
+                db,
+                org_id=org_id,
+                query_text=normalized_query,
+                k=k,
+                include_raw_chunks=True,
+            )
+            legacy_rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_query, k=k)
+            rows = self._merge_results(material_rows, legacy_rows, k=k)
             return [row for row in rows if row.similarity_score >= min_score]
 
         dialect_name = db.bind.dialect.name if db.bind is not None else ""
         if dialect_name == "postgresql" and self._supports_postgres_vector_search(db):
             try:
-                rows = self._retrieve_postgres(db, org_id=org_id, query_vector=query_vector, k=k)
+                legacy_rows = self._retrieve_postgres(db, org_id=org_id, query_vector=query_vector, k=k)
             except DBAPIError:
-                rows = self._retrieve_python(db, org_id=org_id, query_vector=query_vector, k=k)
+                legacy_rows = self._retrieve_python(db, org_id=org_id, query_vector=query_vector, k=k)
         else:
-            rows = self._retrieve_python(db, org_id=org_id, query_vector=query_vector, k=k)
+            legacy_rows = self._retrieve_python(db, org_id=org_id, query_vector=query_vector, k=k)
 
+        rows = self._merge_results(material_rows, legacy_rows, k=k)
         return [row for row in rows if row.similarity_score >= min_score]
 
     def retrieve_for_topic(
@@ -110,7 +141,7 @@ class DocumentRetrievalService:
         if not self.has_ready_documents(db, org_id=org_id):
             return []
 
-        cache_key = (str(org_id), " ".join(topic.split()).strip().lower(), int(k))
+        cache_key = (str(org_id or "__global__"), " ".join(topic.split()).strip().lower(), int(k))
         cached_rows = self._get_cached_topic_results(cache_key)
         if cached_rows is not None:
             return [row for row in cached_rows if row.similarity_score >= min_score]
@@ -122,14 +153,53 @@ class DocumentRetrievalService:
         except Exception:
             query_vector = None
 
-        dialect_name = db.bind.dialect.name if db.bind is not None else ""
-        if query_vector is not None and dialect_name == "postgresql" and self._supports_postgres_vector_search(db):
-            try:
-                rows = self._retrieve_postgres(db, org_id=org_id, query_vector=query_vector, k=k)
-            except DBAPIError:
-                rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
+        structured_rows: list[RetrievedChunk]
+        if query_vector is not None:
+            structured_rows = self._retrieve_material_docs_python(
+                db,
+                org_id=org_id,
+                query_vector=query_vector,
+                k=k,
+                include_raw_chunks=False,
+            )
         else:
-            rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
+            structured_rows = self._retrieve_material_docs_keyword(
+                db,
+                org_id=org_id,
+                query_text=normalized_prompt,
+                k=k,
+                include_raw_chunks=False,
+            )
+
+        if structured_rows:
+            rows = structured_rows
+        elif query_vector is not None:
+            raw_chunk_rows = self._retrieve_material_docs_python(
+                db,
+                org_id=org_id,
+                query_vector=query_vector,
+                k=k,
+                include_raw_chunks=True,
+            )
+            dialect_name = db.bind.dialect.name if db.bind is not None else ""
+            if dialect_name == "postgresql" and self._supports_postgres_vector_search(db):
+                try:
+                    legacy_rows = self._retrieve_postgres(db, org_id=org_id, query_vector=query_vector, k=k)
+                except DBAPIError:
+                    legacy_rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
+            else:
+                legacy_rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
+            rows = self._merge_results(raw_chunk_rows, legacy_rows, k=k)
+        else:
+            raw_chunk_rows = self._retrieve_material_docs_keyword(
+                db,
+                org_id=org_id,
+                query_text=normalized_prompt,
+                k=k,
+                include_raw_chunks=True,
+            )
+            legacy_rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
+            rows = self._merge_results(raw_chunk_rows, legacy_rows, k=k)
 
         self._set_cached_topic_results(cache_key, rows)
         return [row for row in rows if row.similarity_score >= min_score]
@@ -341,6 +411,95 @@ class DocumentRetrievalService:
         scored.sort(key=lambda item: item.similarity_score, reverse=True)
         return scored[:k]
 
+    def _retrieve_material_docs_python(
+        self,
+        db: Session,
+        *,
+        org_id: str | None,
+        query_vector: list[float],
+        k: int,
+        include_raw_chunks: bool,
+    ) -> list[RetrievedChunk]:
+        stmt = (
+            select(OrgKnowledgeDoc, OrgMaterial.original_filename)
+            .join(OrgMaterial, OrgMaterial.id == OrgKnowledgeDoc.material_id)
+            .where(
+                OrgMaterial.deleted_at.is_(None),
+                OrgKnowledgeDoc.embedding.is_not(None),
+            )
+        )
+        if org_id is None:
+            stmt = stmt.where(OrgKnowledgeDoc.org_id.is_(None))
+        else:
+            stmt = stmt.where(OrgKnowledgeDoc.org_id == org_id)
+        if include_raw_chunks:
+            stmt = stmt.where(OrgKnowledgeDoc.extraction_type == "raw_chunk")
+        else:
+            stmt = stmt.where(OrgKnowledgeDoc.extraction_type != "raw_chunk")
+            stmt = stmt.where(OrgKnowledgeDoc.manager_approved.is_not(False))
+
+        rows = db.execute(stmt).all()
+        scored: list[RetrievedChunk] = []
+        for doc, document_name in rows:
+            similarity = self._cosine_similarity(query_vector, doc.embedding or [])
+            scored.append(
+                RetrievedChunk(
+                    chunk_id=str(doc.id),
+                    document_id=str(doc.material_id),
+                    document_name=document_name,
+                    text=doc.content,
+                    similarity_score=similarity,
+                )
+            )
+        scored.sort(key=lambda item: item.similarity_score, reverse=True)
+        return scored[:k]
+
+    def _retrieve_material_docs_keyword(
+        self,
+        db: Session,
+        *,
+        org_id: str | None,
+        query_text: str,
+        k: int,
+        include_raw_chunks: bool,
+    ) -> list[RetrievedChunk]:
+        terms = self._keyword_terms(query_text)
+        if not terms:
+            return []
+
+        stmt = (
+            select(OrgKnowledgeDoc, OrgMaterial.original_filename)
+            .join(OrgMaterial, OrgMaterial.id == OrgKnowledgeDoc.material_id)
+            .where(OrgMaterial.deleted_at.is_(None))
+        )
+        if org_id is None:
+            stmt = stmt.where(OrgKnowledgeDoc.org_id.is_(None))
+        else:
+            stmt = stmt.where(OrgKnowledgeDoc.org_id == org_id)
+        if include_raw_chunks:
+            stmt = stmt.where(OrgKnowledgeDoc.extraction_type == "raw_chunk")
+        else:
+            stmt = stmt.where(OrgKnowledgeDoc.extraction_type != "raw_chunk")
+            stmt = stmt.where(OrgKnowledgeDoc.manager_approved.is_not(False))
+
+        rows = db.execute(stmt).all()
+        scored: list[RetrievedChunk] = []
+        for doc, document_name in rows:
+            similarity = self._keyword_similarity(doc.content, terms)
+            if similarity <= 0:
+                continue
+            scored.append(
+                RetrievedChunk(
+                    chunk_id=str(doc.id),
+                    document_id=str(doc.material_id),
+                    document_name=document_name,
+                    text=doc.content,
+                    similarity_score=similarity,
+                )
+            )
+        scored.sort(key=lambda item: (item.similarity_score, len(item.text)), reverse=True)
+        return scored[:k]
+
     def _retrieve_keyword(
         self,
         db: Session,
@@ -393,6 +552,32 @@ class DocumentRetrievalService:
             seen.add(term)
             unique_terms.append(term)
         return unique_terms[:12]
+
+    def _keyword_similarity(self, text: str, terms: list[str]) -> float:
+        text_lower = (text or "").lower()
+        matched = sum(1 for term in terms if term in text_lower)
+        if matched <= 0:
+            return 0.0
+        similarity = max(0.7, matched / max(1, len(terms)))
+        return round(min(1.0, similarity), 4)
+
+    def _merge_results(
+        self,
+        primary: list[RetrievedChunk],
+        secondary: list[RetrievedChunk],
+        *,
+        k: int,
+    ) -> list[RetrievedChunk]:
+        seen: set[tuple[str, str]] = set()
+        merged: list[RetrievedChunk] = []
+        for row in [*primary, *secondary]:
+            key = (row.document_id, row.chunk_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+        merged.sort(key=lambda item: item.similarity_score, reverse=True)
+        return merged[:k]
 
     def _truncate_text_to_token_budget(self, text: str, token_budget: int) -> str:
         words = text.split()

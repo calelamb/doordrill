@@ -202,11 +202,11 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     rep = db.scalar(select(User).where(User.id == session.rep_id))
     company_context: str | None = None
     company_context_chunk_count = 0
-    if rep is not None and rep.org_id:
-        rep_org_id = rep.org_id
+    if session.org_id:
+        session_org_id = session.org_id
         retrieval_service = DocumentRetrievalService(settings=settings)
         try:
-            if retrieval_service.has_ready_documents(db, org_id=rep_org_id):
+            if retrieval_service.has_ready_documents(db, org_id=session_org_id):
                 loop = asyncio.get_event_loop()
                 context_hint = scenario.name if scenario is not None else ""
                 def retrieve_topic(topic: str, *, k: int, min_score: float) -> list[RetrievedChunk]:
@@ -214,7 +214,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     try:
                         return retrieval_service.retrieve_for_topic(
                             worker_db,
-                            org_id=rep_org_id,
+                            org_id=session_org_id,
                             topic=topic,
                             context_hint=context_hint,
                             k=k,
@@ -251,7 +251,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             logger.warning(
                 "Failed to load homeowner company context",
                 exc_info=True,
-                extra={"session_id": session_id, "trace_id": ws_trace_id, "org_id": rep_org_id},
+                extra={"session_id": session_id, "trace_id": ws_trace_id, "org_id": session_org_id},
             )
             company_context = None
             company_context_chunk_count = 0

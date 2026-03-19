@@ -1,6 +1,7 @@
 from sqlalchemy import select
 
 from app.db.session import SessionLocal, engine
+from app.db.seed_questionnaire import seed_questionnaire_questions
 from app.models import Base  # noqa: F401 - ensure models imported
 from app.models.prompt_version import PromptVersion
 from app.models.scenario import Scenario
@@ -143,10 +144,12 @@ def _upsert_prompt_version(db, *, prompt_type: str, version: str, content: str, 
         select(PromptVersion).where(
             PromptVersion.prompt_type == prompt_type,
             PromptVersion.version == version,
+            PromptVersion.org_id.is_(None),
         )
     )
     if existing is None:
         existing = PromptVersion(
+            org_id=None,
             prompt_type=prompt_type,
             version=version,
             content=content,
@@ -158,7 +161,12 @@ def _upsert_prompt_version(db, *, prompt_type: str, version: str, content: str, 
         existing.active = active
 
     if active:
-        for row in db.scalars(select(PromptVersion).where(PromptVersion.prompt_type == prompt_type)).all():
+        for row in db.scalars(
+            select(PromptVersion).where(
+                PromptVersion.prompt_type == prompt_type,
+                PromptVersion.org_id.is_(None),
+            )
+        ).all():
             row.active = row.version == version
 
 
@@ -244,6 +252,7 @@ def init_db() -> None:
         AnalyticsRefreshService().ensure_metric_definitions(db)
         ObjectionTaxonomyService().ensure_seed_data(db)
         _seed_prompt_versions(db)
+        seed_questionnaire_questions(db)
         _seed_phase_one_scenarios(db)
         db.commit()
     except Exception:

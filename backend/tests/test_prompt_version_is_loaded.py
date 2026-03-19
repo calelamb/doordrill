@@ -74,3 +74,41 @@ def test_prompt_version_falls_back_to_seeded_default_when_none_active(client, se
         db.close()
 
     assert grading_run.prompt_version_id == default_prompt_id
+
+
+def test_prompt_version_prefers_org_specific_active_record(client, seed_org):
+    db = SessionLocal()
+    try:
+        for row in db.scalars(select(PromptVersion).where(PromptVersion.prompt_type == "grading_v2")).all():
+            row.active = False
+        global_prompt = PromptVersion(
+            prompt_type="grading_v2",
+            version="global_active",
+            org_id=None,
+            content="global grading prompt",
+            active=True,
+        )
+        org_prompt = PromptVersion(
+            prompt_type="grading_v2",
+            version="org_active",
+            org_id=seed_org["org_id"],
+            content="org grading prompt",
+            active=True,
+        )
+        db.add_all([global_prompt, org_prompt])
+        db.commit()
+        db.refresh(org_prompt)
+        org_prompt_id = org_prompt.id
+    finally:
+        db.close()
+
+    assignment = _create_assignment(client, seed_org)
+    session_id = _run_session(
+        client,
+        seed_org,
+        assignment["id"],
+        "I handled the objection, explained the value, and asked for the next step.",
+    )
+
+    _, grading_run = _await_scorecard_and_run(session_id)
+    assert grading_run.prompt_version_id == org_prompt_id

@@ -1,4 +1,3 @@
-import hashlib
 import os
 import uuid
 from typing import Any
@@ -38,7 +37,7 @@ from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.notification_service import NotificationService
 from app.services.manager_review_service import ManagerReviewService
 from app.services.predictive_modeling_service import PredictiveModelingService
-from app.services.prompt_experiment_service import PromptExperimentService
+from app.services.prompt_version_resolver import prompt_version_resolver
 
 router = APIRouter(prefix="/rep", tags=["rep"])
 REP_CATEGORY_KEY_MAP = {
@@ -69,7 +68,6 @@ notification_service = NotificationService()
 review_service = ManagerReviewService()
 predictive_modeling_service = PredictiveModelingService()
 adaptive_training_service = AdaptiveTrainingService()
-prompt_experiment_service = PromptExperimentService()
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -287,21 +285,18 @@ def _get_active_conversation_prompt_version(db: Session) -> PromptVersion | None
     )
 
 
-def _select_conversation_prompt_version(db: Session, *, session_id: str) -> PromptVersion | None:
-    experiment = prompt_experiment_service.get_active_experiment(db, prompt_type="conversation")
-    if experiment is None:
-        return _get_active_conversation_prompt_version(db)
-
-    bucket = int(hashlib.md5(session_id.encode("utf-8")).hexdigest(), 16) % 100
-    selected_id = (
-        experiment.challenger_version_id
-        if bucket < int(experiment.challenger_traffic_pct)
-        else experiment.control_version_id
+def _select_conversation_prompt_version(
+    db: Session,
+    *,
+    session_id: str,
+    org_id: str | None = None,
+) -> PromptVersion | None:
+    return prompt_version_resolver.resolve(
+        prompt_type="conversation",
+        org_id=org_id,
+        session_id=session_id,
+        db=db,
     )
-    selected = db.get(PromptVersion, selected_id)
-    if selected is not None:
-        return selected
-    return _get_active_conversation_prompt_version(db)
 
 
 def _scenario_focus_skills(scenario: Scenario) -> list[str]:
@@ -421,7 +416,11 @@ def create_session(
         db.flush()
 
     session_id = str(uuid.uuid4())
-    selected_prompt_version = _select_conversation_prompt_version(db, session_id=session_id)
+    selected_prompt_version = _select_conversation_prompt_version(
+        db,
+        session_id=session_id,
+        org_id=rep_user.org_id,
+    )
     session = DrillSession(
         id=session_id,
         assignment_id=assignment.id,

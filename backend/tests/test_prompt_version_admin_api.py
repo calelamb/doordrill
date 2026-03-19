@@ -177,6 +177,52 @@ def test_prompt_version_admin_duplicate_create_returns_409(client, seed_org):
     assert duplicate_response.json()["detail"] == "prompt version already exists"
 
 
+def test_prompt_version_admin_filters_org_scoped_rows(client, seed_org):
+    db = SessionLocal()
+    try:
+        global_row = PromptVersion(
+            prompt_type="conversation",
+            version="conversation_global",
+            org_id=None,
+            content="global",
+            active=True,
+        )
+        own_org_row = PromptVersion(
+            prompt_type="conversation",
+            version="conversation_org",
+            org_id=seed_org["org_id"],
+            content="own org",
+            active=True,
+        )
+        other_org_row = PromptVersion(
+            prompt_type="conversation",
+            version="conversation_other_org",
+            org_id="other-org",
+            content="other org",
+            active=True,
+        )
+        db.add_all([global_row, own_org_row, other_org_row])
+        db.commit()
+    finally:
+        db.close()
+
+    headers = _manager_headers(seed_org)
+    response = client.get("/admin/prompt-versions", headers=headers, params={"prompt_type": "conversation"})
+    assert response.status_code == 200
+    versions = {item["version"] for item in response.json()}
+    assert "conversation_global" in versions
+    assert "conversation_org" in versions
+    assert "conversation_other_org" not in versions
+
+    scoped_response = client.get(
+        "/admin/prompt-versions",
+        headers=headers,
+        params={"prompt_type": "conversation", "org_id": seed_org["org_id"]},
+    )
+    assert scoped_response.status_code == 200
+    assert [item["version"] for item in scoped_response.json()] == ["conversation_org"]
+
+
 def test_prompt_version_admin_missing_rows_return_404(client, seed_org):
     headers = _manager_headers(seed_org)
     missing_id = "missing-prompt-version"

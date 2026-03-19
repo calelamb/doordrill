@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -21,7 +20,7 @@ from app.models.types import SessionStatus
 from app.schemas.scorecard import StructuredScorecardPayloadV2
 from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.services.document_retrieval_service import DocumentRetrievalService
-from app.services.prompt_experiment_service import PromptExperimentService
+from app.services.prompt_version_resolver import prompt_version_resolver
 
 CATEGORY_KEYS = [
     "opening",
@@ -112,7 +111,7 @@ class GradingService:
         self.prompt_builder = GradingPromptBuilder()
         self.analytics_refresh_service = AnalyticsRefreshService()
         self.document_retrieval_service = DocumentRetrievalService(settings=self.settings)
-        self.prompt_experiment_service = PromptExperimentService()
+        self.prompt_version_resolver = prompt_version_resolver
         self._active_prompt_version_id: str | None = None
 
     async def grade_session(self, db: Session, session_id: str) -> Scorecard:
@@ -120,7 +119,8 @@ class GradingService:
         if session is None:
             raise ValueError("session not found")
 
-        prompt_version = self._select_prompt_version(db, session_id=session_id)
+        org_id = session.rep.org_id if session.rep is not None else None
+        prompt_version = self._select_prompt_version(db, session_id=session_id, org_id=org_id)
         self._active_prompt_version_id = prompt_version.id
         effective_prompt_template = self._build_effective_prompt_template(
             db,
@@ -194,58 +194,19 @@ class GradingService:
         db.refresh(scorecard)
         return scorecard
 
-    def _get_active_prompt_version(self, db: Session) -> PromptVersion | None:
-        return db.scalar(
-            select(PromptVersion)
-            .where(PromptVersion.prompt_type == "grading_v2")
-            .where(PromptVersion.active.is_(True))
-            .order_by(PromptVersion.created_at.desc())
+    def _select_prompt_version(
+        self,
+        db: Session,
+        *,
+        session_id: str,
+        org_id: str | None = None,
+    ) -> PromptVersion:
+        return self.prompt_version_resolver.resolve(
+            prompt_type="grading_v2",
+            org_id=org_id,
+            session_id=session_id,
+            db=db,
         )
-
-    def _select_prompt_version(self, db: Session, *, session_id: str) -> PromptVersion:
-        experiment = self.prompt_experiment_service.get_active_experiment(db, prompt_type="grading_v2")
-        if experiment is None:
-            return self._ensure_active_prompt_version(db)
-
-        bucket = int(hashlib.md5(session_id.encode("utf-8")).hexdigest(), 16) % 100
-        selected_id = (
-            experiment.challenger_version_id
-            if bucket < int(experiment.challenger_traffic_pct)
-            else experiment.control_version_id
-        )
-        selected = db.get(PromptVersion, selected_id)
-        if selected is None:
-            return self._ensure_active_prompt_version(db)
-        return selected
-
-    def _ensure_active_prompt_version(self, db: Session) -> PromptVersion:
-        row = self._get_active_prompt_version(db)
-        if row is not None:
-            return row
-
-        row = db.scalar(
-            select(PromptVersion).where(
-                PromptVersion.prompt_type == "grading_v2",
-                PromptVersion.version == "1.0.0",
-            )
-        )
-        if row is None:
-            row = PromptVersion(
-                prompt_type="grading_v2",
-                version="1.0.0",
-                content=GradingPromptBuilder.template_blueprint(),
-                active=True,
-            )
-            db.add(row)
-            db.flush()
-        else:
-            row.content = GradingPromptBuilder.template_blueprint()
-            row.active = True
-
-        for existing in db.scalars(select(PromptVersion).where(PromptVersion.prompt_type == "grading_v2")).all():
-            existing.active = existing.id == row.id
-        db.flush()
-        return row
 
     def _build_effective_prompt_template(
         self,

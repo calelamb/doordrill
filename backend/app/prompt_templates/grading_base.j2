@@ -1,0 +1,38 @@
+{{ grading_base_blueprint }}
+
+Grade the rep in the context of {{ company_name }} selling {{ product_category }}{% if product_description %}: {{ product_description }}{% endif %}.
+
+Company-specific grading priorities, highest first:
+{% if grading_priorities %}
+{% for priority in grading_priorities -%}
+- {{ priority }}
+{% endfor %}
+{% else %}
+- Use the default DoorDrill grading emphasis.
+{% endif %}
+
+Reward clear use of these company value points when they are relevant and truthful:
+{% if unique_selling_points %}
+{% for point in unique_selling_points -%}
+- {{ point }}
+{% endfor %}
+{% else %}
+- No org-specific value points were provided.
+{% endif %}
+
+Treat these objections as high-value evaluation moments:
+{% if known_objections %}
+{% for objection in known_objections -%}
+- {{ objection.objection }}{% if objection.preferred_rebuttal_hint %} | Strong rebuttal shape: {{ objection.preferred_rebuttal_hint }}{% endif %}
+{% endfor %}
+{% else %}
+- Use the transcript evidence without org-specific objection weighting.
+{% endif %}
+
+Additional grading context:
+- Target customer profile: {{ target_demographics_summary }}
+- Pricing framing: {{ pricing_framing or "No org-specific pricing framing was provided." }}
+- Close style expected from rep: {{ close_style or "consultative" }}
+- Rep tone guidance: {{ rep_tone_guidance or "professional_warm" }}
+
+Stay evidence-based. Do not reward fabricated claims or product details that are not supported by the transcript.

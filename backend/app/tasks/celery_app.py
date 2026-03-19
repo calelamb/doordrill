@@ -28,6 +28,7 @@ def get_celery_app():
     celery_app.conf.accept_content = ["json"]
     celery_app.conf.timezone = "UTC"
     celery_app.conf.task_routes = {
+        "materials.process": {"queue": "materials.process"},
         "post_session.cleanup": {"queue": "postprocess.cleanup"},
         "post_session.grade": {"queue": "postprocess.grade"},
         "post_session.notify": {"queue": "postprocess.notify"},

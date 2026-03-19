@@ -27,10 +27,13 @@ from app.models.invitation import Invitation
 from app.models.knowledge import OrgDocument, OrgDocumentChunk
 from app.models.manager_action import ManagerActionLog
 from app.models.notification_delivery import NotificationDelivery
+from app.models.org_material import OrgKnowledgeDoc, OrgMaterial
+from app.models.org_prompt_config import OrgPromptConfig
 from app.models.password_reset import PasswordResetToken
 from app.models.postprocess_run import PostprocessRun
 from app.models.predictive import ManagerCoachingImpact, RepCohortBenchmark, RepRiskScore, RepSkillForecast, ScenarioOutcomeAggregate
 from app.models.prompt_version import PromptVersion
+from app.models.questionnaire import OrgQuestionnaireResponse, QuestionnaireQuestion
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.scenario import Scenario
 from app.models.session import Session, SessionArtifact, SessionEvent, SessionTurn
@@ -78,6 +81,11 @@ __all__ = [
     "ManagerCoachingNote",
     "ManagerReview",
     "NotificationDelivery",
+    "OrgKnowledgeDoc",
+    "OrgMaterial",
+    "OrgPromptConfig",
+    "OrgQuestionnaireResponse",
+    "QuestionnaireQuestion",
     "ObjectionType",
     "Organization",
     "OverrideLabel",

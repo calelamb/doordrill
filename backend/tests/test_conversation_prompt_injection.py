@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models import Base
+from app.models.org_prompt_config import OrgPromptConfig
 from app.models.prompt_version import PromptVersion
 from app.services.conversation_orchestrator import ConversationOrchestrator, HomeownerPersona, PromptBuilder
 
@@ -64,6 +65,36 @@ def test_prompt_builder_omits_layer_five_override_when_content_is_none():
     )
 
     assert "LAYER 5 - PROMPT OVERRIDE DIRECTIVES" not in prompt
+
+
+def test_prompt_builder_includes_layer_zero_when_org_config_is_published():
+    prompt = PromptBuilder().build(
+        scenario=None,
+        persona=_persona(),
+        stage="objection_handling",
+        prompt_version="conversation_v1",
+        conversation_prompt_content=None,
+        org_config=OrgPromptConfig(
+            org_id="org-123",
+            company_name="Acme Solar",
+            product_category="residential solar",
+            product_description="Panels and battery backup for homeowners.",
+            pitch_stages=["door_knock", "initial_pitch", "close_attempt"],
+            unique_selling_points=["Battery backup"],
+            known_objections=[],
+            target_demographics={"age_range": "35-65", "common_concerns": ["cost", "installation"]},
+            competitors=[],
+            pricing_framing="Site survey first.",
+            close_style="consultative",
+            rep_tone_guidance="professional_warm",
+            grading_priorities=["rapport_building"],
+            published=True,
+        ),
+    )
+
+    assert "=== COMPANY CONTEXT ===" in prompt
+    assert "Acme Solar" in prompt
+    assert prompt.index("=== COMPANY CONTEXT ===") < prompt.index("LAYER 1 - IMMERSION CONTRACT")
 
 
 def test_bind_session_context_loads_prompt_content_from_matching_prompt_version(memory_db):

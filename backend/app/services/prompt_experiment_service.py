@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from statistics import mean
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,15 +13,43 @@ from app.models.training import OverrideLabel, PromptExperiment
 
 
 class PromptExperimentService:
-    def get_active_experiment(self, db: Session, *, prompt_type: str) -> PromptExperiment | None:
-        return db.scalar(
+    def get_active_experiment(
+        self,
+        db: Session,
+        *,
+        prompt_type: str,
+        org_id: str | None | Any = ...,
+    ) -> PromptExperiment | None:
+        experiments = db.scalars(
             select(PromptExperiment)
             .where(
                 PromptExperiment.prompt_type == prompt_type,
                 PromptExperiment.status == "active",
             )
             .order_by(PromptExperiment.started_at.desc(), PromptExperiment.created_at.desc())
-        )
+        ).all()
+        if org_id is ...:
+            return next(iter(experiments), None)
+
+        scoped_match: PromptExperiment | None = None
+        global_match: PromptExperiment | None = None
+        for experiment in experiments:
+            control = db.get(PromptVersion, experiment.control_version_id)
+            challenger = db.get(PromptVersion, experiment.challenger_version_id)
+            if control is None or challenger is None:
+                continue
+            if control.prompt_type != prompt_type or challenger.prompt_type != prompt_type:
+                continue
+            if control.org_id != challenger.org_id:
+                continue
+            if control.org_id == org_id and scoped_match is None:
+                scoped_match = experiment
+            if control.org_id is None and global_match is None:
+                global_match = experiment
+
+        if scoped_match is not None:
+            return scoped_match
+        return global_match
 
     def create_experiment(
         self,
@@ -119,8 +148,17 @@ class PromptExperimentService:
             if experiment.winner == "control"
             else experiment.challenger_version_id
         )
+        winner_prompt = db.get(PromptVersion, winner_prompt_id)
+        if winner_prompt is None:
+            raise ValueError("prompt experiment winner version not found")
         for prompt in db.scalars(
-            select(PromptVersion).where(PromptVersion.prompt_type == experiment.prompt_type)
+            select(PromptVersion)
+            .where(PromptVersion.prompt_type == experiment.prompt_type)
+            .where(
+                PromptVersion.org_id == winner_prompt.org_id
+                if winner_prompt.org_id is not None
+                else PromptVersion.org_id.is_(None)
+            )
         ).all():
             prompt.active = prompt.id == winner_prompt_id
 

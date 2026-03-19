@@ -44,6 +44,12 @@ class Session(Base, TimestampMixin):
     artifacts: Mapped[list["SessionArtifact"]] = relationship(back_populates="session", cascade="all, delete-orphan")
     scorecard: Mapped["Scorecard | None"] = relationship(back_populates="session", uselist=False)
 
+    @property
+    def org_id(self) -> str | None:
+        if self.rep is None:
+            return None
+        return self.rep.org_id
+
 
 class SessionEvent(Base):
     __tablename__ = "session_events"

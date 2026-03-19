@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.org_prompt_config import OrgPromptConfig
 from app.models.prompt_version import PromptVersion
 from app.models.transcript import ObjectionType
 from app.models.user import User
@@ -18,6 +19,8 @@ from app.services.micro_behavior_engine import (
     SENTENCE_LENGTH_BY_EMOTION,
     TONE_BY_TRANSITION,
 )
+from app.services.org_prompt_rendering import build_company_context_layer
+from app.services.prompt_version_resolver import prompt_version_resolver
 
 if TYPE_CHECKING:
     from app.models.scenario import Scenario
@@ -507,16 +510,20 @@ class PersonaEnricher:
 
 
 @dataclass
-class SessionPromptContext:
+class ConversationContext:
     scenario: "Scenario | None"
     scenario_snapshot: ScenarioSnapshot
     persona: HomeownerPersona
     prompt_version: str | None = None
     conversation_prompt_content: str | None = None
     org_id: str | None = None
+    org_config: OrgPromptConfig | None = None
     territory_context: str | None = None
     company_context: str | None = None
     last_mb_plan: dict[str, Any] | None = None
+
+
+SessionPromptContext = ConversationContext
 
 
 @dataclass
@@ -584,6 +591,7 @@ class PromptBuilder:
         stage: str,
         prompt_version: str | None = None,
         conversation_prompt_content: str | None = None,
+        org_config: OrgPromptConfig | None = None,
         *,
         scenario_snapshot: ScenarioSnapshot | None = None,
         emotion: str | None = None,
@@ -625,6 +633,7 @@ class PromptBuilder:
             f"RULE: {hard_rule_sentence} {response_cap} "
             "You are a busy homeowner at your front door. Be blunt and brief."
         )
+        layer_zero = build_company_context_layer(org_config)
 
         layer_one = (
             "LAYER 1 - IMMERSION CONTRACT\n"
@@ -729,7 +738,10 @@ class PromptBuilder:
                 f"{company_context.strip()}"
             )
         version_line = f"Prompt version: {prompt_version or 'conversation_v1'}"
-        parts = [version_line, layer_one, layer_two, layer_three, layer_three_b]
+        parts = [version_line]
+        if layer_zero:
+            parts.append(layer_zero)
+        parts.extend([layer_one, layer_two, layer_three, layer_three_b])
         if layer_three_b_cont:
             parts.append(layer_three_b_cont)
         if behavior_directives is not None:
@@ -747,7 +759,13 @@ class PromptBuilder:
         self.last_token_count = measure_prompt_tokens(prompt)
         return prompt
 
-    def build_from_scenario(self, scenario: "Scenario | None", stage: str, prompt_version: str | None = None) -> str:
+    def build_from_scenario(
+        self,
+        scenario: "Scenario | None",
+        stage: str,
+        prompt_version: str | None = None,
+        org_config: OrgPromptConfig | None = None,
+    ) -> str:
         snapshot = ScenarioSnapshot.from_scenario(scenario)
         persona = PersonaEnricher.enrich(
             HomeownerPersona.from_payload(snapshot.persona_payload),
@@ -760,6 +778,7 @@ class PromptBuilder:
             persona=persona,
             stage=stage,
             prompt_version=prompt_version,
+            org_config=org_config,
         )
 
     def _normalize_stage(self, stage: str) -> str:
@@ -820,9 +839,13 @@ class ConversationOrchestrator:
     """State manager for scenario stage progression, emotion, and objection escalation."""
 
     def __init__(self) -> None:
+        from app.services.org_prompt_config_service import OrgPromptConfigService
+
         self._states: dict[str, ConversationState] = {}
-        self._contexts: dict[str, SessionPromptContext] = {}
+        self._contexts: dict[str, ConversationContext] = {}
         self._prompt_builder = PromptBuilder()
+        self._org_prompt_config_service = OrgPromptConfigService()
+        self._prompt_version_resolver = prompt_version_resolver
 
     def initialize_session(
         self,
@@ -837,7 +860,7 @@ class ConversationOrchestrator:
         org_id: str | None = None,
         territory_context: str | None = None,
     ) -> ConversationState:
-        context = SessionPromptContext(
+        context = ConversationContext(
             scenario=None,
             scenario_snapshot=ScenarioSnapshot(
                 name=scenario_name or "Generic Homeowner",
@@ -849,6 +872,7 @@ class ConversationOrchestrator:
             persona=HomeownerPersona.from_payload(persona),
             prompt_version=prompt_version,
             org_id=org_id,
+            org_config=None,
             territory_context=territory_context,
         )
         context.persona = self._enrich_persona(context.persona, context.scenario_snapshot)
@@ -905,22 +929,48 @@ class ConversationOrchestrator:
         if resolved_org_id is None and db is not None and rep_id:
             rep = db.scalar(select(User).where(User.id == rep_id))
             resolved_org_id = rep.org_id if rep is not None else None
+        resolved_prompt_version = prompt_version
         conversation_prompt_content = None
-        if db is not None and prompt_version is not None:
-            prompt_version_row = db.scalar(
-                select(PromptVersion)
-                .where(PromptVersion.prompt_type == "conversation")
-                .where(PromptVersion.version == prompt_version)
+        org_config = None
+        if db is not None:
+            prompt_version_row = self._prompt_version_resolver.resolve(
+                prompt_type="conversation",
+                org_id=resolved_org_id,
+                session_id=session_id,
+                db=db,
             )
-            if prompt_version_row is not None and prompt_version_row.content.strip():
+            if (
+                prompt_version is not None
+                and prompt_version_row.version != prompt_version
+                and db.scalar(select(PromptVersion.id).where(
+                    PromptVersion.prompt_type == "conversation",
+                    PromptVersion.version == prompt_version,
+                )) is not None
+            ):
+                explicit_stmt = (
+                    select(PromptVersion)
+                    .where(PromptVersion.prompt_type == "conversation")
+                    .where(PromptVersion.version == prompt_version)
+                    .order_by(PromptVersion.active.desc(), PromptVersion.created_at.desc())
+                )
+                if resolved_org_id is not None:
+                    prompt_version_row = db.scalar(explicit_stmt.where(PromptVersion.org_id == resolved_org_id)) or db.scalar(
+                        explicit_stmt.where(PromptVersion.org_id.is_(None))
+                    )
+                else:
+                    prompt_version_row = db.scalar(explicit_stmt.where(PromptVersion.org_id.is_(None)))
+            resolved_prompt_version = prompt_version_row.version
+            if prompt_version_row.content.strip():
                 conversation_prompt_content = prompt_version_row.content
-        context = SessionPromptContext(
+            org_config = self._org_prompt_config_service.get_active_config(resolved_org_id or "", db)
+        context = ConversationContext(
             scenario=scenario,
             scenario_snapshot=snapshot,
             persona=HomeownerPersona.from_payload(snapshot.persona_payload),
-            prompt_version=prompt_version,
+            prompt_version=resolved_prompt_version,
             conversation_prompt_content=conversation_prompt_content,
             org_id=resolved_org_id,
+            org_config=org_config,
             company_context=company_context,
             last_mb_plan=self._contexts.get(session_id).last_mb_plan if session_id in self._contexts else None,
         )
@@ -1137,6 +1187,7 @@ class ConversationOrchestrator:
                 stage=stage_after,
                 prompt_version=context.prompt_version,
                 conversation_prompt_content=context.conversation_prompt_content,
+                org_config=context.org_config,
                 emotion=state.emotion if state is not None else "neutral",
                 resistance_level=state.resistance_level if state is not None else 2,
                 objection_pressure=state.objection_pressure if state is not None else 0,
@@ -1164,6 +1215,7 @@ class ConversationOrchestrator:
             persona=fallback_persona,
             stage=stage_after,
             prompt_version="conversation_v1",
+            org_config=None,
             emotion=state.emotion if state is not None else "neutral",
             resistance_level=state.resistance_level if state is not None else 2,
             objection_pressure=state.objection_pressure if state is not None else 0,
