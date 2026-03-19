@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     elevenlabs_voice_id: str | None = Field(default=None, alias="ELEVENLABS_VOICE_ID")
     elevenlabs_model_id: str = Field(default="eleven_flash_v2_5", alias="ELEVENLABS_MODEL_ID")
     elevenlabs_base_url: str = Field(default="https://api.elevenlabs.io", alias="ELEVENLABS_BASE_URL")
-    deepgram_model: str = Field(default="nova-2", alias="DEEPGRAM_MODEL")
+    deepgram_model: str = Field(default="nova-3", alias="DEEPGRAM_MODEL")
     provider_timeout_seconds: float = Field(default=10.0, alias="PROVIDER_TIMEOUT_SECONDS")
 
     use_celery: bool = Field(default=False, alias="USE_CELERY")

@@ -187,6 +187,18 @@ class DeepgramSttClient(BaseSttClient):
             return
         self._session_ids.add(session_id)
         self._active_session_id.set(session_id)
+        # Pre-warm the Deepgram WebSocket so the first utterance doesn't pay
+        # the WebSocket handshake cost (~150 ms).  Use the default WAV/linear16
+        # params that the mobile client always sends.
+        default_payload = payload or {
+            "codec": "linear16",
+            "content_type": "audio/wav",
+            "sample_rate": 16000,
+            "channels": 1,
+            "session_id": session_id,
+        }
+        with contextlib.suppress(Exception):
+            await self._get_or_open_session(session_id, payload=default_payload)
 
     async def end_session(self, session_id: str) -> None:
         self._session_ids.discard(session_id)
@@ -225,8 +237,8 @@ class DeepgramSttClient(BaseSttClient):
             "smart_format": "true",
             "punctuate": "true",
             "interim_results": "true",
-            "endpointing": "300",
-            "utterance_end_ms": "1000",
+            "endpointing": "100",
+            "utterance_end_ms": "500",
         }
         if codec == "opus" or "opus" in content_type:
             params["encoding"] = "opus"
@@ -351,12 +363,16 @@ class DeepgramSttClient(BaseSttClient):
                         raise RuntimeError(str(message.get("description") or "deepgram_error"))
 
             try:
+                # Hold the lock only during the send phase so that
+                # trigger_finalization() isn't blocked while Deepgram processes.
                 async with state.lock:
                     for idx in range(0, len(audio_bytes), 8192):
                         await state.ws.send(audio_bytes[idx : idx + 8192])
                         await asyncio.sleep(0)
                     await state.ws.send(json.dumps({"type": "Finalize"}))
-                    await consume_results()
+                # Consume results outside the lock — recv() does not conflict
+                # with concurrent sends on a different asyncio task.
+                await consume_results()
             except websockets.ConnectionClosed as exc:
                 await self.end_session(session_id)
                 if retry_count >= MAX_RETRIES:
