@@ -99,9 +99,12 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     assert replay["transport_metrics"]["barge_in_count"] >= 1
     assert replay["interruption_timeline"]
     assert replay["micro_behavior_timeline"]
+    assert replay["turn_diagnostics"]
+    assert replay["turn_diagnostics"][0]["response_plan"]
     assert replay["micro_behavior_timeline"][0]["tone"] is not None
     assert replay["conversational_realism"]["turn_count"] >= 1
     assert replay["conversational_realism"]["average_score"] >= 1.0
+    assert "phase_latency_summary" in replay["transport_metrics"]
 
     feed_resp = client.get("/manager/feed", params={"manager_id": seed_org["manager_id"]})
     assert feed_resp.status_code == 200

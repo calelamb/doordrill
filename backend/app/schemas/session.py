@@ -100,6 +100,7 @@ class SessionReplayResponse(BaseModel):
     transcript_turns: list[dict[str, Any]]
     objection_timeline: list[dict[str, Any]]
     micro_behavior_timeline: list[dict[str, Any]] = Field(default_factory=list)
+    turn_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
     interruption_timeline: list[dict[str, Any]] = Field(default_factory=list)
     stage_timeline: list[dict[str, Any]] = Field(default_factory=list)
     conversational_realism: dict[str, Any] = Field(default_factory=dict)

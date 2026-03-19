@@ -1,21 +1,52 @@
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from pathlib import Path
+import tempfile
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+import app.db.init_db as init_db_module
+import app.db.session as db_session_module
+import app.services.ledger_service as ledger_service_module
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
-from app.main import app
-from app.db.session import SessionLocal, engine
 from app.models import Base
 from app.models.scenario import Scenario
 from app.models.user import Organization, Team, User
 from app.models.types import UserRole
 from app.services.conversation_orchestrator import invalidate_objection_cache
 from app.services.provider_clients import ProviderSuite
+
+_TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="doordrill-backend-tests-"))
+_TEST_DB_PATH = _TEST_DB_DIR / "backend_tests.sqlite"
+_TEST_ENGINE = create_engine(
+    f"sqlite:///{_TEST_DB_PATH}",
+    future=True,
+    connect_args={"check_same_thread": False},
+)
+_TEST_SESSION_LOCAL = sessionmaker(
+    bind=_TEST_ENGINE,
+    autoflush=False,
+    autocommit=False,
+    future=True,
+    expire_on_commit=False,
+)
+
+db_session_module.engine = _TEST_ENGINE
+db_session_module.SessionLocal = _TEST_SESSION_LOCAL
+init_db_module.engine = _TEST_ENGINE
+init_db_module.SessionLocal = _TEST_SESSION_LOCAL
+ledger_service_module.SessionLocal = _TEST_SESSION_LOCAL
+
+from app.main import app
+from app.db.session import SessionLocal, engine
 from app.voice import ws as voice_ws
+
+voice_ws.SessionLocal = _TEST_SESSION_LOCAL
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +82,11 @@ def configure_test_runtime() -> Iterator[None]:
 def initialize_test_db() -> None:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    try:
+        yield
+    finally:
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
 
 
 @pytest.fixture(autouse=True)

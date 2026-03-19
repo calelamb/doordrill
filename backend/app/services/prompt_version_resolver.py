@@ -209,6 +209,8 @@ class PromptVersionResolver:
     def _default_version_for(self, prompt_type: str) -> str:
         if prompt_type == "conversation":
             return "conversation_v1"
+        if prompt_type == "conversation_analyzer":
+            return "conversation_analyzer_v1"
         if prompt_type == "coaching":
             return "coaching_v1"
         if prompt_type == "grading":
@@ -222,6 +224,11 @@ class PromptVersionResolver:
             from app.services.conversation_orchestrator import PromptBuilder
 
             return PromptBuilder.template_blueprint()
+        if prompt_type == "conversation_analyzer":
+            return (
+                "Analyze the latest rep turn with emphasis on realism, directness, objection handling, "
+                "pressure, and the homeowner's immediate reaction intent."
+            )
         if prompt_type in {"grading", "grading_v2"}:
             from app.services.grading_service import GradingPromptBuilder
 

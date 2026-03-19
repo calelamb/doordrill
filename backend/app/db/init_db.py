@@ -190,6 +190,16 @@ def _seed_prompt_versions(db) -> None:
     )
     _upsert_prompt_version(
         db,
+        prompt_type="conversation_analyzer",
+        version="conversation_analyzer_v1",
+        content=(
+            "Classify the latest rep turn for direct reaction quality, objection handling quality, "
+            "pressure, emotional impact, and the homeowner's most realistic next move."
+        ),
+        active=True,
+    )
+    _upsert_prompt_version(
+        db,
         prompt_type="grading",
         version="grading_v1",
         content=GradingPromptBuilder.template_blueprint(),

@@ -42,6 +42,16 @@ SENTENCE_LENGTH_BY_EMOTION = {
     "curious": "long",
     "interested": "long",
 }
+SEMANTIC_KEYWORDS_BY_OBJECTION = {
+    "price": ("price", "cost", "expensive", "budget", "monthly"),
+    "price_per_month": ("monthly", "payment", "month", "rate"),
+    "trust": ("trust", "licensed", "insured", "reviews", "guarantee"),
+    "timing": ("busy", "time", "later", "schedule"),
+    "not_right_now": ("later", "not now", "another time"),
+    "spouse": ("spouse", "partner", "wife", "husband"),
+    "incumbent_provider": ("already", "provider", "Orkin", "service"),
+    "safety_environment": ("safe", "kids", "pets", "chemical", "environment"),
+}
 
 
 @dataclass
@@ -112,7 +122,7 @@ class ConversationalMicroBehaviorEngine:
         base_text = self._normalize_text(raw_text)
         tone = self._determine_tone(emotion_before, emotion_after, behavioral_signals)
         sentence_length = self._determine_sentence_length(emotion_after, behavioral_signals, base_text)
-        trimmed_text = self._apply_sentence_length(base_text, sentence_length)
+        trimmed_text = self._apply_sentence_length(base_text, sentence_length, active_objections=active_objections)
 
         interruption_type: str | None = None
         if self._should_interrupt(emotion_after, behavioral_signals):
@@ -204,18 +214,68 @@ class ConversationalMicroBehaviorEngine:
             return "long"
         return preferred
 
-    def _apply_sentence_length(self, text: str, sentence_length: str) -> str:
+    def _apply_sentence_length(self, text: str, sentence_length: str, *, active_objections: list[str]) -> str:
         sentences = self._split_sentences(text)
         if not sentences:
             return text
         if sentence_length == "short":
-            sentence = sentences[0]
+            sentence = self._best_semantic_sentence(sentences, active_objections=active_objections) or sentences[0]
             if "," in sentence:
                 sentence = sentence.split(",", 1)[0].strip()
             return sentence.rstrip(".!?") + "."
         if sentence_length == "medium":
-            return " ".join(sentences[:2]).strip()
+            selected = self._select_semantic_sentences(sentences, limit=2, active_objections=active_objections)
+            return " ".join(selected).strip()
         return " ".join(sentences).strip()
+
+    def _best_semantic_sentence(self, sentences: list[str], *, active_objections: list[str]) -> str | None:
+        if not sentences:
+            return None
+        scored = sorted(
+            sentences,
+            key=lambda sentence: (
+                self._semantic_sentence_score(sentence, active_objections=active_objections),
+                1 if "?" in sentence else 0,
+            ),
+            reverse=True,
+        )
+        best = scored[0]
+        return best if self._semantic_sentence_score(best, active_objections=active_objections) > 0 else None
+
+    def _select_semantic_sentences(
+        self,
+        sentences: list[str],
+        *,
+        limit: int,
+        active_objections: list[str],
+    ) -> list[str]:
+        if len(sentences) <= limit:
+            return sentences
+        selected = [sentences[0]]
+        while len(selected) < limit:
+            remaining = [sentence for sentence in sentences if sentence not in selected]
+            if not remaining:
+                break
+            next_sentence = max(
+                remaining,
+                key=lambda sentence: (
+                    self._semantic_sentence_score(sentence, active_objections=active_objections),
+                    1 if "?" in sentence else 0,
+                ),
+            )
+            selected.append(next_sentence)
+        return [sentence for sentence in sentences if sentence in selected][:limit]
+
+    def _semantic_sentence_score(self, sentence: str, *, active_objections: list[str]) -> int:
+        lowered = sentence.lower()
+        score = 0
+        for objection in active_objections:
+            for keyword in SEMANTIC_KEYWORDS_BY_OBJECTION.get(objection, (objection.replace("_", " "),)):
+                if keyword.lower() in lowered:
+                    score += 2
+        if "?" in sentence:
+            score += 1
+        return score
 
     def _should_interrupt(self, emotion_after: str, behavioral_signals: list[str]) -> bool:
         if emotion_after not in {"annoyed", "hostile"}:

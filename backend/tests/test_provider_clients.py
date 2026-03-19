@@ -51,6 +51,24 @@ async def test_deepgram_listen_url_defaults_to_linear16_for_non_opus_payloads():
     assert "encoding=opus" in opus_url
 
 
+@pytest.mark.asyncio
+async def test_deepgram_listen_url_includes_vocabulary_hints():
+    client = DeepgramSttClient(api_key="test", base_url="https://api.deepgram.com", model="nova-2", timeout_seconds=1)
+
+    url = client._listen_url(
+        {
+            "codec": "wav",
+            "content_type": "audio/wav",
+            "sample_rate": 16000,
+            "channels": 1,
+            "vocabulary_hints": ["Acme Pest Control", "Orkin", "monthly payment"],
+        }
+    )
+
+    assert "keywords=" in url
+    assert "Acme+Pest+Control" in url
+
+
 class _FakeDeepgramWs:
     def __init__(self, messages, *, closed: bool = False):
         self._messages = list(messages)

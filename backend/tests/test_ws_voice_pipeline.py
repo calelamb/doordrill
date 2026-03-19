@@ -1,5 +1,7 @@
 import asyncio
 
+from app.db.session import SessionLocal
+from app.models.session import SessionTurn
 from app.services.provider_clients import MockLlmClient, MockSttClient, MockTtsClient, ProviderSuite, SttTranscript
 from app.voice import ws as voice_ws
 
@@ -253,3 +255,42 @@ def test_ws_barge_in_emits_audio_interrupt(client, seed_org, monkeypatch):
 
     assert barge_in_sent is True
     assert any(message["type"] == "server.audio.interrupt" for message in messages)
+
+
+def test_ws_commits_transcript_audit_and_turn_analysis(client, seed_org, monkeypatch):
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=MockSttClient(), llm=MockLlmClient(), tts=MockTtsClient()),
+    )
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+        messages = _run_turn(ws, text="Hi, I'm with Acme Pest Control and price matters.", sequence=1)
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    stt_final = next(message for message in messages if message["type"] == "server.stt.final")
+    committed = next(message for message in messages if message["type"] == "server.turn.committed")
+
+    assert stt_final["payload"]["transcript_normalization"]["raw_text"]
+    assert stt_final["payload"]["transcript_normalization"]["normalized_text"]
+    assert committed["payload"]["turn_analysis"]["stage_intent"]
+    assert committed["payload"]["turn_analysis"]["reaction_intent"]
+    assert committed["payload"]["response_plan"]["reaction_goal"]
+    assert "phase_latency_breakdown" in committed["payload"]
+    assert "transcript_quality" in committed["payload"]
+
+    db = SessionLocal()
+    try:
+        rep_turn = db.get(SessionTurn, committed["payload"]["rep_turn_id"])
+        assert rep_turn is not None
+        assert rep_turn.raw_transcript_text == stt_final["payload"]["transcript_normalization"]["raw_text"]
+        assert rep_turn.normalized_transcript_text == stt_final["payload"]["transcript_normalization"]["normalized_text"]
+        assert rep_turn.transcript_provider == stt_final["payload"]["provider"]
+        assert rep_turn.transcript_confidence == stt_final["payload"]["confidence"]
+    finally:
+        db.close()

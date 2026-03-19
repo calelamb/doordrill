@@ -38,6 +38,7 @@ from app.services.micro_behavior_engine import (
 from app.services.provider_clients import ProviderSuite
 from app.services.session_postprocess_service import SessionPostprocessService
 from app.services.storage_service import StorageService
+from app.services.transcript_normalization_service import TranscriptNormalizationResult, TranscriptNormalizationService
 from app.utils.latency import TurnLatencyRecord
 
 router = APIRouter(tags=["voice"])
@@ -58,6 +59,7 @@ micro_behavior_engine = ConversationalMicroBehaviorEngine()
 postprocess_service = SessionPostprocessService()
 providers = ProviderSuite.from_settings(settings)
 storage_service = StorageService()
+transcript_normalizer = TranscriptNormalizationService()
 
 SILENCE_FILLER_SECONDS = 4.0
 VAD_FINALIZE_DEBOUNCE_MS = 80
@@ -172,6 +174,47 @@ def _serialize_behavior_directives(directives: BehaviorDirectives) -> dict[str, 
     }
 
 
+def _serialize_transcript_normalization(result: TranscriptNormalizationResult) -> dict[str, Any]:
+    return {
+        "raw_text": result.raw_text,
+        "normalized_text": result.normalized_text,
+        "provider": result.provider,
+        "confidence": result.confidence,
+        "applied_terms": list(result.applied_terms),
+        "normalization_source": result.normalization_source,
+    }
+
+
+def _serialize_transcript_quality(result: TranscriptNormalizationResult) -> dict[str, Any]:
+    quality_band = "low"
+    if result.confidence >= 0.9:
+        quality_band = "high"
+    elif result.confidence >= 0.75:
+        quality_band = "medium"
+    return {
+        "provider": result.provider,
+        "confidence": result.confidence,
+        "quality_band": quality_band,
+        "applied_terms": list(result.applied_terms),
+        "normalization_source": result.normalization_source,
+    }
+
+
+def _serialize_phase_latency(record: TurnLatencyRecord | None) -> dict[str, Any]:
+    if record is None:
+        return {}
+    return record.to_budget_metrics().to_payload()
+
+
+def _serialize_response_plan(plan: Any) -> dict[str, Any]:
+    if hasattr(plan, "to_payload"):
+        try:
+            return dict(plan.to_payload())
+        except Exception:
+            return {}
+    return {}
+
+
 @router.websocket("/ws/sessions/{session_id}")
 @router.websocket("/ws/session/{session_id}")
 async def session_ws(websocket: WebSocket, session_id: str) -> None:
@@ -200,15 +243,24 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
     scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
     rep = db.scalar(select(User).where(User.id == session.rep_id))
+    retrieval_service = DocumentRetrievalService(settings=settings)
     company_context: str | None = None
+    objection_brief_cache: dict[str, str] = {}
     company_context_chunk_count = 0
     if session.org_id:
         session_org_id = session.org_id
-        retrieval_service = DocumentRetrievalService(settings=settings)
         try:
             if retrieval_service.has_ready_documents(db, org_id=session_org_id):
                 loop = asyncio.get_event_loop()
                 context_hint = scenario.name if scenario is not None else ""
+                brief_topics = {
+                    "price": "pest control pricing monthly plan what is included discounts service cadence",
+                    "trust": "licensed insured guarantee reviews local company background why trust this company",
+                    "safety_environment": "pest control safety kids pets environmental treatment product safety",
+                    "incumbent_provider": "switching from current provider why choose us competitor comparison",
+                    "service_detail": "inspection treatment follow up service detail what is included coverage",
+                }
+
                 def retrieve_topic(topic: str, *, k: int, min_score: float) -> list[RetrievedChunk]:
                     worker_db = SessionLocal()
                     try:
@@ -223,30 +275,29 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     finally:
                         worker_db.close()
 
-                pricing_chunks, competitor_chunks = await asyncio.gather(
-                    loop.run_in_executor(
-                        None,
-                        lambda: retrieve_topic(
-                            "pest control services pricing monthly plan what is included coverage",
-                            k=3,
-                            min_score=0.65,
-                        ),
-                    ),
-                    loop.run_in_executor(
-                        None,
-                        lambda: retrieve_topic(
-                            "competitor comparison why choose us reviews common objections",
-                            k=2,
-                            min_score=0.65,
-                        ),
-                    ),
+                retrieved_groups = await asyncio.gather(
+                    *[
+                        loop.run_in_executor(
+                            None,
+                            lambda topic=topic: retrieve_topic(topic, k=2, min_score=0.65),
+                        )
+                        for topic in brief_topics.values()
+                    ]
                 )
-                combined_chunks = _dedupe_retrieved_chunks([*pricing_chunks, *competitor_chunks])
+                combined_chunks = _dedupe_retrieved_chunks(
+                    [chunk for group in retrieved_groups for chunk in group]
+                )
                 if combined_chunks:
-                    formatted_context = retrieval_service.format_for_prompt(combined_chunks, max_tokens=600)
+                    formatted_context = retrieval_service.format_for_prompt(combined_chunks, max_tokens=520)
                     if formatted_context.strip():
                         company_context = formatted_context
                         company_context_chunk_count = len(combined_chunks)
+                for key, chunks in zip(brief_topics.keys(), retrieved_groups, strict=False):
+                    if not chunks:
+                        continue
+                    formatted_brief = retrieval_service.format_for_prompt(_dedupe_retrieved_chunks(chunks), max_tokens=180)
+                    if formatted_brief.strip():
+                        objection_brief_cache[key] = formatted_brief.strip()
         except Exception:
             logger.warning(
                 "Failed to load homeowner company context",
@@ -254,6 +305,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 extra={"session_id": session_id, "trace_id": ws_trace_id, "org_id": session_org_id},
             )
             company_context = None
+            objection_brief_cache = {}
             company_context_chunk_count = 0
     orchestrator.bind_session_context(
         session_id=session_id,
@@ -264,10 +316,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         rep_id=session.rep_id,
         company_context=company_context,
     )
-    # Keep STT session-scoped to avoid Deepgram websocket cold starts on every rep turn.
-    await providers.stt.start_session(session_id)
-    if hasattr(providers.llm, "set_session"):
-        providers.llm.set_session(session_id)
+    orchestrator.update_objection_brief_cache(session_id, objection_brief_cache)
     micro_behavior_engine.initialize_session(
         session_id,
         persona=scenario.persona if scenario is not None and isinstance(scenario.persona, dict) else None,
@@ -286,6 +335,49 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     ai_speaking_started_at: datetime | None = None
     interrupt_signal_at: datetime | None = None
     interrupt_signal_reason: str | None = None
+
+    def _context_and_state() -> tuple[Any, Any]:
+        return orchestrator.get_context(session_id), orchestrator.get_state(session_id)
+
+    def _current_vocabulary_hints() -> list[str]:
+        context, state = _context_and_state()
+        return transcript_normalizer.keyword_hints(
+            scenario=scenario,
+            org_config=context.org_config if context is not None else None,
+            active_objections=list(state.active_objections),
+            queued_objections=list(state.queued_objections),
+        )
+
+    def _stt_turn_tuning() -> dict[str, int]:
+        _, state = _context_and_state()
+        stage = state.stage
+        if stage in {"door_knock", "initial_pitch"}:
+            return {"endpointing_ms": 90, "utterance_end_ms": 425}
+        if stage in {"close_attempt", "ended"}:
+            return {"endpointing_ms": 55, "utterance_end_ms": 280}
+        return {"endpointing_ms": 65, "utterance_end_ms": 325}
+
+    # Keep provider sessions warm to avoid first-turn cold starts.
+    await providers.stt.start_session(
+        session_id,
+        payload={
+            "session_id": session_id,
+            "codec": "linear16",
+            "content_type": "audio/wav",
+            "sample_rate": 16000,
+            "channels": 1,
+            "vocabulary_hints": _current_vocabulary_hints(),
+            **_stt_turn_tuning(),
+        },
+    )
+    if hasattr(providers.llm, "set_session"):
+        providers.llm.set_session(session_id)
+    if hasattr(providers.llm, "warm_session"):
+        with contextlib.suppress(Exception):
+            await providers.llm.warm_session(session_id)
+    if hasattr(providers.tts, "warm_session"):
+        with contextlib.suppress(Exception):
+            await providers.tts.warm_session(session_id)
 
     def _monotonic_ts() -> float:
         return time.monotonic()
@@ -473,6 +565,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
         payload["on_partial"] = on_partial
         payload["session_id"] = session_id
+        payload.setdefault("sample_rate", 16000)
+        payload.setdefault("channels", 1)
+        payload["vocabulary_hints"] = _current_vocabulary_hints()
+        payload.update(_stt_turn_tuning())
         if providers.stt.provider_name == "mock_stt":
             hint = str(payload.get("transcript_hint", "")).strip()
             if hint:
@@ -955,6 +1051,13 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
         if ai_text:
             orchestrator.mark_ai_turn(session_id=session_id)
+            orchestrator.record_turn(
+                session_id,
+                speaker="homeowner",
+                text=ai_text,
+                stage=stage,
+                emotion=emotion,
+            )
             now = datetime.now(timezone.utc)
             ai_started_at = filler_result["started_at"] or ai_speaking_started_at or now
             ai_turn = ledger.commit_turn(
@@ -970,6 +1073,24 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             )
             if ai_turn.speaker == TurnSpeaker.AI:
                 ai_turn.system_prompt_snapshot = _compress_prompt(system_prompt)
+                ai_turn.emotion_before = emotion
+                ai_turn.emotion_after = emotion
+                ai_turn.emotion_changed = False
+                ai_turn.resistance_level = state.resistance_level
+                ai_turn.objection_pressure = state.objection_pressure
+                ai_turn.active_objections = list(state.active_objections)
+                ai_turn.queued_objections = list(state.queued_objections)
+                ai_turn.behavioral_signals = list(state.last_behavior_signals)
+                if filler_result["micro_behavior"] is not None:
+                    mb = filler_result["micro_behavior"]
+                    ai_turn.mb_tone = mb.get("tone")
+                    ai_turn.mb_sentence_length = mb.get("sentence_length")
+                    ai_turn.mb_behaviors = list(mb.get("behaviors") or [])
+                    ai_turn.mb_interruption_type = mb.get("interruption_type")
+                    ai_turn.mb_realism_score = mb.get("realism_score")
+                    pause_profile = dict(mb.get("pause_profile") or {})
+                    ai_turn.mb_opening_pause_ms = pause_profile.get("opening_pause_ms")
+                    ai_turn.mb_total_pause_ms = pause_profile.get("total_pause_ms")
                 _commit_turn_updates()
             await emit_server_event(
                 "server.turn.committed",
@@ -1147,7 +1268,14 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         await emit_session_state({"state": "connected", **orchestrator.get_state_payload(session_id)})
         await maybe_flush()
         if company_context is not None:
-            await emit_server_event("server.session.rag_context_loaded", {"chunks_loaded": company_context_chunk_count})
+            await emit_server_event(
+                "server.session.rag_context_loaded",
+                {
+                    "chunks_loaded": company_context_chunk_count,
+                    "brief_keys": sorted(objection_brief_cache.keys()),
+                    "cache_mode": "objection_briefs",
+                },
+            )
             await maybe_flush()
 
         while True:
@@ -1202,8 +1330,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 runtime_state.barge_in_started_at = None
                 continue
             runtime_state.barge_in_started_at = None
-            rep_text = stt_result.text
-            if not rep_text:
+            raw_rep_text = stt_result.text
+            if not raw_rep_text:
                 await emit_server_event(
                     "server.stt.partial",
                     {
@@ -1216,6 +1344,21 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 )
                 continue
 
+            context = orchestrator.get_context(session_id)
+            state_before_turn = orchestrator.get_state(session_id)
+            transcript_result = transcript_normalizer.normalize(
+                text=raw_rep_text,
+                provider=stt_result.source,
+                confidence=stt_result.confidence,
+                scenario=scenario,
+                org_config=context.org_config if context is not None else None,
+                active_objections=list(state_before_turn.active_objections),
+                queued_objections=list(state_before_turn.queued_objections),
+            )
+            rep_text = transcript_result.normalized_text
+            if not rep_text:
+                continue
+
             plan = orchestrator.prepare_rep_turn(session_id=session_id, rep_text=rep_text, db=db)
             if plan.active_edge_cases:
                 await emit_server_event("server.edge_case.triggered", {"tags": plan.active_edge_cases})
@@ -1224,7 +1367,12 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             turn_latency = _get_turn_latency(next_turn_index + 1)
             if turn_latency.stt_final_ts is None:
                 turn_latency.stt_final_ts = _monotonic_ts()
+            if turn_latency.analysis_complete_ts is None:
+                turn_latency.analysis_complete_ts = _monotonic_ts()
+            analysis_phase_latency_breakdown = _serialize_phase_latency(turn_latency)
             rep_started_at, rep_ended_at = _derive_rep_turn_window(msg)
+            context_after_plan = orchestrator.get_context(session_id)
+            transcript_quality = _serialize_transcript_quality(transcript_result)
 
             rep_turn = ledger.commit_turn(
                 db,
@@ -1237,12 +1385,35 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 ended_at=rep_ended_at,
                 objection_tags=plan.objection_tags,
             )
+            rep_turn.raw_transcript_text = transcript_result.raw_text
+            rep_turn.normalized_transcript_text = transcript_result.normalized_text
+            rep_turn.transcript_provider = transcript_result.provider
+            rep_turn.transcript_confidence = transcript_result.confidence
+            rep_turn.emotion_before = plan.emotion_before
+            rep_turn.emotion_after = plan.emotion_after
+            rep_turn.emotion_changed = plan.emotion_changed
+            rep_turn.resistance_level = plan.resistance_level
+            rep_turn.objection_pressure = plan.objection_pressure_after
+            rep_turn.active_objections = list(plan.active_objections)
+            rep_turn.queued_objections = list(plan.queued_objections)
+            rep_turn.behavioral_signals = list(plan.behavioral_signals)
+            _commit_turn_updates()
+            orchestrator.record_turn(
+                session_id,
+                speaker="rep",
+                text=rep_text,
+                stage=plan.stage_after,
+                emotion=plan.emotion_before,
+            )
 
             stt_final_payload = {
                 "text": rep_text,
+                "raw_text": transcript_result.raw_text,
+                "normalized_text": transcript_result.normalized_text,
                 "turn_id": rep_turn.id,
                 "confidence": stt_result.confidence,
                 "provider": stt_result.source,
+                "transcript_normalization": _serialize_transcript_normalization(transcript_result),
                 "trace_id": ws_trace_id,
             }
             await emit_server_event("server.stt.final", stt_final_payload)
@@ -1271,6 +1442,13 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "resolved_objections_this_turn": plan.resolved_objections,
                     "objection_pressure_before": plan.objection_pressure_before,
                     "objection_pressure_after": plan.objection_pressure_after,
+                    "reaction_intent": plan.reaction_intent,
+                    "homeowner_posture": plan.homeowner_posture,
+                    "turn_analysis": plan.turn_analysis.to_payload(),
+                    "response_plan": _serialize_response_plan(plan.response_plan),
+                    "phase_latency_breakdown": analysis_phase_latency_breakdown,
+                    "transcript_quality": transcript_quality,
+                    "transcript_normalization": _serialize_transcript_normalization(transcript_result),
                 }
             )
             await maybe_flush()
@@ -1316,6 +1494,13 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             if ai_result["interrupted"] and not ai_text:
                 ai_text = "(response interrupted)"
             orchestrator.mark_ai_turn(session_id=session_id)
+            orchestrator.record_turn(
+                session_id,
+                speaker="homeowner",
+                text=ai_text,
+                stage=plan.stage_after,
+                emotion=plan.emotion_after,
+            )
             ai_now = datetime.now(timezone.utc)
             ai_started_at = ai_result["started_at"] or ai_speaking_started_at or ai_now
             ai_duration_ms = ai_result["duration_ms"]
@@ -1333,8 +1518,27 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             )
             if ai_turn.speaker == TurnSpeaker.AI:
                 ai_turn.system_prompt_snapshot = _compress_prompt(plan.system_prompt)
+                ai_turn.emotion_before = plan.emotion_before
+                ai_turn.emotion_after = plan.emotion_after
+                ai_turn.emotion_changed = plan.emotion_changed
+                ai_turn.resistance_level = plan.resistance_level
+                ai_turn.objection_pressure = plan.objection_pressure_after
+                ai_turn.active_objections = list(plan.active_objections)
+                ai_turn.queued_objections = list(plan.queued_objections)
+                ai_turn.behavioral_signals = list(plan.behavioral_signals)
+                if ai_result["micro_behavior"] is not None:
+                    mb = ai_result["micro_behavior"]
+                    ai_turn.mb_tone = mb.get("tone")
+                    ai_turn.mb_sentence_length = mb.get("sentence_length")
+                    ai_turn.mb_behaviors = list(mb.get("behaviors") or [])
+                    ai_turn.mb_interruption_type = mb.get("interruption_type")
+                    ai_turn.mb_realism_score = mb.get("realism_score")
+                    pause_profile = dict(mb.get("pause_profile") or {})
+                    ai_turn.mb_opening_pause_ms = pause_profile.get("opening_pause_ms")
+                    ai_turn.mb_total_pause_ms = pause_profile.get("total_pause_ms")
                 _commit_turn_updates()
 
+            phase_latency_breakdown = _serialize_phase_latency(runtime_state.turn_latency)
             turn_payload = {
                 "rep_turn_id": rep_turn.id,
                 "ai_turn_id": ai_turn.id,
@@ -1344,9 +1548,19 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "interrupted": ai_result["interrupted"],
                 "interruption": interruption_payload,
                 "trace_id": ws_trace_id,
+                "prompt_version": session.prompt_version,
+                "analyzer_prompt_version": context_after_plan.analyzer_prompt_version if context_after_plan is not None else None,
                 "emotion_before": plan.emotion_before,
                 "emotion_after": plan.emotion_after,
                 "behavioral_signals": plan.behavioral_signals,
+                "behavior_directives": _serialize_behavior_directives(plan.behavior_directives),
+                "reaction_intent": plan.reaction_intent,
+                "homeowner_posture": plan.homeowner_posture,
+                "turn_analysis": plan.turn_analysis.to_payload(),
+                "response_plan": _serialize_response_plan(plan.response_plan),
+                "phase_latency_breakdown": phase_latency_breakdown,
+                "transcript_quality": transcript_quality,
+                "transcript_normalization": _serialize_transcript_normalization(transcript_result),
                 "micro_behavior": ai_result["micro_behavior"],
             }
             await emit_server_event("server.turn.committed", turn_payload)

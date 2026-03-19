@@ -9,6 +9,7 @@ from app.services.conversation_orchestrator import (
     PromptBuilder,
 )
 from app.services.micro_behavior_engine import MicroBehaviorPlan
+from app.services.micro_behavior_engine import ConversationalMicroBehaviorEngine
 
 
 def _persona() -> HomeownerPersona:
@@ -215,3 +216,18 @@ def test_prepare_rep_turn_injects_prior_register_and_behavior_directives():
     assert "LAYER 3C - BEHAVIORAL DIRECTIVES" in plan.system_prompt
     assert plan.behavior_directives.tone
     assert plan.behavior_directives.sentence_length
+
+
+def test_microbehavior_shortening_preserves_active_objection_semantics():
+    engine = ConversationalMicroBehaviorEngine()
+
+    plan = engine.apply_to_response(
+        session_id="session-semantic-safe",
+        raw_text="I get what you're saying. My bigger issue is still the price right now.",
+        emotion_before="skeptical",
+        emotion_after="annoyed",
+        behavioral_signals=["pushes_close"],
+        active_objections=["price"],
+    )
+
+    assert "price" in plan.transformed_text.lower()

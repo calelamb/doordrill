@@ -85,6 +85,7 @@ def _seed_conversation_export_session(
     *,
     realism_score: float,
     with_quality_signal: bool,
+    transcript_confidence: float = 0.97,
 ) -> dict[str, str]:
     db = SessionLocal()
     started_at = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -118,6 +119,10 @@ def _seed_conversation_export_session(
             speaker=TurnSpeaker.REP,
             stage="objection_handling",
             text="We can get you started today.",
+            raw_transcript_text="We can get you started today.",
+            normalized_transcript_text="We can get you started today.",
+            transcript_provider="mock_stt",
+            transcript_confidence=transcript_confidence,
             started_at=started_at,
             ended_at=started_at + timedelta(seconds=10),
             objection_tags=["price"],
@@ -347,6 +352,36 @@ def test_conversation_export_quality_signal_only_excludes_sessions_without_signa
     lines = [line for line in response.text.splitlines() if line.strip()]
     session_ids = {json.loads(line)["session_id"] for line in lines}
     assert session_ids == {with_signal["session_id"]}
+
+
+def test_conversation_export_high_value_bucket_filters_for_clean_high_confidence_examples(client, seed_org):
+    good = _seed_conversation_export_session(seed_org, realism_score=8.8, with_quality_signal=True)
+    _seed_conversation_export_session(
+        seed_org,
+        realism_score=6.2,
+        with_quality_signal=False,
+        transcript_confidence=0.62,
+    )
+
+    response = client.get(
+        "/admin/training-signals/conversation-export",
+        params={
+            "format": "jsonl",
+            "bucket": "high_value",
+            "min_transcript_confidence": 0.9,
+            "min_eval_score": 7.5,
+        },
+        headers=_manager_headers(seed_org),
+    )
+
+    assert response.status_code == 200
+    lines = [line for line in response.text.splitlines() if line.strip()]
+    assert lines
+    records = [json.loads(line) for line in lines]
+    assert {record["session_id"] for record in records} == {good["session_id"]}
+    assert records[0]["signals"]["transcript_confidence"] >= 0.9
+    assert records[0]["signals"]["session_eval_overall_score"] >= 7.5
+    assert records[0]["metadata"]["export_bucket"] == "high_value"
 
 
 def test_retrieve_for_topic_falls_back_gracefully_when_pgvector_unavailable(seed_org, monkeypatch):

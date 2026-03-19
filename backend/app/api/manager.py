@@ -284,6 +284,10 @@ def _serialize_transcript_turns(turns: list[SessionTurn]) -> list[dict[str, Any]
             "speaker": turn.speaker.value,
             "stage": turn.stage,
             "text": turn.text,
+            "raw_transcript_text": turn.raw_transcript_text,
+            "normalized_transcript_text": turn.normalized_transcript_text,
+            "transcript_provider": turn.transcript_provider,
+            "transcript_confidence": turn.transcript_confidence,
             "started_at": turn.started_at.isoformat(),
             "ended_at": turn.ended_at.isoformat(),
         }
@@ -2550,10 +2554,19 @@ def get_session_replay(
 
     micro_behavior_timeline = []
     realism_scores: list[float] = []
+    turn_diagnostics = []
+    phase_latency_totals: dict[str, list[float]] = {
+        "stt_ms": [],
+        "analysis_ms": [],
+        "llm_first_token_ms": [],
+        "tts_first_audio_ms": [],
+        "total_turn_ms": [],
+    }
+    transcript_confidences: list[float] = []
     for event in committed_events:
         micro_behavior = event.payload.get("micro_behavior")
         if not isinstance(micro_behavior, dict):
-            continue
+            micro_behavior = {}
         realism_score = micro_behavior.get("realism_score")
         if isinstance(realism_score, (int, float)):
             realism_scores.append(float(realism_score))
@@ -2572,6 +2585,32 @@ def get_session_replay(
                 "pause_profile": micro_behavior.get("pause_profile", {}),
                 "realism_score": realism_score,
                 "filler": bool(event.payload.get("filler", False)),
+            }
+        )
+        phase_latency = event.payload.get("phase_latency_breakdown")
+        if isinstance(phase_latency, dict):
+            for key in phase_latency_totals:
+                value = phase_latency.get(key)
+                if isinstance(value, (int, float)):
+                    phase_latency_totals[key].append(float(value))
+        transcript_quality = event.payload.get("transcript_quality")
+        if isinstance(transcript_quality, dict):
+            confidence = transcript_quality.get("confidence")
+            if isinstance(confidence, (int, float)):
+                transcript_confidences.append(float(confidence))
+        turn_diagnostics.append(
+            {
+                "event_id": event.event_id,
+                "recorded_at": event.event_ts.isoformat(),
+                "rep_turn_id": event.payload.get("rep_turn_id"),
+                "ai_turn_id": event.payload.get("ai_turn_id"),
+                "turn_analysis": event.payload.get("turn_analysis") or {},
+                "response_plan": event.payload.get("response_plan") or {},
+                "phase_latency_breakdown": phase_latency or {},
+                "transcript_quality": transcript_quality or {},
+                "prompt_version": event.payload.get("prompt_version"),
+                "analyzer_prompt_version": event.payload.get("analyzer_prompt_version"),
+                "interrupted": bool(event.payload.get("interrupted", False)),
             }
         )
 
@@ -2623,7 +2662,15 @@ def get_session_replay(
             "turn_count": len(transcript_turns),
             "objection_turn_count": len(objection_timeline),
             "barge_in_count": max(total_barge_ins, len(interruption_timeline)),
+            "phase_latency_summary": {
+                key: round(sum(values) / len(values), 1) if values else None
+                for key, values in phase_latency_totals.items()
+            },
+            "average_transcript_confidence": round(sum(transcript_confidences) / len(transcript_confidences), 3)
+            if transcript_confidences
+            else None,
         },
+        turn_diagnostics=turn_diagnostics,
         scorecard=(
             {
                 "id": scorecard.id,

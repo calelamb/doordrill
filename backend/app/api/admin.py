@@ -26,10 +26,11 @@ from app.models.questionnaire import OrgQuestionnaireResponse, QuestionnaireQues
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
-from app.models.session import SessionArtifact, SessionTurn
+from app.models.session import SessionArtifact, SessionEvent, SessionTurn
 from app.models.training import AdaptiveRecommendationOutcome, ConversationQualitySignal, OverrideLabel, PromptExperiment
 from app.models.types import SessionStatus, TurnSpeaker
 from app.models.user import User
+from app.services.conversation_realism_eval_service import ConversationRealismEvalService
 from app.services.conversation_orchestrator import measure_prompt_tokens
 from app.services.prompt_studio_service import PromptStudioService
 from app.services.org_prompt_config_service import OrgPromptConfigService
@@ -44,6 +45,7 @@ org_prompt_config_service = OrgPromptConfigService()
 prompt_version_synthesizer = PromptVersionSynthesizer()
 prompt_studio_service = PromptStudioService()
 storage_service = StorageService()
+conversation_realism_eval_service = ConversationRealismEvalService()
 COMPANY_DOC_RE = re.compile(r"\[From: ([^\]]+)\]")
 
 
@@ -96,6 +98,10 @@ def _turn_payload(turn: SessionTurn) -> dict:
         "speaker": turn.speaker.value,
         "stage": turn.stage,
         "text": turn.text,
+        "raw_transcript_text": turn.raw_transcript_text,
+        "normalized_transcript_text": turn.normalized_transcript_text,
+        "transcript_provider": turn.transcript_provider,
+        "transcript_confidence": turn.transcript_confidence,
         "started_at": turn.started_at.isoformat(),
         "ended_at": turn.ended_at.isoformat(),
         "objection_tags": list(turn.objection_tags or []),
@@ -156,7 +162,7 @@ def _serialize_postprocess_run(run: PostprocessRun) -> dict:
     }
 
 
-def _serialize_prompt_experiment(experiment: PromptExperiment) -> dict:
+def _serialize_prompt_experiment(experiment: PromptExperiment, *, evaluation_summary: dict[str, Any] | None = None) -> dict:
     return {
         "id": experiment.id,
         "prompt_type": experiment.prompt_type,
@@ -173,6 +179,7 @@ def _serialize_prompt_experiment(experiment: PromptExperiment) -> dict:
         "challenger_session_count": experiment.challenger_session_count,
         "p_value": experiment.p_value,
         "min_sessions_for_decision": experiment.min_sessions_for_decision,
+        "evaluation_summary": evaluation_summary,
     }
 
 
@@ -898,7 +905,7 @@ def create_prompt_experiment(
     )
     db.commit()
     db.refresh(experiment)
-    return _serialize_prompt_experiment(experiment)
+    return _serialize_prompt_experiment(experiment, evaluation_summary=prompt_experiment_service.build_evaluation_summary(db, experiment))
 
 
 @router.get("/prompt-experiments/{experiment_id}")
@@ -910,7 +917,7 @@ def get_prompt_experiment(
     experiment = db.get(PromptExperiment, experiment_id)
     if experiment is None:
         raise HTTPException(status_code=404, detail="prompt experiment not found")
-    return _serialize_prompt_experiment(experiment)
+    return _serialize_prompt_experiment(experiment, evaluation_summary=prompt_experiment_service.build_evaluation_summary(db, experiment))
 
 
 @router.post("/prompt-experiments/{experiment_id}/evaluate")
@@ -925,7 +932,7 @@ def evaluate_prompt_experiment(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     db.commit()
     db.refresh(experiment)
-    return _serialize_prompt_experiment(experiment)
+    return _serialize_prompt_experiment(experiment, evaluation_summary=prompt_experiment_service.build_evaluation_summary(db, experiment))
 
 
 @router.post("/prompt-experiments/{experiment_id}/promote")
@@ -942,7 +949,7 @@ def promote_prompt_experiment_winner(
         raise HTTPException(status_code=status_code, detail=message) from exc
     db.commit()
     db.refresh(experiment)
-    return _serialize_prompt_experiment(experiment)
+    return _serialize_prompt_experiment(experiment, evaluation_summary=prompt_experiment_service.build_evaluation_summary(db, experiment))
 
 
 @router.get("/sessions/{session_id}/training-loop-audit")
@@ -1170,6 +1177,10 @@ def export_conversation_training_signals(
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
     min_realism_score: float | None = Query(default=None),
+    min_transcript_confidence: float | None = Query(default=None, ge=0.0, le=1.0),
+    min_manager_realism_rating: int | None = Query(default=None, ge=1, le=5),
+    min_eval_score: float | None = Query(default=None, ge=0.0, le=10.0),
+    bucket: Literal["all", "high_value", "repetition", "over_softening", "missed_objection", "transcript_corruption"] = Query(default="all"),
     quality_signal_only: bool = Query(default=False),
     format: Literal["jsonl", "json"] = Query(default="jsonl"),
 ) -> Response:
@@ -1201,6 +1212,18 @@ def export_conversation_training_signals(
         ).all()
         for turn in turn_rows:
             turns_by_session.setdefault(turn.session_id, []).append(turn)
+    committed_payloads_by_session: dict[str, list[dict[str, Any]]] = {}
+    if session_ids:
+        committed_events = db.scalars(
+            select(SessionEvent)
+            .where(
+                SessionEvent.session_id.in_(session_ids),
+                SessionEvent.event_type == "server.turn.committed",
+            )
+            .order_by(SessionEvent.session_id.asc(), SessionEvent.event_ts.asc())
+        ).all()
+        for event in committed_events:
+            committed_payloads_by_session.setdefault(event.session_id, []).append(dict(event.payload or {}))
 
     quality_signals_by_session: dict[str, ConversationQualitySignal] = {}
     if session_ids:
@@ -1219,13 +1242,50 @@ def export_conversation_training_signals(
         quality_signal = quality_signals_by_session.get(session.id)
         if quality_signal_only and quality_signal is None:
             continue
+        if min_manager_realism_rating is not None and (
+            quality_signal is None or quality_signal.realism_rating is None or quality_signal.realism_rating < min_manager_realism_rating
+        ):
+            continue
 
         turns = turns_by_session.get(session.id, [])
+        session_eval = conversation_realism_eval_service.evaluate_session(
+            turns=turns,
+            committed_payloads=committed_payloads_by_session.get(session.id, []),
+            quality_signal=quality_signal,
+        )
+        if min_eval_score is not None and session_eval.overall_score < min_eval_score:
+            continue
+        if bucket != "all":
+            if bucket == "high_value":
+                transcript_floor = min_transcript_confidence if min_transcript_confidence is not None else 0.85
+                manager_ok = quality_signal is not None and (quality_signal.realism_rating or 0) >= 4
+                eval_ok = session_eval.overall_score >= (min_eval_score if min_eval_score is not None else 8.0)
+                if not manager_ok and not eval_ok:
+                    continue
+                if session_eval.failure_labels:
+                    continue
+                if not any(
+                    (turn.transcript_confidence or 0.0) >= transcript_floor
+                    for turn in turns
+                    if turn.speaker == TurnSpeaker.REP
+                ):
+                    continue
+            elif bucket not in set(session_eval.failure_labels):
+                continue
+
         for index, turn in enumerate(turns):
             if turn.speaker != TurnSpeaker.AI or turn.system_prompt_snapshot is None:
                 continue
             if min_realism_score is not None and (
                 turn.mb_realism_score is None or float(turn.mb_realism_score) < float(min_realism_score)
+            ):
+                continue
+            previous_turn = turns[index - 1] if index > 0 else None
+            if (
+                min_transcript_confidence is not None
+                and previous_turn is not None
+                and previous_turn.speaker == TurnSpeaker.REP
+                and (previous_turn.transcript_confidence or 0.0) < min_transcript_confidence
             ):
                 continue
 
@@ -1265,6 +1325,13 @@ def export_conversation_training_signals(
                         "manager_flagged": bool(
                             quality_signal is not None and turn.id in (quality_signal.flagged_turn_ids or [])
                         ),
+                        "session_eval_overall_score": session_eval.overall_score,
+                        "session_eval_failure_labels": list(session_eval.failure_labels),
+                        "transcript_confidence": (
+                            previous_turn.transcript_confidence
+                            if previous_turn is not None and previous_turn.speaker == TurnSpeaker.REP
+                            else None
+                        ),
                     },
                     "metadata": {
                         "scenario_id": session.scenario_id,
@@ -1273,6 +1340,8 @@ def export_conversation_training_signals(
                         "prompt_version": session.prompt_version,
                         "org_id": rep.org_id,
                         "session_date": session.started_at.date().isoformat() if session.started_at is not None else None,
+                        "export_bucket": bucket,
+                        "session_eval": session_eval.to_payload(),
                     },
                 }
             )

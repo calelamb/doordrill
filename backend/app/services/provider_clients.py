@@ -25,7 +25,8 @@ class SttTranscript:
 class BaseSttClient:
     provider_name = "base"
 
-    async def start_session(self, session_id: str) -> None:
+    async def start_session(self, session_id: str, payload: dict | None = None) -> None:
+        del payload
         return None
 
     async def end_session(self, session_id: str) -> None:
@@ -41,12 +42,20 @@ class BaseSttClient:
 class BaseLlmClient:
     provider_name = "base"
 
+    async def warm_session(self, session_id: str) -> None:
+        del session_id
+        return None
+
     async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80) -> AsyncIterator[str]:
         raise NotImplementedError
 
 
 class BaseTtsClient:
     provider_name = "base"
+
+    async def warm_session(self, session_id: str) -> None:
+        del session_id
+        return None
 
     async def stream_audio(self, text: str) -> AsyncIterator[dict]:
         raise NotImplementedError
@@ -228,27 +237,48 @@ class DeepgramSttClient(BaseSttClient):
         except Exception:
             return
 
+    def _normalized_audio_params(self, payload: dict) -> tuple[str, str, int, int]:
+        content_type = str(payload.get("content_type") or "").lower().strip()
+        codec = str(payload.get("codec") or "").lower().strip()
+        if content_type in {"audio/ogg", "audio/opus"} and not codec:
+            codec = "opus"
+        if content_type in {"audio/wav", "audio/x-wav"} and codec in {"wav", ""}:
+            codec = "linear16"
+        sample_rate = int(payload.get("sample_rate") or 16000)
+        channels = int(payload.get("channels") or 1)
+        if sample_rate <= 0:
+            sample_rate = 16000
+        if channels <= 0:
+            channels = 1
+        return content_type, codec, sample_rate, channels
+
     def _listen_url(self, payload: dict) -> str:
-        content_type = str(payload.get("content_type") or "").lower()
-        codec = str(payload.get("codec") or "").lower()
+        content_type, codec, sample_rate, channels = self._normalized_audio_params(payload)
         ws_base = self.base_url.replace("https://", "wss://").replace("http://", "ws://")
         params: dict[str, str] = {
             "model": self.model,
             "smart_format": "true",
             "punctuate": "true",
             "interim_results": "true",
-            "endpointing": "100",
-            "utterance_end_ms": "500",
+            "endpointing": str(int(payload.get("endpointing_ms") or 75)),
+            "utterance_end_ms": str(int(payload.get("utterance_end_ms") or 350)),
         }
+        vocabulary_hints = [
+            " ".join(str(term or "").split()).strip()
+            for term in (payload.get("vocabulary_hints") or [])
+            if " ".join(str(term or "").split()).strip()
+        ]
+        if vocabulary_hints:
+            params["keywords"] = ",".join(vocabulary_hints[:12])
         if codec == "opus" or "opus" in content_type:
             params["encoding"] = "opus"
-            params["sample_rate"] = str(int(payload.get("sample_rate") or 16000))
+            params["sample_rate"] = str(sample_rate)
         elif content_type in ("audio/mp4", "audio/webm", "audio/mpeg"):
             params["mimetype"] = content_type
         else:
             params["encoding"] = "linear16"
-            params["sample_rate"] = str(int(payload.get("sample_rate") or 16000))
-            params["channels"] = str(int(payload.get("channels") or 1))
+            params["sample_rate"] = str(sample_rate)
+            params["channels"] = str(channels)
         return f"{ws_base}/v1/listen?{urlencode(params)}"
 
     async def _open_session(self, session_id: str, payload: dict) -> _DeepgramSessionState:
@@ -426,6 +456,9 @@ class OpenAiLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
         self.timeout_seconds = timeout_seconds
         self._fallback = MockLlmClient()
 
+    async def warm_session(self, session_id: str) -> None:
+        self.set_session(session_id)
+
     async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80) -> AsyncIterator[str]:
         if not self.api_key:
             async for chunk in self._fallback.stream_reply(
@@ -501,6 +534,9 @@ class AnthropicLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self._fallback = MockLlmClient()
+
+    async def warm_session(self, session_id: str) -> None:
+        self.set_session(session_id)
 
     async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80) -> AsyncIterator[str]:
         if not self.api_key:
