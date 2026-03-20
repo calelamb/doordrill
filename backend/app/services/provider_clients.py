@@ -5,6 +5,7 @@ import base64
 import contextlib
 import contextvars
 import json
+import logging
 from dataclasses import dataclass
 from urllib.parse import urlencode
 from typing import Any, AsyncIterator
@@ -12,6 +13,8 @@ import weakref
 
 import httpx
 import websockets
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -341,6 +344,7 @@ class DeepgramSttClient(BaseSttClient):
             latest_partial = ""
             final_segments: list[str] = []
             confidences: list[float] = []
+            finalize_sent = asyncio.Event()
             state = reopened_state or await self._get_or_open_session(session_id, payload=payload)
             reopened_state = None
 
@@ -356,8 +360,9 @@ class DeepgramSttClient(BaseSttClient):
             async def consume_results() -> None:
                 nonlocal latest_partial, final_segments, confidences
                 while True:
+                    recv_timeout = 0.2 if (finalize_sent.is_set() and final_segments) else self.timeout_seconds
                     try:
-                        raw_message = await asyncio.wait_for(state.ws.recv(), timeout=self.timeout_seconds)
+                        raw_message = await asyncio.wait_for(state.ws.recv(), timeout=recv_timeout)
                     except TimeoutError:
                         break
 
@@ -412,6 +417,7 @@ class DeepgramSttClient(BaseSttClient):
                         await state.ws.send(audio_bytes[idx : idx + 8192])
                         await asyncio.sleep(0)
                     await state.ws.send(json.dumps({"type": "Finalize"}))
+                    finalize_sent.set()
                 # Consume results outside the lock — recv() does not conflict
                 # with concurrent sends on a different asyncio task.
                 await consume_results()
@@ -429,6 +435,17 @@ class DeepgramSttClient(BaseSttClient):
 
             transcript = " ".join(final_segments).strip() or latest_partial or hint
             confidence = sum(confidences) / len(confidences) if confidences else (0.98 if transcript == hint and transcript else 0.0)
+            logger.info(
+                "deepgram_utterance_result",
+                extra={
+                    "session_id": session_id,
+                    "final_segment_count": len(final_segments),
+                    "transcript": transcript or "(empty)",
+                    "confidence": confidence,
+                    "finalize_sent": finalize_sent.is_set(),
+                    "audio_bytes": len(audio_bytes),
+                },
+            )
             return SttTranscript(
                 text=transcript,
                 confidence=confidence,

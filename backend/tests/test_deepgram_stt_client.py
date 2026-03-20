@@ -12,6 +12,7 @@ from app.services.provider_clients import DeepgramSttClient
 FINAL_RESULT = json.dumps({
     "type": "Results",
     "is_final": True,
+    "speech_final": True,
     "channel": {"alternatives": [{"transcript": "hello world", "confidence": 0.95}]},
 })
 
@@ -125,13 +126,13 @@ def test_listen_url_required_params_always_present():
 
 
 @pytest.mark.asyncio
-async def test_start_session_does_not_open_websocket():
+async def test_start_session_prewarms_websocket():
     client = make_client()
-    with patch("app.services.provider_clients.websockets.connect") as mock_connect:
+    with patch("app.services.provider_clients.websockets.connect", new=AsyncMock(return_value=make_ws())) as mock_connect:
         await client.start_session("sess-1")
-        mock_connect.assert_not_called()
+        mock_connect.assert_called_once()
     assert "sess-1" in client._session_ids
-    assert "sess-1" not in client._sessions
+    assert "sess-1" in client._sessions
 
 
 @pytest.mark.asyncio
@@ -142,7 +143,7 @@ async def test_no_api_key_start_session_is_noop():
 
 
 @pytest.mark.asyncio
-async def test_stream_utterance_opens_ws_lazily_on_first_call():
+async def test_stream_utterance_reuses_prewarmed_socket_on_first_call():
     ws = make_ws()
     client = make_client()
     payload = {
@@ -157,7 +158,7 @@ async def test_stream_utterance_opens_ws_lazily_on_first_call():
     with patch("app.services.provider_clients.websockets.connect",
                new=AsyncMock(return_value=ws)) as mock_connect:
         await client.start_session("sess-lazy")
-        assert mock_connect.call_count == 0
+        assert mock_connect.call_count == 1
 
         result = await client._stream_utterance(payload, audio, "")
         assert mock_connect.call_count == 1

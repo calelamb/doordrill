@@ -70,14 +70,36 @@ MAX_RUNTIME_PAUSE_MS = 60
 TTS_STREAM_TIMEOUT_SECONDS = 6
 WS_KEEPALIVE_TIMEOUT_SECONDS = 120
 WS_KEEPALIVE_INTERVAL_SECONDS = 30
-MIN_TRANSCRIPT_WORD_COUNT = 2
+MIN_TRANSCRIPT_WORD_COUNT = 1
+LOW_CONFIDENCE_THRESHOLD = 0.45
+LOW_CONFIDENCE_MAX_WORDS = 5
 CLARIFICATION_RESPONSES = [
-    "Sorry, what was that?",
-    "What?",
-    "I didn't catch that.",
-    "Hmm?",
+    "Sorry, I didn't catch that.",
+    "Hmm, didn't quite get that.",
+    "Could you say that again?",
     "Come again?",
+    "Say that again?",
 ]
+CLARIFICATION_RECOVERY_RESPONSES = [
+    "Sorry, I'm having trouble hearing you.",
+    "I'm not catching you — can you speak up?",
+    "Hold on, I'm not hearing you well.",
+]
+_NOISE_ONLY_TRANSCRIPTS: frozenset[str] = frozenset(
+    {
+        "um",
+        "uh",
+        "mm",
+        "hmm",
+        "hm",
+        "ah",
+        "oh",
+        "eh",
+        "the",
+        "a",
+        "an",
+    }
+)
 TRANSCRIPT_WORD_RE = re.compile(r"\b[a-z0-9']+\b", re.IGNORECASE)
 
 
@@ -229,7 +251,12 @@ def _is_transcript_valid(transcript: str) -> bool:
     """Return True when the transcript has enough content for an LLM response."""
     if not transcript or not transcript.strip():
         return False
-    return len(TRANSCRIPT_WORD_RE.findall(transcript)) >= MIN_TRANSCRIPT_WORD_COUNT
+    words = TRANSCRIPT_WORD_RE.findall(transcript)
+    if len(words) < MIN_TRANSCRIPT_WORD_COUNT:
+        return False
+    if len(words) == 1 and words[0].lower() in _NOISE_ONLY_TRANSCRIPTS:
+        return False
+    return True
 
 
 @router.websocket("/ws/sessions/{session_id}")
@@ -352,6 +379,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     ai_speaking_started_at: datetime | None = None
     interrupt_signal_at: datetime | None = None
     interrupt_signal_reason: str | None = None
+    consecutive_clarification_count = 0
 
     def _context_and_state() -> tuple[Any, Any]:
         return orchestrator.get_context(session_id), orchestrator.get_state(session_id)
@@ -1012,8 +1040,11 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             "micro_behavior": _serialize_micro_behavior(last_behavior_plan) if last_behavior_plan is not None else None,
         }
 
-    async def _emit_clarification_response(*, stage: str) -> dict[str, Any]:
-        clarification_text = random.choice(CLARIFICATION_RESPONSES)
+    async def _emit_clarification_response(*, stage: str, consecutive_count: int) -> dict[str, Any]:
+        clarification_pool = (
+            CLARIFICATION_RECOVERY_RESPONSES if consecutive_count >= 2 else CLARIFICATION_RESPONSES
+        )
+        clarification_text = random.choice(clarification_pool)
         persona_voice_id = _persona_voice_id()
         started_at = datetime.now(timezone.utc)
         interrupted = False
@@ -1129,6 +1160,53 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             "duration_ms": max(120, int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)),
             "interrupted": interrupted or interrupt_signal_at is not None,
         }
+
+    async def _run_clarification_flow(*, stage: str) -> None:
+        nonlocal ai_speaking, ai_speaking_started_at, barge_in_count, consecutive_clarification_count
+        consecutive_clarification_count += 1
+        ai_speaking = True
+        ai_speaking_started_at = datetime.now(timezone.utc)
+        await emit_session_state(
+            {
+                "state": "ai_speaking",
+                "stage": stage,
+                "clarification": True,
+            }
+        )
+        clarification_result = await _emit_clarification_response(
+            stage=stage,
+            consecutive_count=consecutive_clarification_count,
+        )
+        if clarification_result["interrupted"]:
+            barge_at, reason = consume_interrupt()
+            if barge_at is not None:
+                barge_in_count += 1
+                await emit_session_state(
+                    {
+                        "state": "barge_in_detected",
+                        "reason": reason or "unknown",
+                        "barge_in_count": barge_in_count,
+                        "latency_ms": max(
+                            0,
+                            int((barge_at - (ai_speaking_started_at or barge_at)).total_seconds() * 1000),
+                        ),
+                        "at": barge_at.isoformat(),
+                        "trace_id": ws_trace_id,
+                        "clarification": True,
+                    }
+                )
+        else:
+            consume_interrupt()
+        ai_speaking = False
+        await emit_session_state(
+            {
+                "state": "ai_idle",
+                "interrupted": clarification_result["interrupted"],
+                "clarification": True,
+            }
+        )
+        runtime_state.turn_latency = None
+        await maybe_flush()
 
     async def maybe_emit_silence_filler() -> bool:
         nonlocal ai_speaking, ai_speaking_started_at, barge_in_count, filler_emitted_for_silence
@@ -1478,59 +1556,43 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 queued_objections=list(state_before_turn.queued_objections),
             )
             rep_text = transcript_result.normalized_text
+            rep_word_count = len(TRANSCRIPT_WORD_RE.findall(rep_text))
             if not _is_transcript_valid(rep_text):
                 if runtime_state.turn_latency is not None and runtime_state.turn_latency.stt_final_ts is None:
                     runtime_state.turn_latency.stt_final_ts = _monotonic_ts()
                 logger.info(
-                    "Transcript too short to process, skipping LLM call",
+                    "transcript_blocked_too_short",
                     extra={
+                        "session_id": session_id,
                         "raw": transcript_result.raw_text,
                         "normalized": rep_text,
-                        "session_id": session_id,
+                        "word_count": rep_word_count,
+                        "confidence": stt_result.confidence,
                     },
                 )
-                ai_speaking = True
-                ai_speaking_started_at = datetime.now(timezone.utc)
-                await emit_session_state(
-                    {
-                        "state": "ai_speaking",
-                        "stage": state_before_turn.stage,
-                        "clarification": True,
-                    }
-                )
-                clarification_result = await _emit_clarification_response(stage=state_before_turn.stage)
-                if clarification_result["interrupted"]:
-                    barge_at, reason = consume_interrupt()
-                    if barge_at is not None:
-                        barge_in_count += 1
-                        await emit_session_state(
-                            {
-                                "state": "barge_in_detected",
-                                "reason": reason or "unknown",
-                                "barge_in_count": barge_in_count,
-                                "latency_ms": max(
-                                    0,
-                                    int((barge_at - (ai_speaking_started_at or barge_at)).total_seconds() * 1000),
-                                ),
-                                "at": barge_at.isoformat(),
-                                "trace_id": ws_trace_id,
-                                "clarification": True,
-                            }
-                        )
-                else:
-                    consume_interrupt()
-                ai_speaking = False
-                await emit_session_state(
-                    {
-                        "state": "ai_idle",
-                        "interrupted": clarification_result["interrupted"],
-                        "clarification": True,
-                    }
-                )
-                runtime_state.turn_latency = None
-                await maybe_flush()
+                await _run_clarification_flow(stage=state_before_turn.stage)
                 continue
 
+            if (
+                stt_result.source == "deepgram"
+                and stt_result.confidence < LOW_CONFIDENCE_THRESHOLD
+                and rep_word_count <= LOW_CONFIDENCE_MAX_WORDS
+            ):
+                if runtime_state.turn_latency is not None and runtime_state.turn_latency.stt_final_ts is None:
+                    runtime_state.turn_latency.stt_final_ts = _monotonic_ts()
+                logger.info(
+                    "transcript_blocked_low_confidence",
+                    extra={
+                        "session_id": session_id,
+                        "raw": transcript_result.raw_text,
+                        "confidence": stt_result.confidence,
+                        "word_count": rep_word_count,
+                    },
+                )
+                await _run_clarification_flow(stage=state_before_turn.stage)
+                continue
+
+            consecutive_clarification_count = 0
             plan = orchestrator.prepare_rep_turn(session_id=session_id, rep_text=rep_text, db=db)
             if plan.active_edge_cases:
                 await emit_server_event("server.edge_case.triggered", {"tags": plan.active_edge_cases})

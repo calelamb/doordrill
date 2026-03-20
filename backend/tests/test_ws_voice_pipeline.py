@@ -64,6 +64,31 @@ def _run_turn(ws, *, text: str, sequence: int) -> list[dict]:
     raise AssertionError("turn was not committed")
 
 
+def _run_empty_turn_until_clarification_idle(ws, *, sequence: int) -> list[dict]:
+    ws.send_json(
+        {
+            "type": "client.audio.chunk",
+            "sequence": sequence,
+            "payload": {
+                "transcript_hint": "",
+                "codec": "opus",
+            },
+        }
+    )
+
+    messages: list[dict] = []
+    for _ in range(80):
+        message = ws.receive_json()
+        messages.append(message)
+        if (
+            message["type"] == "server.session.state"
+            and message["payload"].get("state") == "ai_idle"
+            and message["payload"].get("clarification") is True
+        ):
+            return messages
+    raise AssertionError("clarification turn did not finish")
+
+
 class _FinalizeAwareSttClient(MockSttClient):
     def __init__(self) -> None:
         self._finalized = asyncio.Event()
@@ -139,6 +164,16 @@ class _LatencyAwareTtsClient(MockTtsClient):
         await asyncio.sleep(self.first_chunk_delay_s)
         async for chunk in super().stream_audio(text):
             yield chunk
+
+
+def test_is_transcript_valid_single_valid_word():
+    for transcript in ("Yeah", "Yes", "Right", "No"):
+        assert voice_ws._is_transcript_valid(transcript) is True
+
+
+def test_is_transcript_valid_noise_words():
+    for transcript in ("um", "uh", "mm"):
+        assert voice_ws._is_transcript_valid(transcript) is False
 
 
 def test_ws_voice_pipeline_streams_events_in_order(client, seed_org, monkeypatch):
@@ -471,3 +506,33 @@ def test_ws_empty_transcript_emits_clarification_without_llm_call(client, seed_o
         assert turns == []
     finally:
         db.close()
+
+
+def test_consecutive_clarification_uses_recovery_pool(client, seed_org, monkeypatch):
+    llm = _RecordingLlmClient()
+    tts = _RecordingTtsClient()
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=MockSttClient(), llm=llm, tts=tts),
+    )
+    monkeypatch.setattr(voice_ws.random, "choice", lambda responses: responses[0])
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+
+        first_messages = _run_empty_turn_until_clarification_idle(ws, sequence=1)
+        second_messages = _run_empty_turn_until_clarification_idle(ws, sequence=2)
+
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    assert llm.calls == 0
+    assert any(message["type"] == "server.ai.text.delta" for message in first_messages)
+    assert any(message["type"] == "server.ai.text.delta" for message in second_messages)
+    assert len(tts.texts) >= 2
+    assert tts.texts[0].endswith(voice_ws.CLARIFICATION_RESPONSES[0])
+    assert tts.texts[1].endswith(voice_ws.CLARIFICATION_RECOVERY_RESPONSES[0])

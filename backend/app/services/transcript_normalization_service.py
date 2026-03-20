@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+import logging
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -80,6 +81,8 @@ PHONETIC_CORRECTION_TABLE: dict[str, str] = {
 }
 DEFAULT_FUZZY_MATCH_THRESHOLD = 0.8
 ORG_SPECIFIC_FUZZY_MATCH_THRESHOLD = 0.75
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -276,6 +279,14 @@ class TranscriptNormalizationService:
             if flexible_pattern.search(rewritten):
                 rewritten = flexible_pattern.sub(canonical, rewritten)
                 applied_terms.append(canonical)
+                logger.debug(
+                    "transcript_fuzzy_correction_applied",
+                    extra={
+                        "source": canonical,
+                        "replacement": canonical,
+                        "match_type": "multi_token_exact",
+                    },
+                )
 
         if not single_token_terms:
             return rewritten, applied_terms
@@ -293,6 +304,14 @@ class TranscriptNormalizationService:
             updated_parts.append(replacement or token)
             if replacement and replacement != token:
                 applied_terms.append(replacement)
+                logger.debug(
+                    "transcript_fuzzy_correction_applied",
+                    extra={
+                        "source": token,
+                        "replacement": replacement,
+                        "match_type": "single_token_fuzzy",
+                    },
+                )
             last_end = match.end()
         updated_parts.append(rewritten[last_end:])
 
@@ -310,7 +329,7 @@ class TranscriptNormalizationService:
         lowered = token.lower()
         if lowered in single_token_terms:
             return single_token_terms[lowered]
-        if len(lowered) < 4:
+        if len(lowered) < 5:
             return None
 
         best: tuple[float, str] | None = None
@@ -321,6 +340,8 @@ class TranscriptNormalizationService:
                 if normalized in org_specific_terms
                 else DEFAULT_FUZZY_MATCH_THRESHOLD
             )
+            if len(lowered) < 6:
+                threshold = max(threshold, 0.85)
             if ratio < threshold:
                 continue
             if best is None or ratio > best[0]:

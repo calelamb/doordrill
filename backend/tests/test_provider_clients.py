@@ -94,7 +94,7 @@ class _FakeDeepgramWs:
     async def recv(self):
         self.recv_calls += 1
         if not self._messages:
-            raise AssertionError("consume_results waited for an extra Deepgram message")
+            await asyncio.sleep(3600)
         next_message = self._messages.pop(0)
         if isinstance(next_message, Exception):
             raise next_message
@@ -114,7 +114,7 @@ async def test_deepgram_stream_exits_on_first_final_result(monkeypatch):
     client = DeepgramSttClient(api_key="test", base_url="https://api.deepgram.com", model="nova-2", timeout_seconds=1)
     fake_ws = _FakeDeepgramWs(
         [
-            '{"type":"Results","is_final":true,"channel":{"alternatives":[{"transcript":"hello there","confidence":0.91}]}}',
+            '{"type":"Results","is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"hello there","confidence":0.91}]}}',
         ]
     )
     keepalive_task = asyncio.create_task(asyncio.sleep(3600))
@@ -163,7 +163,7 @@ async def test_deepgram_stream_reopens_stale_closed_session(monkeypatch):
 
     fresh_ws = _FakeDeepgramWs(
         [
-            '{"type":"Results","is_final":true,"channel":{"alternatives":[{"transcript":"hello again","confidence":0.88}]}}',
+            '{"type":"Results","is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"hello again","confidence":0.88}]}}',
         ]
     )
     fresh_keepalive_task = asyncio.create_task(asyncio.sleep(3600))
@@ -217,7 +217,7 @@ async def test_deepgram_stream_retries_once_after_connection_closed_during_resul
 
     fresh_ws = _FakeDeepgramWs(
         [
-            '{"type":"Results","is_final":true,"channel":{"alternatives":[{"transcript":"retried transcript","confidence":0.91}]}}',
+            '{"type":"Results","is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"retried transcript","confidence":0.91}]}}',
         ]
     )
     fresh_keepalive_task = asyncio.create_task(asyncio.sleep(3600))
@@ -253,6 +253,44 @@ async def test_deepgram_stream_retries_once_after_connection_closed_during_resul
     assert stale_ws.recv_calls == 1
     assert any(message == '{"type": "Finalize"}' for message in stale_ws.sent)
     assert fresh_ws.sent[0] == b"abc"
+
+
+@pytest.mark.asyncio
+async def test_consume_results_breaks_after_finalize_without_speech_final(monkeypatch):
+    client = DeepgramSttClient(api_key="test", base_url="https://api.deepgram.com", model="nova-2", timeout_seconds=1)
+    payload = {"session_id": "debug-session", "codec": "wav", "content_type": "audio/wav"}
+    fake_ws = _FakeDeepgramWs(
+        [
+            '{"type":"Results","is_final":true,"speech_final":false,"channel":{"alternatives":[{"transcript":"Yeah","confidence":0.93}]}}',
+        ]
+    )
+    keepalive_task = asyncio.create_task(asyncio.sleep(3600))
+    state = _DeepgramSessionState(
+        ws=fake_ws,
+        lock=asyncio.Lock(),
+        keepalive_task=keepalive_task,
+        listen_url="wss://api.deepgram.com/v1/listen?encoding=linear16",
+    )
+
+    async def fake_get_or_open_session(session_id: str, *, payload: dict, force_reconnect: bool = False):
+        return state
+
+    monkeypatch.setattr(client, "_get_or_open_session", fake_get_or_open_session)
+
+    try:
+        started = asyncio.get_running_loop().time()
+        result = await client._stream_utterance(payload, b"abc", "")
+        elapsed = asyncio.get_running_loop().time() - started
+    finally:
+        keepalive_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await keepalive_task
+
+    assert result.text == "Yeah"
+    assert result.is_final is True
+    assert elapsed < 0.4
+    assert fake_ws.recv_calls == 2
+    assert any(message == '{"type": "Finalize"}' for message in fake_ws.sent)
 
 
 @pytest.mark.asyncio

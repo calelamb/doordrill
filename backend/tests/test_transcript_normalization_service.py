@@ -23,14 +23,14 @@ def test_transcript_normalization_corrects_domain_terms_and_keeps_audit_fields()
     )
 
     result = service.normalize(
-        text="We already use orken and I want a warrenty before switching.",
+        text="We already use or kin and I want a warrenty before switching.",
         provider="deepgram",
         confidence=0.91,
         org_config=org_config,
         active_objections=["incumbent_provider"],
     )
 
-    assert result.raw_text == "We already use orken and I want a warrenty before switching."
+    assert result.raw_text == "We already use or kin and I want a warrenty before switching."
     assert "Orkin" in result.normalized_text
     assert "warranty" in result.normalized_text
     assert result.provider == "deepgram"
@@ -133,7 +133,7 @@ def test_transcript_normalization_phonetic_corrections_are_case_insensitive():
     assert "Orkin" in result.normalized_text
 
 
-def test_transcript_normalization_uses_lower_threshold_for_org_specific_terms():
+def test_transcript_normalization_short_org_specific_terms_require_tighter_match():
     service = TranscriptNormalizationService()
     org_config = OrgPromptConfig(
         org_id="org-3",
@@ -158,7 +158,7 @@ def test_transcript_normalization_uses_lower_threshold_for_org_specific_terms():
         org_config=org_config,
     )
 
-    assert "Acme" in result.normalized_text
+    assert "Acme" not in result.normalized_text
 
 
 def test_keyword_hints_prioritize_org_and_objection_terms():
@@ -188,3 +188,31 @@ def test_keyword_hints_prioritize_org_and_objection_terms():
     assert "Acme Pest Control" in hints
     assert "monthly payment" in hints
     assert any(term.lower() == "terminix" for term in hints)
+
+
+def test_fuzzy_match_does_not_corrupt_common_words():
+    service = TranscriptNormalizationService()
+    org_config = OrgPromptConfig(
+        org_id="org-4",
+        company_name="Yeahs",
+        product_category="Surer",
+        competitors=[{"name": "Okays", "key_differentiator": "Justs"}],
+        known_objections=[],
+        pitch_stages=[],
+        unique_selling_points=[],
+        target_demographics={},
+        pricing_framing=None,
+        close_style=None,
+        rep_tone_guidance=None,
+        grading_priorities=[],
+        published=True,
+    )
+
+    result = service.normalize(
+        text="yeah sure okay just",
+        provider="deepgram",
+        confidence=0.9,
+        org_config=org_config,
+    )
+
+    assert result.normalized_text == "yeah sure okay just"
