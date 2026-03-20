@@ -505,6 +505,40 @@ export function ReplayPanel({
         ))}
       </div>
 
+      {gradingMeta ? (
+        <section className="rounded-2xl border border-white/25 bg-white/35 p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <Activity className="w-4 h-4 text-accent" />
+            <h3 className="text-sm font-semibold tracking-tight text-ink">Grading Telemetry</h3>
+          </div>
+          <div className="grid gap-3 md:grid-cols-4">
+            {[
+              {
+                label: "Confidence",
+                value: typeof gradingMeta.confidence === "number" ? `${Math.round(gradingMeta.confidence * 100)}%` : "--",
+              },
+              {
+                label: "Evidence Quality",
+                value: gradingMeta.evidence_quality ?? "--",
+              },
+              {
+                label: "Session Complexity",
+                value: typeof gradingMeta.session_complexity === "number" ? `${gradingMeta.session_complexity}/5` : "--",
+              },
+              {
+                label: "Source",
+                value: gradingMeta.source?.replace(/_/g, " ") ?? "--",
+              },
+            ].map((item) => (
+              <div key={item.label} className="rounded-2xl border border-white/25 bg-white/50 px-4 py-3">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">{item.label}</div>
+                <div className="mt-2 text-sm font-semibold text-ink">{item.value}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       <div className="grid gap-6 xl:grid-cols-[1.3fr_0.9fr]">
         <div className="space-y-6">
           <section className="rounded-2xl border border-white/25 bg-white/35 p-5">
