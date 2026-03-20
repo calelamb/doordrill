@@ -62,7 +62,7 @@ providers = ProviderSuite.from_settings(settings)
 storage_service = StorageService()
 transcript_normalizer = TranscriptNormalizationService()
 
-SILENCE_FILLER_SECONDS = 4.0
+SILENCE_FILLER_SECONDS = 9.0  # Reps need time to think — 4s was cutting them off mid-thought
 VAD_FINALIZE_DEBOUNCE_MS = 80
 FLUSH_INTERVAL_ACTIVE_MS = 200
 FLUSH_INTERVAL_IDLE_MS = 400
@@ -1138,6 +1138,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             return False
 
         state = orchestrator.get_state(session_id)
+        # Don't inject filler during door-open or after session ends — the rep needs
+        # uninterrupted time to deliver their opener and the homeowner should wait.
+        if state.stage in {"DOOR_OPEN", "ENDED"}:
+            return False
         stage = state.stage
         emotion = state.emotion
         active_objections = list(state.active_objections)
