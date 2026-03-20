@@ -148,12 +148,17 @@ class DocumentRetrievalService:
         if row is not None:
             return True
 
-        universal_row = db.scalar(
-            select(UniversalKnowledgeChunk.id)
-            .where(UniversalKnowledgeChunk.is_active.is_(True))
-            .limit(1)
-        )
-        return universal_row is not None
+        try:
+            universal_row = db.scalar(
+                select(UniversalKnowledgeChunk.id)
+                .where(UniversalKnowledgeChunk.is_active.is_(True))
+                .limit(1)
+            )
+            return universal_row is not None
+        except Exception:
+            # Table may not exist yet if migration hasn't run — treat as no universal docs
+            db.rollback()
+            return False
 
     def retrieve(
         self,
@@ -663,11 +668,15 @@ class DocumentRetrievalService:
         query_vector: list[float],
         k: int,
     ) -> list[RetrievedChunk]:
-        rows = db.execute(
-            select(UniversalKnowledgeChunk)
-            .where(UniversalKnowledgeChunk.is_active.is_(True))
-            .where(UniversalKnowledgeChunk.embedding.is_not(None))
-        ).scalars().all()
+        try:
+            rows = db.execute(
+                select(UniversalKnowledgeChunk)
+                .where(UniversalKnowledgeChunk.is_active.is_(True))
+                .where(UniversalKnowledgeChunk.embedding.is_not(None))
+            ).scalars().all()
+        except Exception:
+            db.rollback()
+            return []
 
         scored: list[RetrievedChunk] = []
         for chunk in rows:
@@ -697,10 +706,14 @@ class DocumentRetrievalService:
         if not terms:
             return []
 
-        rows = db.execute(
-            select(UniversalKnowledgeChunk)
-            .where(UniversalKnowledgeChunk.is_active.is_(True))
-        ).scalars().all()
+        try:
+            rows = db.execute(
+                select(UniversalKnowledgeChunk)
+                .where(UniversalKnowledgeChunk.is_active.is_(True))
+            ).scalars().all()
+        except Exception:
+            db.rollback()
+            return []
 
         scored: list[RetrievedChunk] = []
         for chunk in rows:

@@ -1683,8 +1683,14 @@ class PromptBuilder:
         return parts
 
     def _response_cap_rule(self, canonical_stage: str) -> str:
-        if canonical_stage in {"DOOR_OPEN", "ENDED"}:
-            return "Speak briefly - one short phrase, the way you'd actually answer your door."
+        if canonical_stage == "DOOR_OPEN":
+            return (
+                "Respond like a real person who just opened their front door — "
+                "a natural greeting reaction such as 'Good, can I help you?' or 'Hey, what's up?' or 'Yeah?' "
+                "Do not respond with a single filler word or trailing ellipsis."
+            )
+        if canonical_stage == "ENDED":
+            return "Wrap it up naturally. One brief closing line, then done."
         if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW", "RECOVERY"}:
             return "You may think out loud briefly before answering."
         return ""
