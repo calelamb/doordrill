@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, case, delete, func, select
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,7 @@ from app.models.assignment import Assignment
 from app.models.grading import GradingRun
 from app.models.invitation import Invitation
 from app.models.knowledge import OrgDocument
+from app.models.postprocess_run import PostprocessRun
 from app.models.scenario import Scenario
 from app.models.scorecard import ManagerCoachingNote, ManagerReview, Scorecard
 from app.models.session import Session as DrillSession
@@ -71,6 +72,7 @@ from app.schemas.manager_ai import (
 from app.schemas.scorecard import (
     BulkReviewRequest,
     BulkReviewResponse,
+    CategoryScoreV2,
     CoachingNoteCreateRequest,
     ManagerCoachingNoteResponse,
     ManagerReviewResponse,
@@ -117,6 +119,8 @@ predictive_modeling_service = PredictiveModelingService()
 document_processing_service = DocumentProcessingService(storage_service=storage_service)
 document_retrieval_service = DocumentRetrievalService()
 invite_email_provider = build_email_provider(settings)
+TECHNIQUE_EVAL_ARTIFACT_TYPE = "grading_technique_evaluation"
+PROCESSING_GRADE_STATUSES = {"pending", "queued", "running", "retry_scheduled"}
 RUBRIC_CATEGORY_KEYS = {
     "opening": "opening",
     "pitch": "pitch",
@@ -186,6 +190,190 @@ def _serialize_coaching_note(note: ManagerCoachingNote) -> ManagerCoachingNoteRe
 
 def _serialize_org_document(document: OrgDocument) -> OrgDocumentResponse:
     return OrgDocumentResponse.model_validate(document)
+
+
+def _latest_grading_artifact(db: Session, session_id: str) -> SessionArtifact | None:
+    return db.scalar(
+        select(SessionArtifact)
+        .where(
+            SessionArtifact.session_id == session_id,
+            SessionArtifact.artifact_type == TECHNIQUE_EVAL_ARTIFACT_TYPE,
+        )
+        .order_by(SessionArtifact.created_at.desc())
+    )
+
+
+def _latest_grading_run(db: Session, session_id: str) -> GradingRun | None:
+    return db.scalar(
+        select(GradingRun)
+        .where(GradingRun.session_id == session_id)
+        .order_by(GradingRun.completed_at.desc(), GradingRun.created_at.desc())
+    )
+
+
+def _latest_grade_postprocess_run(db: Session, session_id: str) -> PostprocessRun | None:
+    return db.scalar(
+        select(PostprocessRun)
+        .where(
+            PostprocessRun.session_id == session_id,
+            PostprocessRun.task_type == "grade",
+        )
+        .order_by(PostprocessRun.created_at.desc())
+    )
+
+
+def _turn_text_by_id(turns: list[SessionTurn]) -> dict[str, str]:
+    text_by_id: dict[str, str] = {}
+    for turn in turns:
+        text = " ".join(
+            part.strip()
+            for part in [
+                turn.normalized_transcript_text or "",
+                turn.raw_transcript_text or "",
+                turn.text or "",
+            ]
+            if isinstance(part, str) and part.strip()
+        ).strip()
+        if text:
+            text_by_id[turn.id] = text[:240]
+    return text_by_id
+
+
+def _serialize_highlights(highlights: list[dict[str, Any]] | None, turns: list[SessionTurn]) -> list[dict[str, Any]]:
+    text_by_id = _turn_text_by_id(turns)
+    serialized: list[dict[str, Any]] = []
+    for item in highlights or []:
+        if not isinstance(item, dict):
+            continue
+        turn_id = item.get("turn_id")
+        payload = dict(item)
+        if isinstance(turn_id, str) and turn_id in text_by_id and "transcript_quote" not in payload:
+            payload["transcript_quote"] = text_by_id[turn_id]
+        serialized.append(payload)
+    return serialized
+
+
+def _serialize_technique_checks(artifact: SessionArtifact | None) -> list[dict[str, Any]]:
+    metadata = artifact.metadata_json if artifact is not None and isinstance(artifact.metadata_json, dict) else {}
+    serialized: list[dict[str, Any]] = []
+    for item in metadata.get("technique_checks", []):
+        if not isinstance(item, dict):
+            continue
+        serialized.append(
+            {
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("label") or ""),
+                "category": str(item.get("category") or ""),
+                "status": str(item.get("status") or "unknown"),
+                "kind": str(item.get("kind") or "reward"),
+                "evidence_turn_ids": [
+                    turn_id
+                    for turn_id in item.get("evidence_turn_ids", [])
+                    if isinstance(turn_id, str) and turn_id.strip()
+                ],
+            }
+        )
+    return [item for item in serialized if item["id"] and item["label"] and item["category"]]
+
+
+def _serialize_grading_meta(
+    *,
+    session: DrillSession,
+    scorecard: Scorecard | None,
+    artifact: SessionArtifact | None,
+    grading_run: GradingRun | None,
+    postprocess_run: PostprocessRun | None,
+) -> dict[str, Any] | None:
+    metadata = artifact.metadata_json if artifact is not None and isinstance(artifact.metadata_json, dict) else {}
+    raw_meta = metadata.get("grading_meta") if isinstance(metadata.get("grading_meta"), dict) else {}
+    grading_status = str(metadata.get("grading_status") or grading_run.status if grading_run else "").strip().lower()
+    retry_requested = bool(metadata.get("retry_requested"))
+    base_meta: dict[str, Any] = {
+        "status": str(raw_meta.get("status") or "").strip() or None,
+        "source": str(raw_meta.get("source") or "").strip() or None,
+        "provisional": bool(raw_meta.get("provisional", False)),
+        "confidence": float(raw_meta["confidence"]) if isinstance(raw_meta.get("confidence"), (int, float)) else None,
+        "evidence_quality": str(raw_meta.get("evidence_quality") or "").strip() or None,
+        "session_complexity": int(raw_meta["session_complexity"]) if isinstance(raw_meta.get("session_complexity"), int) else None,
+        "call_quality": str(raw_meta.get("call_quality") or metadata.get("call_quality") or "").strip() or None,
+        "message": str(raw_meta.get("message") or metadata.get("message") or "").strip() or None,
+    }
+
+    if scorecard is not None:
+        if not base_meta["status"]:
+            is_no_rep_speech = float(scorecard.overall_score or 0.0) == 0.0 and "no_rep_speech" in (scorecard.weakness_tags or [])
+            base_meta["status"] = "no_rep_speech" if is_no_rep_speech else "final"
+        if not base_meta["source"]:
+            base_meta["source"] = "legacy_scorecard"
+        if base_meta["message"] is None:
+            base_meta["message"] = (
+                "No rep speech was captured in this drill."
+                if base_meta["status"] == "no_rep_speech"
+                else "Scorecard complete."
+            )
+        return base_meta
+
+    postprocess_status = str(postprocess_run.status if postprocess_run else "").strip().lower()
+    session_status = session.status.value if hasattr(session.status, "value") else str(session.status)
+    if postprocess_status in PROCESSING_GRADE_STATUSES or grading_status == "running" or session_status == "processing":
+        return {
+            "status": "processing",
+            "source": "postprocess_queue" if postprocess_status else "grading_run",
+            "provisional": False,
+            "confidence": None,
+            "evidence_quality": None,
+            "session_complexity": None,
+            "call_quality": None,
+            "message": "Retrying scorecard generation after a timeout." if retry_requested else "Building the scorecard now.",
+        }
+
+    if grading_status in {"llm_error", "parse_error", "timeout_fallback"}:
+        return {
+            "status": "processing",
+            "source": grading_status,
+            "provisional": False,
+            "confidence": None,
+            "evidence_quality": None,
+            "session_complexity": None,
+            "call_quality": None,
+            "message": "Recalibrating this scorecard from transcript evidence.",
+        }
+
+    return None
+
+
+def _serialize_manager_scorecard(
+    scorecard: Scorecard | None,
+    *,
+    turns: list[SessionTurn],
+    grading_artifact: SessionArtifact | None,
+) -> dict[str, Any] | None:
+    if scorecard is None:
+        return None
+
+    schema_version = scorecard.scorecard_schema_version or "v1"
+    serialized_category_scores: dict[str, Any]
+    if schema_version == "v2":
+        serialized_category_scores = {}
+        for category_key, raw_value in (scorecard.category_scores or {}).items():
+            try:
+                serialized_category_scores[category_key] = CategoryScoreV2.model_validate(raw_value).model_dump()
+            except ValidationError:
+                serialized_category_scores[category_key] = raw_value
+    else:
+        serialized_category_scores = scorecard.category_scores or {}
+
+    return {
+        "id": scorecard.id,
+        "overall_score": scorecard.overall_score,
+        "scorecard_schema_version": schema_version,
+        "category_scores": serialized_category_scores,
+        "highlights": _serialize_highlights(scorecard.highlights, turns),
+        "ai_summary": scorecard.ai_summary,
+        "evidence_turn_ids": scorecard.evidence_turn_ids,
+        "weakness_tags": scorecard.weakness_tags,
+        "technique_checks": _serialize_technique_checks(grading_artifact),
+    }
 
 
 def _resolve_period_bounds(
@@ -2333,6 +2521,14 @@ def get_manager_session_detail(
     _ensure_same_org(actor, rep.org_id)
     assignment = db.scalar(select(Assignment).where(Assignment.id == session.assignment_id))
     scorecard = db.scalar(select(Scorecard).where(Scorecard.session_id == session_id))
+    turns = db.scalars(
+        select(SessionTurn)
+        .where(SessionTurn.session_id == session_id)
+        .order_by(SessionTurn.turn_index.asc(), SessionTurn.started_at.asc())
+    ).all()
+    grading_artifact = _latest_grading_artifact(db, session_id)
+    grading_run = _latest_grading_run(db, session_id)
+    grade_postprocess_run = _latest_grade_postprocess_run(db, session_id)
 
     return {
         "session": {
@@ -2356,19 +2552,17 @@ def get_manager_session_detail(
             if assignment
             else None
         ),
-        "scorecard": (
-            {
-                "id": scorecard.id,
-                "overall_score": scorecard.overall_score,
-                "scorecard_schema_version": scorecard.scorecard_schema_version,
-                "category_scores": scorecard.category_scores,
-                "highlights": scorecard.highlights,
-                "ai_summary": scorecard.ai_summary,
-                "evidence_turn_ids": scorecard.evidence_turn_ids,
-                "weakness_tags": scorecard.weakness_tags,
-            }
-            if scorecard
-            else None
+        "scorecard": _serialize_manager_scorecard(
+            scorecard,
+            turns=turns,
+            grading_artifact=grading_artifact,
+        ),
+        "grading_meta": _serialize_grading_meta(
+            session=session,
+            scorecard=scorecard,
+            artifact=grading_artifact,
+            grading_run=grading_run,
+            postprocess_run=grade_postprocess_run,
         ),
     }
 
@@ -2621,6 +2815,9 @@ def get_session_replay(
         "min_score": min(realism_scores) if realism_scores else None,
         "max_score": max(realism_scores) if realism_scores else None,
     }
+    grading_artifact = _latest_grading_artifact(db, session_id)
+    grading_run = _latest_grading_run(db, session_id)
+    grade_postprocess_run = _latest_grade_postprocess_run(db, session_id)
 
     return SessionReplayResponse(
         session_id=session.id,
@@ -2671,19 +2868,17 @@ def get_session_replay(
             else None,
         },
         turn_diagnostics=turn_diagnostics,
-        scorecard=(
-            {
-                "id": scorecard.id,
-                "overall_score": scorecard.overall_score,
-                "scorecard_schema_version": scorecard.scorecard_schema_version,
-                "category_scores": scorecard.category_scores,
-                "highlights": scorecard.highlights,
-                "ai_summary": scorecard.ai_summary,
-                "evidence_turn_ids": scorecard.evidence_turn_ids,
-                "weakness_tags": scorecard.weakness_tags,
-            }
-            if scorecard
-            else None
+        scorecard=_serialize_manager_scorecard(
+            scorecard,
+            turns=turns,
+            grading_artifact=grading_artifact,
+        ),
+        grading_meta=_serialize_grading_meta(
+            session=session,
+            scorecard=scorecard,
+            artifact=grading_artifact,
+            grading_run=grading_run,
+            postprocess_run=grade_postprocess_run,
         ),
         manager_reviews=[_serialize_review(review) for review in reviews],
         coaching_notes=[_serialize_coaching_note(note) for note in coaching_notes],

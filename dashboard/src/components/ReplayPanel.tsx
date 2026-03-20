@@ -51,12 +51,40 @@ type TimelineTurn = TranscriptTurn & {
 
 function normalizeCategory(value: CategoryScoreValue | undefined) {
   if (typeof value === "number") {
-    return { score: value, rationale: "", evidenceTurnIds: [] as string[] };
+    return {
+      score: value,
+      rationale: "",
+      rationaleSummary: "",
+      rationaleDetail: "",
+      confidence: null as number | null,
+      evidenceTurnIds: [] as string[],
+      behavioralSignals: [] as string[],
+      improvementTarget: null as string | null,
+    };
   }
   return {
-    score: value?.score ?? 0,
+    score: typeof value?.score === "number" ? value.score : null,
     rationale: value?.rationale ?? "",
-    evidenceTurnIds: value?.evidence_turn_ids ?? []
+    rationaleSummary: value?.rationale_summary ?? value?.rationale ?? "",
+    rationaleDetail: value?.rationale_detail ?? value?.rationale ?? "",
+    confidence: typeof value?.confidence === "number" ? value.confidence : null,
+    evidenceTurnIds: value?.evidence_turn_ids ?? [],
+    behavioralSignals: value?.behavioral_signals ?? [],
+    improvementTarget: value?.improvement_target ?? null,
+  };
+}
+
+function hasScore(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function techniqueBuckets(checks: NonNullable<ReplayResponse["scorecard"]>["technique_checks"] | undefined) {
+  const items = Array.isArray(checks) ? checks : [];
+  return {
+    landed: items.filter((item) => item.kind === "reward" && (item.status === "hit" || item.status === "partial")),
+    missed: items.filter(
+      (item) => (item.kind === "reward" && item.status === "miss") || (item.kind === "cap" && item.status === "hit")
+    ),
   };
 }
 
@@ -207,7 +235,7 @@ export function ReplayPanel({
       moments.push({
         id: `evidence-${category.key}`,
         label: `${category.label} evidence`,
-        note: category.evidenceQuote || category.rationale || "Evidence linked from grading rationale.",
+        note: category.evidenceQuote || category.rationaleSummary || category.rationaleDetail || category.rationale || "Evidence linked from grading rationale.",
         turnId: category.evidenceTurnIds[0] ?? null,
         tone: "evidence",
         categoryKey: category.key,
@@ -298,6 +326,11 @@ export function ReplayPanel({
   }
 
   const scorecard = replay.scorecard;
+  const gradingMeta = replay.grading_meta ?? null;
+  const { landed: landedChecks, missed: missedChecks } = useMemo(
+    () => techniqueBuckets(scorecard?.technique_checks),
+    [scorecard?.technique_checks]
+  );
 
   function seekToTurn(turnId: string) {
     const audio = audioRef.current;
@@ -408,6 +441,24 @@ export function ReplayPanel({
           <span className="bg-accent/10 text-accent text-xs font-medium rounded-full px-3 py-1">
             {replay.session?.duration_seconds ? formatClock(replay.session.duration_seconds) : "Duration pending"}
           </span>
+          {gradingMeta?.status ? (
+            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+              gradingMeta.status === "provisional"
+                ? "bg-amber-100 text-amber-900"
+                : gradingMeta.status === "no_rep_speech"
+                  ? "bg-rose-100 text-rose-900"
+                  : gradingMeta.status === "processing"
+                    ? "bg-sky-100 text-sky-900"
+                    : "bg-emerald-100 text-emerald-900"
+            }`}>
+              {gradingMeta.status.replace(/_/g, " ")}
+            </span>
+          ) : null}
+          {gradingMeta?.call_quality ? (
+            <span className="rounded-full bg-white/70 px-3 py-1 text-xs font-medium text-muted">
+              {gradingMeta.call_quality} evidence
+            </span>
+          ) : null}
           {focusTurnId || focusCategory ? (
             <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-900">
               Focused evidence
@@ -419,6 +470,16 @@ export function ReplayPanel({
       {focusTurnId || focusCategory ? (
         <div className="rounded-2xl border border-amber-300/35 bg-amber-50/70 px-4 py-3 text-sm text-amber-950">
           {focusCategory ? `Opened from ${focusCategory.replace(/_/g, " ")} evidence.` : "Opened on a linked transcript moment from management analytics."}
+        </div>
+      ) : null}
+
+      {gradingMeta?.message ? (
+        <div className={`rounded-2xl border px-4 py-3 text-sm ${
+          gradingMeta.provisional || gradingMeta.status === "processing"
+            ? "border-amber-300/35 bg-amber-50/70 text-amber-950"
+            : "border-emerald-300/30 bg-emerald-50/60 text-emerald-950"
+        }`}>
+          {gradingMeta.message}
         </div>
       ) : null}
 
@@ -608,12 +669,12 @@ export function ReplayPanel({
                         <div className="mt-3 h-2 w-full rounded-full bg-accent-soft">
                           <div
                             className="h-full rounded-full bg-accent transition-all"
-                            style={{ width: `${Math.max(0, Math.min(100, category.score * 10))}%` }}
+                            style={{ width: `${Math.max(0, Math.min(100, (category.score ?? 0) * 10))}%` }}
                           />
                         </div>
                       </div>
                       <div className="text-right">
-                        <div className="text-base font-bold text-ink">{category.score.toFixed(1)}</div>
+                        <div className="text-base font-bold text-ink">{hasScore(category.score) ? category.score.toFixed(1) : "--"}</div>
                         <div className="text-xs text-muted">
                           {expandedCategory === category.key ? "Hide details" : "Show details"}
                         </div>
@@ -621,12 +682,48 @@ export function ReplayPanel({
                     </button>
                     {expandedCategory === category.key ? (
                       <div className="mt-4 space-y-3 border-t border-white/25 pt-4">
-                        <p className="text-sm leading-6 text-muted">
-                          {category.rationale || scorecard.ai_summary}
-                        </p>
+                        <div className="space-y-2">
+                          <p className="text-sm font-semibold text-ink">
+                            {category.rationaleSummary || category.rationaleDetail || category.rationale || scorecard.ai_summary}
+                          </p>
+                          {category.rationaleDetail && category.rationaleDetail !== category.rationaleSummary ? (
+                            <p className="text-sm leading-6 text-muted">{category.rationaleDetail}</p>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {typeof category.confidence === "number" ? (
+                            <span className="rounded-full bg-white/70 px-3 py-1 text-[11px] font-semibold text-muted">
+                              Confidence {(category.confidence * 100).toFixed(0)}%
+                            </span>
+                          ) : null}
+                          {category.improvementTarget ? (
+                            <span className="rounded-full bg-amber-100 px-3 py-1 text-[11px] font-semibold text-amber-900">
+                              {category.improvementTarget}
+                            </span>
+                          ) : null}
+                          {category.behavioralSignals.map((signal) => (
+                            <span key={`${category.key}-${signal}`} className="rounded-full bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
+                              {signal.replace(/_/g, " ")}
+                            </span>
+                          ))}
+                        </div>
                         <div className="rounded-2xl border border-white/25 bg-white/60 px-4 py-3">
                           <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">Evidence quote</div>
                           <p className="mt-1 text-sm text-ink">{category.evidenceQuote || "No evidence quote attached to this category."}</p>
+                          {category.evidenceTurnIds.length ? (
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {category.evidenceTurnIds.map((turnId) => (
+                                <button
+                                  key={turnId}
+                                  type="button"
+                                  onClick={() => seekToTurn(turnId)}
+                                  className="rounded-full bg-white/70 px-3 py-1 text-[11px] font-semibold text-accent transition hover:bg-white"
+                                >
+                                  {`Turn ${timelineTurns.find((turn) => turn.turn_id === turnId)?.turn_index ?? "--"}`}
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                     ) : null}
@@ -640,9 +737,73 @@ export function ReplayPanel({
 
           <section className="rounded-2xl border border-white/25 bg-white/35 p-5 space-y-4">
             <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4 text-accent" />
+              <h3 className="text-sm font-semibold tracking-tight text-ink">Technique Checklist</h3>
+            </div>
+            {scorecard?.technique_checks?.length ? (
+              <div className="space-y-3">
+                {scorecard.technique_checks.map((check) => {
+                  const toneClass =
+                    check.kind === "cap" && check.status === "hit"
+                      ? "border-rose-200 bg-rose-50/70"
+                      : check.status === "miss"
+                        ? "border-amber-200 bg-amber-50/70"
+                        : check.status === "partial"
+                          ? "border-sky-200 bg-sky-50/70"
+                          : "border-emerald-200 bg-emerald-50/70";
+                  return (
+                    <div key={check.id} className={`rounded-2xl border px-4 py-3 ${toneClass}`}>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-semibold text-ink">{check.label}</div>
+                          <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+                            {check.category.replace(/_/g, " ")} · {check.status.replace(/_/g, " ")}
+                          </div>
+                        </div>
+                        <span className="rounded-full bg-white/80 px-3 py-1 text-[11px] font-semibold text-muted">
+                          {check.kind}
+                        </span>
+                      </div>
+                      {check.evidence_turn_ids.length ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {check.evidence_turn_ids.map((turnId) => (
+                            <button
+                              key={`${check.id}-${turnId}`}
+                              type="button"
+                              onClick={() => seekToTurn(turnId)}
+                              className="rounded-full bg-white/80 px-3 py-1 text-[11px] font-semibold text-accent transition hover:bg-white"
+                            >
+                              {`Turn ${timelineTurns.find((turn) => turn.turn_id === turnId)?.turn_index ?? "--"}`}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <EmptyState variant="empty" message="No technique checks were attached to this scorecard." />
+            )}
+            {landedChecks.length || missedChecks.length ? (
+              <div className="rounded-2xl border border-white/25 bg-white/50 px-4 py-3 text-sm text-muted">
+                {landedChecks.length ? `${landedChecks.length} playbook techniques landed. ` : ""}
+                {missedChecks.length ? `${missedChecks.length} need coaching attention.` : ""}
+              </div>
+            ) : null}
+          </section>
+
+          <section className="rounded-2xl border border-white/25 bg-white/35 p-5 space-y-4">
+            <div className="flex items-center gap-2">
               <Save className="w-4 h-4 text-accent" />
               <h3 className="text-sm font-semibold tracking-tight text-ink">Manager Actions</h3>
             </div>
+
+            {gradingMeta?.provisional || gradingMeta?.source === "calibrated_fallback" ? (
+              <div className="rounded-2xl border border-amber-300/35 bg-amber-50/70 px-4 py-3 text-sm text-amber-950">
+                This grade is provisional or band-clamped. Override if needed, but expect retry or recalibration to move the final result.
+              </div>
+            ) : null}
 
             <div className="space-y-3">
               <label className="block">
@@ -663,7 +824,7 @@ export function ReplayPanel({
                 <input
                   value={overrideScore}
                   onChange={(event) => setOverrideScore(event.target.value)}
-                  placeholder={scorecard ? scorecard.overall_score.toFixed(1) : "8.5"}
+                  placeholder={scorecard && hasScore(scorecard.overall_score) ? scorecard.overall_score.toFixed(1) : "8.5"}
                   className="w-full rounded-xl border border-white/30 bg-white/50 px-3 py-2.5 text-sm text-ink placeholder:text-muted/50 outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
                 />
               </label>

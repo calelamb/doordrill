@@ -9,6 +9,7 @@ from app.db.session import SessionLocal
 from app.models.grading import GradingRun
 from app.models.scorecard import Scorecard
 from app.schemas.scorecard import StructuredScorecardPayloadV2
+from app.services.grading_technique_service import GradingTechniqueService
 from app.services.grading_service import GradingPromptBuilder, GradingService
 from app.services.session_postprocess_service import SessionPostprocessService
 
@@ -105,17 +106,23 @@ def _turn(
     text: str = "test",
     behavioral_signals: list[str] | None = None,
     objection_tags: list[str] | None = None,
+    **extra,
 ):
-    return SimpleNamespace(
-        id=turn_id,
-        turn_index=int(turn_id.split("-")[-1]) if "-" in turn_id and turn_id.split("-")[-1].isdigit() else 1,
-        speaker=SimpleNamespace(value=speaker),
-        stage=stage,
-        text=text,
-        behavioral_signals=list(behavioral_signals or []),
-        mb_behaviors=[],
-        objection_tags=list(objection_tags or []),
-    )
+    payload = {
+        "id": turn_id,
+        "turn_index": int(turn_id.split("-")[-1]) if "-" in turn_id and turn_id.split("-")[-1].isdigit() else 1,
+        "speaker": SimpleNamespace(value=speaker),
+        "stage": stage,
+        "text": text,
+        "behavioral_signals": list(behavioral_signals or []),
+        "mb_behaviors": [],
+        "objection_tags": list(objection_tags or []),
+        "emotion_before": extra.pop("emotion_before", None),
+        "emotion_after": extra.pop("emotion_after", None),
+        "transcript_confidence": extra.pop("transcript_confidence", None),
+    }
+    payload.update(extra)
+    return SimpleNamespace(**payload)
 
 
 def _session(turns: list[SimpleNamespace]):
@@ -565,6 +572,154 @@ def test_fallback_ai_summary_uses_three_sentence_coaching_shape():
     assert grading["ai_summary"].count(".") >= 3
 
 
+def test_technique_service_classifies_core_playbook_cues():
+    service = GradingTechniqueService()
+    turns = [
+        _turn(
+            "rep-1",
+            stage="initial_pitch",
+            text="A few of your neighbors on the route had us out this week.",
+            behavioral_signals=["builds_rapport", "mentions_social_proof"],
+        ),
+        _turn("ai-1", speaker="ai", stage="objection_handling", text="Not interested.", objection_tags=["not_interested"]),
+        _turn(
+            "rep-2",
+            stage="objection_handling",
+            text="Totally get it. Before I go, let me leave you with a quick quote.",
+            behavioral_signals=["acknowledges_concern"],
+        ),
+        _turn(
+            "rep-3",
+            stage="pitch",
+            text="We deweb the eaves and build a barrier around the foundation so you stay ahead of ants, does that make sense?",
+            behavioral_signals=["explains_value"],
+        ),
+        _turn("ai-2", speaker="ai", stage="objection_handling", text="Maybe.", objection_tags=["hesitation"]),
+        _turn("rep-4", stage="close_attempt", text="Would Tuesday or Thursday work better for you?"),
+    ]
+
+    evaluation = service.evaluate(
+        turns=turns,
+        session_context={},
+        inflection_points=[],
+        base_scores={key: 6.0 for key in ("opening", "pitch_delivery", "objection_handling", "closing_technique", "professionalism")},
+    )
+    checks = {item["id"]: item for item in evaluation["technique_checks"]}
+
+    assert checks["opening_neighbor_route_frame"]["status"] == "hit"
+    assert checks["objection_validate_then_pivot"]["status"] == "hit"
+    assert checks["pitch_feature_benefit_soft_close"]["status"] == "hit"
+    assert checks["closing_option_close"]["status"] == "hit"
+
+
+def test_technique_service_unobservable_cues_do_not_reduce_numeric_score():
+    service = GradingTechniqueService()
+    turns = [
+        _turn("rep-1", stage="initial_pitch", text="Just wanted to introduce myself."),
+        _turn("ai-1", speaker="ai", stage="objection_handling", text="Okay."),
+    ]
+
+    evaluation = service.evaluate(
+        turns=turns,
+        session_context={},
+        inflection_points=[],
+        base_scores={key: 6.0 for key in ("opening", "pitch_delivery", "objection_handling", "closing_technique", "professionalism")},
+    )
+    checks = {item["id"]: item for item in evaluation["technique_checks"]}
+
+    assert checks["opening_posture_neighbor_energy"]["status"] == "unknown"
+    assert evaluation["bands"]["professionalism"]["ceiling"] == 6.8
+
+
+def test_technique_evaluation_strong_call_quality_uses_narrow_variation_budget():
+    service = GradingTechniqueService()
+    turns = [
+        _turn(
+            "rep-1",
+            stage="initial_pitch",
+            text="A few of your neighbors on the route had us out this week.",
+            behavioral_signals=["builds_rapport", "mentions_social_proof"],
+        ),
+        _turn("ai-1", speaker="ai", stage="objection_handling", text="Not interested.", objection_tags=["not_interested"]),
+        _turn(
+            "rep-2",
+            stage="objection_handling",
+            text="Totally get it. Before I go, let me leave you with a quick quote.",
+            behavioral_signals=["acknowledges_concern"],
+        ),
+        _turn(
+            "rep-3",
+            stage="pitch",
+            text="We deweb the eaves and build a barrier around the foundation so you stay ahead of ants, does that make sense?",
+            behavioral_signals=["explains_value"],
+        ),
+        _turn("ai-2", speaker="ai", stage="objection_handling", text="What does that cost?", objection_tags=["price"], emotion_before="skeptical"),
+        _turn(
+            "rep-4",
+            stage="close_attempt",
+            text="We come every 60 days, so it stays lower month to month. Would Tuesday or Thursday work better for you?",
+            behavioral_signals=["explains_value"],
+        ),
+    ]
+    for turn in turns:
+        setattr(turn, "transcript_confidence", 0.97)
+
+    first = service.evaluate(
+        turns=turns,
+        session_context={},
+        inflection_points=[],
+        base_scores={key: 6.4 for key in ("opening", "pitch_delivery", "objection_handling", "closing_technique", "professionalism")},
+    )
+    second = service.evaluate(
+        turns=turns,
+        session_context={},
+        inflection_points=[],
+        base_scores={key: 6.4 for key in ("opening", "pitch_delivery", "objection_handling", "closing_technique", "professionalism")},
+    )
+
+    assert first["call_quality"] == "strong"
+    assert all(band["max_width"] == 0.4 for band in first["bands"].values())
+    assert first["anchor_scores"] == second["anchor_scores"]
+
+
+def test_normalized_grading_clamps_scores_outside_band_and_marks_calibrated_fallback():
+    service = GradingService()
+    rep_turns = [
+        _turn(
+            "rep-1",
+            stage="initial_pitch",
+            text="A few of your neighbors on the route had us out this week.",
+            behavioral_signals=["builds_rapport", "mentions_social_proof"],
+        ),
+        _turn("rep-2", stage="objection_handling", text="Totally fair.", behavioral_signals=["acknowledges_concern"]),
+        _turn("rep-3", stage="close_attempt", text="Would Tuesday or Thursday work better for you?"),
+    ]
+    fallback = service._grade_with_fallback(
+        session=_session(rep_turns),
+        rep_turns=rep_turns,
+        ai_turns=[],
+        session_context={},
+        first_turn_signals=["builds_rapport", "mentions_social_proof"],
+        inflection_points=[],
+    )
+    payload = _llm_payload(rep_turns[0].id)
+    payload["category_scores"]["opening"]["score"] = 0.1
+    payload["category_scores"]["opening"]["evidence_turn_ids"] = [rep_turns[1].id]
+
+    normalized = service._normalize_grading(
+        payload,
+        session=_session(rep_turns),
+        first_turn_signals=["builds_rapport", "mentions_social_proof"],
+        inflection_points=[],
+        fallback=fallback,
+        technique_evaluation=fallback["technique_evaluation"],
+    )
+
+    assert normalized["was_clamped"] is True
+    assert normalized["grading_meta"]["source"] == "calibrated_fallback"
+    assert normalized["category_scores"]["opening"]["score"] == fallback["category_scores"]["opening"]["score"]
+
+
 @pytest.mark.asyncio
 async def test_grade_with_llm_uses_grading_model_and_timeout(monkeypatch):
     service = GradingService()
@@ -605,6 +760,7 @@ async def test_grade_with_llm_uses_grading_model_and_timeout(monkeypatch):
     result = await service._grade_with_llm(
         session=_session([rep_turn]),
         prompt_template="test prompt",
+        retrieved_context="",
         turns=[rep_turn],
         session_context={},
         first_turn_signals=["builds_rapport"],
@@ -613,7 +769,7 @@ async def test_grade_with_llm_uses_grading_model_and_timeout(monkeypatch):
 
     assert captured["model"] == "gpt-4o-mini"
     assert captured["timeout"] == 20.0
-    assert result["status"] == "success"
+    assert result["status"] in {"success", "calibrated_fallback"}
 
 
 @pytest.mark.asyncio
@@ -642,6 +798,7 @@ async def test_grade_with_llm_timeout_uses_fallback_and_requests_retry(monkeypat
     result = await service._grade_with_llm(
         session=_session([rep_turn]),
         prompt_template="test prompt",
+        retrieved_context="",
         turns=[rep_turn],
         session_context={},
         first_turn_signals=[],

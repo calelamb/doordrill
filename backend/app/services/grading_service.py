@@ -23,6 +23,7 @@ from app.schemas.scorecard import StructuredScorecardPayloadV2
 from app.services.analytics_refresh_service import AnalyticsRefreshService
 from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.inflection_point_service import InflectionPointService
+from app.services.grading_technique_service import GradingTechniqueService
 from app.services.prompt_version_resolver import prompt_version_resolver
 from app.services.turn_enrichment_service import ReconstructedTimeline, TurnEnrichmentService
 
@@ -59,6 +60,7 @@ OPENING_SIGNAL_LABELS = {
 }
 POSITIVE_RECOVERY_EMOTIONS = {"curious", "interested"}
 MAX_TRANSCRIPT_TURNS_FOR_GRADING = 20
+TECHNIQUE_EVAL_ARTIFACT_TYPE = "grading_technique_evaluation"
 SIGNAL_SCORE_MAP: dict[str, dict[str, float]] = {
     "opening": {
         "builds_rapport": 1.5,
@@ -237,6 +239,8 @@ class GradingPromptBuilder:
         turns: list[Any],
         *,
         prompt_template: str | None = None,
+        retrieved_context: str | None = None,
+        technique_evaluation: dict[str, Any] | None = None,
         session_context: dict[str, Any] | None = None,
         first_turn_signals: list[str] | None = None,
         inflection_points: list[dict[str, Any]] | None = None,
@@ -252,9 +256,12 @@ class GradingPromptBuilder:
             "You are grading a door-to-door sales training session.",
             "Be evidence-based, strict, and specific.",
             instructions,
+            retrieved_context or "",
             self._build_opening_modifier(first_turn_signals or []),
             self._build_session_context_block(session_context or {}),
             self._build_inflection_block(inflection_points or []),
+            self._build_band_guard_block(technique_evaluation or {}),
+            self._build_technique_check_block(technique_evaluation or {}),
             "The ai_summary must be plain English, written directly to the rep in second person.",
             AI_SUMMARY_INSTRUCTION,
             "Highlights must contain 2 to 4 items with type 'strong' or 'improve'.",
@@ -338,6 +345,42 @@ class GradingPromptBuilder:
         )
         return "\n".join(lines)
 
+    def _build_band_guard_block(self, technique_evaluation: dict[str, Any]) -> str:
+        bands = technique_evaluation.get("bands")
+        if not isinstance(bands, dict) or not bands:
+            return ""
+        lines = [
+            "ALLOWED SCORE BANDS - you must keep each category score inside its allowed range.",
+            "Do not score outside these ranges. If evidence is thin, stay near the center of the range.",
+        ]
+        for key in CATEGORY_KEYS:
+            band = bands.get(key)
+            if not isinstance(band, dict):
+                continue
+            floor = float(band.get("floor", 0.0) or 0.0)
+            ceiling = float(band.get("ceiling", 10.0) or 10.0)
+            anchor = float(band.get("anchor", (floor + ceiling) / 2.0) or 0.0)
+            lines.append(f"- {key}: {floor:.1f} to {ceiling:.1f} (anchor {anchor:.1f})")
+        return "\n".join(lines)
+
+    def _build_technique_check_block(self, technique_evaluation: dict[str, Any]) -> str:
+        checks = technique_evaluation.get("technique_checks")
+        if not isinstance(checks, list) or not checks:
+            return ""
+        lines = ["PLAYBOOK TECHNIQUE CHECKS - ground your rationale in these observed call-quality patterns:"]
+        for item in checks[:18]:
+            if not isinstance(item, dict):
+                continue
+            label = _clip_text(item.get("label"), limit=90)
+            category = _clip_text(item.get("category"), limit=32)
+            status = _clip_text(item.get("status"), limit=24)
+            evidence = ", ".join(
+                turn_id for turn_id in item.get("evidence_turn_ids", []) if isinstance(turn_id, str) and turn_id
+            )
+            suffix = f" | evidence: {evidence}" if evidence else ""
+            lines.append(f"- [{category}] {label}: {status}{suffix}")
+        return "\n".join(lines)
+
 
 class GradingService:
     """Async grading service with prompt version audit trail and deterministic fallback."""
@@ -345,6 +388,7 @@ class GradingService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.prompt_builder = GradingPromptBuilder()
+        self.technique_service = GradingTechniqueService()
         self.analytics_refresh_service = AnalyticsRefreshService()
         self.document_retrieval_service = DocumentRetrievalService(settings=self.settings)
         self.turn_enrichment_service = TurnEnrichmentService()
@@ -357,13 +401,20 @@ class GradingService:
         if session is None:
             raise ValueError("session not found")
 
+        ordered_turns = self._ordered_turns(session.turns)
+        timeline = self.turn_enrichment_service.build_timeline(db, session_id)
+        session_context = self._build_session_context(db=db, session=session, turns=ordered_turns, timeline=timeline)
+        first_turn_signals = self._first_turn_signals(turns=ordered_turns, timeline=timeline)
+        inflection_points = self._resolve_inflection_points(db=db, session_id=session_id, timeline=timeline)
         org_id = session.rep.org_id if session.rep is not None else None
         prompt_version = self._select_prompt_version(db, session_id=session_id, org_id=org_id)
         self._active_prompt_version_id = prompt_version.id
-        effective_prompt_template = self._build_effective_prompt_template(
+        retrieved_context = self._build_effective_prompt_template(
             db,
             session=session,
             prompt_template=prompt_version.content,
+            turns=ordered_turns,
+            session_context=session_context,
         )
 
         grading_run = GradingRun(
@@ -378,15 +429,10 @@ class GradingService:
         db.add(grading_run)
         db.flush()
 
-        ordered_turns = self._ordered_turns(session.turns)
-        timeline = self.turn_enrichment_service.build_timeline(db, session_id)
-        session_context = self._build_session_context(db=db, session=session, turns=ordered_turns, timeline=timeline)
-        first_turn_signals = self._first_turn_signals(turns=ordered_turns, timeline=timeline)
-        inflection_points = self._resolve_inflection_points(db=db, session_id=session_id, timeline=timeline)
-
         llm_result = await self._grade_with_llm(
             session=session,
-            prompt_template=effective_prompt_template,
+            prompt_template=prompt_version.content,
+            retrieved_context=retrieved_context,
             turns=ordered_turns,
             session_context=session_context,
             first_turn_signals=first_turn_signals,
@@ -426,6 +472,14 @@ class GradingService:
         session.ended_at = session.ended_at or datetime.now(timezone.utc)
 
         db.flush()
+        self._write_technique_artifact(
+            db,
+            session_id=session_id,
+            grading=grading,
+            technique_evaluation=llm_result.get("technique_evaluation"),
+            grading_status=llm_result["status"],
+            retry_requested=bool(llm_result.get("retry_requested")),
+        )
         grading_run.scorecard_id = scorecard.id
         grading_run.status = llm_result["status"]
         grading_run.model_latency_ms = llm_result["model_latency_ms"]
@@ -464,40 +518,26 @@ class GradingService:
         *,
         session: DrillSession,
         prompt_template: str,
+        turns: list[Any],
+        session_context: dict[str, Any],
     ) -> str:
         rep = session.rep
         org_id = rep.org_id if rep is not None else None
-        if not org_id:
-            return prompt_template
-
-        scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
-        context_hint_parts: list[str] = []
-        if scenario is not None:
-            context_hint_parts.append(scenario.name)
-            context_hint_parts.append(f"difficulty {scenario.difficulty}")
-        context_hint = " ".join(part for part in context_hint_parts if part).strip()
-
-        chunks = self.document_retrieval_service.retrieve_for_topic(
+        chunks = self._retrieve_grading_context_chunks(
             db,
             org_id=org_id,
-            topic="sales rubric objection handling closing technique grading methodology",
-            context_hint=context_hint,
-            k=4,
-            min_score=0.72,
+            session=session,
+            turns=turns,
+            session_context=session_context,
         )
-        if not chunks:
-            return prompt_template
-
         formatted_context = self.document_retrieval_service.format_for_prompt(chunks)
         if not formatted_context:
-            return prompt_template
-
+            return ""
         return (
-            f"{prompt_template}\n\n"
             f"{formatted_context}\n\n"
-            "Use the company training material above to interpret whether the rep's responses align\n"
-            "with their specific methodology. Weight company-specific technique guidance over generic\n"
-            "best practices when they conflict."
+            "Use the retrieved company and industry playbook material above to judge call quality and technique adherence.\n"
+            "Weight company-specific technique guidance over generic best practices when they conflict.\n"
+            "If the transcript does not support a technique from the playbook, do not award it."
         )
 
     async def _grade_with_llm(
@@ -505,6 +545,7 @@ class GradingService:
         *,
         session: DrillSession,
         prompt_template: str,
+        retrieved_context: str,
         turns: list[Any],
         session_context: dict[str, Any],
         first_turn_signals: list[str],
@@ -521,9 +562,12 @@ class GradingService:
             first_turn_signals=first_turn_signals,
             inflection_points=inflection_points,
         )
+        technique_evaluation = fallback.get("technique_evaluation", {})
         prompt = self.prompt_builder.build(
             grading_turns,
             prompt_template=prompt_template,
+            retrieved_context=retrieved_context,
+            technique_evaluation=technique_evaluation,
             session_context=session_context,
             first_turn_signals=first_turn_signals,
             inflection_points=inflection_points,
@@ -538,6 +582,7 @@ class GradingService:
                 "input_token_count": None,
                 "output_token_count": None,
                 "model_latency_ms": 0,
+                "technique_evaluation": technique_evaluation,
             }
 
         started = perf_counter()
@@ -548,7 +593,7 @@ class GradingService:
         }
         payload = {
             "model": self.settings.grading_model,
-            "temperature": 0.1,
+            "temperature": 0.35,
             "response_format": {"type": "json_object"},
             "messages": [
                 {
@@ -575,6 +620,7 @@ class GradingService:
                 "output_token_count": None,
                 "model_latency_ms": int((perf_counter() - started) * 1000),
                 "retry_requested": is_timeout,
+                "technique_evaluation": technique_evaluation,
             }
 
         content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -590,8 +636,10 @@ class GradingService:
                 session=session,
                 first_turn_signals=first_turn_signals,
                 inflection_points=inflection_points,
+                fallback=fallback,
+                technique_evaluation=technique_evaluation,
             )
-            status = "success"
+            status = "calibrated_fallback" if bool(normalized.get("was_clamped")) else "success"
             parse_error = None
         except Exception as exc:
             normalized = fallback
@@ -607,6 +655,7 @@ class GradingService:
             "output_token_count": usage.get("completion_tokens"),
             "model_latency_ms": int((perf_counter() - started) * 1000),
             "retry_requested": False,
+            "technique_evaluation": technique_evaluation,
         }
 
     def _grade_with_fallback(
@@ -622,7 +671,7 @@ class GradingService:
         if not self._has_meaningful_rep_evidence(rep_turns):
             return self._grade_with_no_rep_evidence(session=session)
 
-        del ai_turns
+        ordered_turns = self._ordered_turns(session.turns)
         fallback_scores = {
             key: self._score_from_signals(
                 rep_turns=rep_turns,
@@ -631,20 +680,46 @@ class GradingService:
             )
             for key in CATEGORY_KEYS
         }
+        technique_evaluation = self.technique_service.evaluate(
+            turns=ordered_turns,
+            session_context=session_context,
+            inflection_points=inflection_points,
+            base_scores=fallback_scores,
+        )
+        checks_by_category = self._technique_checks_by_category(technique_evaluation)
+        score_bands = technique_evaluation.get("bands", {})
 
         category_scores: dict[str, dict[str, Any]] = {}
         for key in CATEGORY_KEYS:
-            evidence_turn_ids = self._fallback_evidence_turn_ids(rep_turns=rep_turns, category_key=key)
+            band = score_bands.get(key, {})
+            evidence_turn_ids = self._technique_evidence_turn_ids(
+                checks_by_category=checks_by_category,
+                category_key=key,
+                default_turn_ids=self._fallback_evidence_turn_ids(rep_turns=rep_turns, category_key=key),
+            )
             behavioral_signals = self._collect_behavioral_signals(turns=rep_turns, evidence_turn_ids=evidence_turn_ids)
-            score = fallback_scores[key]
+            score = round(float(band.get("anchor", fallback_scores[key]) or fallback_scores[key]), 1)
             category_scores[key] = {
                 "score": score,
                 "confidence": 0.0,
-                "rationale_summary": self._fallback_rationale_summary(key, score=score),
-                "rationale_detail": self._fallback_rationale_detail(key, score=score),
+                "rationale_summary": self._band_rationale_summary(
+                    category_key=key,
+                    score=score,
+                    technique_checks=checks_by_category.get(key, []),
+                ),
+                "rationale_detail": self._band_rationale_detail(
+                    category_key=key,
+                    score=score,
+                    technique_checks=checks_by_category.get(key, []),
+                    band=band,
+                ),
                 "evidence_turn_ids": evidence_turn_ids,
                 "behavioral_signals": behavioral_signals,
-                "improvement_target": self._fallback_improvement_target(key, score=score),
+                "improvement_target": self._band_improvement_target(
+                    category_key=key,
+                    score=score,
+                    technique_checks=checks_by_category.get(key, []),
+                ),
             }
 
         self._apply_opening_quality_rationale(category_scores=category_scores, first_turn_signals=first_turn_signals)
@@ -653,33 +728,38 @@ class GradingService:
         overall = self._calculate_weighted_overall(category_scores)
         evidence_turn_ids = self._aggregate_evidence_turn_ids(category_scores)
         weakness_tags = self._derive_weakness_tags(category_scores=category_scores, rep_turns=rep_turns)
-
-        highlights = [
-            {
-                "type": "strong",
-                "note": "You kept the conversation moving and created enough structure to stay in the drill.",
-                "turn_id": evidence_turn_ids[0] if evidence_turn_ids else None,
-            },
-            {
-                "type": "improve",
-                "note": "Ask for a direct next step sooner when interest appears.",
-                "turn_id": evidence_turn_ids[-1] if evidence_turn_ids else None,
-            },
-        ]
+        highlights = self._build_technique_highlights(
+            technique_evaluation=technique_evaluation,
+            evidence_turn_ids=evidence_turn_ids,
+        )
 
         base = {
             "overall_score": overall,
             "category_scores": category_scores,
             "highlights": highlights,
-            "ai_summary": (
-                "You kept the conversation moving and created some usable structure in the drill. "
-                "The biggest shift came when objections stayed only partially resolved, which kept the homeowner from fully opening up. "
-                "Next time, acknowledge the active concern directly before you explain value or ask for the next step."
+            "ai_summary": self._build_technique_summary(
+                category_scores=category_scores,
+                technique_evaluation=technique_evaluation,
+                inflection_points=inflection_points,
             ),
             "evidence_turn_ids": evidence_turn_ids,
             "weakness_tags": weakness_tags,
-            "evidence_quality": "weak",
+            "evidence_quality": technique_evaluation.get("call_quality", "weak"),
             "session_complexity": self._compute_session_complexity(session),
+            "score_bands": score_bands,
+            "technique_checks": technique_evaluation.get("technique_checks", []),
+            "call_quality": technique_evaluation.get("call_quality", "weak"),
+            "grading_meta": {
+                "status": "no_rep_speech" if overall == 0.0 and evidence_turn_ids == [] else "fallback_used",
+                "source": "deterministic_band",
+                "provisional": bool(technique_evaluation.get("provisional")),
+                "confidence": 0.0,
+                "evidence_quality": technique_evaluation.get("call_quality", "weak"),
+                "session_complexity": self._compute_session_complexity(session),
+                "call_quality": technique_evaluation.get("call_quality", "weak"),
+                "message": technique_evaluation.get("message"),
+            },
+            "technique_evaluation": technique_evaluation,
         }
         base = self._apply_inflection_feedback(
             base,
@@ -697,6 +777,8 @@ class GradingService:
             )
         base["confidence_score"] = confidence
         base["evidence_quality"] = self._evidence_quality(confidence)
+        base["grading_meta"]["confidence"] = confidence
+        base["grading_meta"]["evidence_quality"] = base["evidence_quality"]
         return base
 
     def _score_from_signals(
@@ -766,6 +848,33 @@ class GradingService:
             "evidence_quality": "weak",
             "session_complexity": self._compute_session_complexity(session),
             "confidence_score": 0.0,
+            "score_bands": {
+                key: {"floor": 0.0, "ceiling": 0.0, "anchor": 0.0, "max_width": 0.0}
+                for key in CATEGORY_KEYS
+            },
+            "technique_checks": [],
+            "call_quality": "weak",
+            "grading_meta": {
+                "status": "no_rep_speech",
+                "source": "deterministic_band",
+                "provisional": False,
+                "confidence": 0.0,
+                "evidence_quality": "weak",
+                "session_complexity": self._compute_session_complexity(session),
+                "call_quality": "weak",
+                "message": "No rep speech was captured in this drill.",
+            },
+            "technique_evaluation": {
+                "technique_checks": [],
+                "bands": {
+                    key: {"floor": 0.0, "ceiling": 0.0, "anchor": 0.0, "max_width": 0.0}
+                    for key in CATEGORY_KEYS
+                },
+                "call_quality": "weak",
+                "call_quality_score": 0.0,
+                "provisional": False,
+                "message": "No rep speech was captured in this drill.",
+            },
         }
 
     def _normalize_grading(
@@ -775,6 +884,8 @@ class GradingService:
         session: DrillSession,
         first_turn_signals: list[str],
         inflection_points: list[dict[str, Any]],
+        fallback: dict[str, Any] | None = None,
+        technique_evaluation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         turns = self._ordered_turns(session.turns)
         rep_turns = [turn for turn in turns if turn.speaker.value == "rep"]
@@ -782,7 +893,7 @@ class GradingService:
             return self._grade_with_no_rep_evidence(session=session)
 
         valid_turn_ids = {turn.id for turn in turns}
-        fallback = self._grade_with_fallback(
+        fallback = fallback or self._grade_with_fallback(
             session=session,
             rep_turns=rep_turns,
             ai_turns=[turn for turn in turns if turn.speaker.value == "ai"],
@@ -790,6 +901,9 @@ class GradingService:
             first_turn_signals=first_turn_signals,
             inflection_points=inflection_points,
         )
+        technique_evaluation = technique_evaluation or fallback.get("technique_evaluation", {})
+        score_bands = technique_evaluation.get("bands", {}) if isinstance(technique_evaluation, dict) else {}
+        was_clamped = False
 
         raw_scores = payload.get("category_scores", {})
         category_scores: dict[str, dict[str, Any]] = {}
@@ -816,6 +930,18 @@ class GradingService:
             if not behavioral_signals:
                 behavioral_signals = self._collect_behavioral_signals(turns=turns, evidence_turn_ids=evidence_turn_ids)
 
+            stage_matched = self._evidence_matches_category_stage(session=session, category_key=key, evidence_turn_ids=evidence_turn_ids)
+            if not stage_matched:
+                evidence_turn_ids = list(fallback_category["evidence_turn_ids"])
+                behavioral_signals = list(fallback_category.get("behavioral_signals", []))
+                score = float(fallback_category["score"])
+                was_clamped = True
+
+            band = score_bands.get(key, {})
+            if self._score_outside_band(score, band):
+                score = float(fallback_category["score"])
+                was_clamped = True
+
             rationale_summary = _clip_text(
                 source.get("rationale_summary") or source.get("rationale"),
                 limit=80,
@@ -836,11 +962,7 @@ class GradingService:
                 "improvement_target": improvement_target or None,
             }
 
-        overall = payload.get("overall_score")
-        try:
-            overall_score = round(max(0.0, min(10.0, float(overall))), 2)
-        except Exception:
-            overall_score = self._calculate_weighted_overall(category_scores)
+        overall_score = self._calculate_weighted_overall(category_scores)
 
         raw_highlights = payload.get("highlights", [])
         highlights = []
@@ -893,6 +1015,9 @@ class GradingService:
             "weakness_tags": weakness_tags,
             "evidence_quality": payload.get("evidence_quality"),
             "session_complexity": payload.get("session_complexity"),
+            "score_bands": score_bands,
+            "technique_checks": technique_evaluation.get("technique_checks", []),
+            "call_quality": technique_evaluation.get("call_quality", fallback.get("call_quality", "weak")),
         }
         normalized = self._apply_inflection_feedback(
             normalized,
@@ -910,10 +1035,22 @@ class GradingService:
             )
         normalized["confidence_score"] = confidence
         normalized["evidence_quality"] = normalized["evidence_quality"] if normalized["evidence_quality"] in {"strong", "moderate", "weak"} else self._evidence_quality(confidence)
+        normalized["grading_meta"] = {
+            "status": "provisional" if technique_evaluation.get("provisional") else "final",
+            "source": "calibrated_fallback" if was_clamped else "llm_band_scored",
+            "provisional": bool(technique_evaluation.get("provisional")),
+            "confidence": confidence,
+            "evidence_quality": normalized["evidence_quality"],
+            "session_complexity": normalized.get("session_complexity"),
+            "call_quality": normalized.get("call_quality"),
+            "message": technique_evaluation.get("message") or ("Band-clamped to observed evidence." if was_clamped else "Score grounded in playbook technique checks."),
+        }
+        normalized["was_clamped"] = was_clamped
 
         session_complexity = normalized["session_complexity"]
         if not isinstance(session_complexity, int) or not 1 <= session_complexity <= 5:
             normalized["session_complexity"] = self._compute_session_complexity(session)
+            normalized["grading_meta"]["session_complexity"] = normalized["session_complexity"]
         return normalized
 
     def _ordered_turns(self, turns: list[Any]) -> list[Any]:
@@ -1408,6 +1545,325 @@ class GradingService:
                         if isinstance(item, str) and str(item).strip()
                     )
         return list(dict.fromkeys(signal_values))[:6]
+
+    def _retrieve_grading_context_chunks(
+        self,
+        db: Session,
+        *,
+        org_id: str | None,
+        session: DrillSession,
+        turns: list[Any],
+        session_context: dict[str, Any],
+    ) -> list[Any]:
+        scenario = db.scalar(select(Scenario).where(Scenario.id == session.scenario_id))
+        context_hint_parts: list[str] = []
+        if scenario is not None:
+            context_hint_parts.append(scenario.name)
+            context_hint_parts.append(f"difficulty {scenario.difficulty}")
+        context_hint = " ".join(part for part in context_hint_parts if part).strip()
+        objection_tags = _dedupe_text(
+            [
+                str(tag)
+                for turn in turns
+                for tag in getattr(turn, "objection_tags", []) or []
+                if str(tag).strip()
+            ]
+        )
+        topics = [
+            "opening low pressure neighborhood social proof route framing call quality grading",
+            "feature benefit soft close value pitch property specific evidence pricing framing grading",
+        ]
+        if objection_tags:
+            for tag in objection_tags[:3]:
+                topics.append(f"objection handling {tag} validate pivot yes question address close grading")
+        if any(turn.speaker.value == "rep" and turn.stage in {"initial_pitch", "pitch", "value_prop"} for turn in turns):
+            topics.append("bimonthly monthly quarterly value anchor eco friendly no contract differentiators grading")
+        if any(turn.speaker.value == "rep" and turn.stage in {"close_attempt", "closing"} for turn in turns):
+            topics.append("option close assumptive close assignment close backyard close level up moment grading")
+        if int(session_context.get("peak_resistance", 0) or 0) >= 4:
+            topics.append("psychology reactance decision fatigue hard pressure closing grading")
+
+        rows: list[Any] = []
+        seen: set[tuple[str, str]] = set()
+        for topic in topics:
+            for chunk in self.document_retrieval_service.retrieve_for_topic(
+                db,
+                org_id=org_id,
+                topic=topic,
+                context_hint=context_hint,
+                k=2,
+                min_score=0.70,
+            ):
+                chunk_key = (str(getattr(chunk, "document_id", "")), str(getattr(chunk, "chunk_id", "")))
+                if chunk_key in seen:
+                    continue
+                seen.add(chunk_key)
+                rows.append(chunk)
+                if len(rows) >= 8:
+                    return rows
+        return rows
+
+    def _write_technique_artifact(
+        self,
+        db: Session,
+        *,
+        session_id: str,
+        grading: dict[str, Any],
+        technique_evaluation: dict[str, Any] | None,
+        grading_status: str,
+        retry_requested: bool,
+    ) -> None:
+        artifact = db.scalar(
+            select(SessionArtifact)
+            .where(
+                SessionArtifact.session_id == session_id,
+                SessionArtifact.artifact_type == TECHNIQUE_EVAL_ARTIFACT_TYPE,
+            )
+            .order_by(SessionArtifact.created_at.desc())
+        )
+        if artifact is None:
+            artifact = SessionArtifact(
+                session_id=session_id,
+                artifact_type=TECHNIQUE_EVAL_ARTIFACT_TYPE,
+                storage_key=f"session-artifacts/{session_id}/{TECHNIQUE_EVAL_ARTIFACT_TYPE}.json",
+                metadata_json={},
+            )
+            db.add(artifact)
+        artifact.metadata_json = {
+            "grading_status": grading_status,
+            "retry_requested": retry_requested,
+            "grading_meta": grading.get("grading_meta", {}),
+            "technique_checks": (technique_evaluation or {}).get("technique_checks", grading.get("technique_checks", [])),
+            "score_bands": (technique_evaluation or {}).get("bands", grading.get("score_bands", {})),
+            "call_quality": (technique_evaluation or {}).get("call_quality", grading.get("call_quality")),
+            "message": (technique_evaluation or {}).get("message"),
+        }
+        db.flush()
+
+    def _technique_checks_by_category(self, technique_evaluation: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {key: [] for key in CATEGORY_KEYS}
+        for item in technique_evaluation.get("technique_checks", []):
+            if not isinstance(item, dict):
+                continue
+            category = str(item.get("category") or "").strip()
+            if category not in grouped:
+                continue
+            grouped[category].append(item)
+        return grouped
+
+    def _technique_evidence_turn_ids(
+        self,
+        *,
+        checks_by_category: dict[str, list[dict[str, Any]]],
+        category_key: str,
+        default_turn_ids: list[str],
+    ) -> list[str]:
+        evidence_turn_ids: list[str] = []
+        for item in checks_by_category.get(category_key, []):
+            if item.get("status") not in {"hit", "partial"}:
+                continue
+            evidence_turn_ids.extend(
+                turn_id
+                for turn_id in item.get("evidence_turn_ids", [])
+                if isinstance(turn_id, str) and turn_id
+            )
+        return list(dict.fromkeys(evidence_turn_ids or default_turn_ids))[:3]
+
+    def _band_rationale_summary(
+        self,
+        *,
+        category_key: str,
+        score: float,
+        technique_checks: list[dict[str, Any]],
+    ) -> str:
+        positives = [item["label"] for item in technique_checks if item.get("status") in {"hit", "partial"} and item.get("kind") == "reward"]
+        negatives = [item["label"] for item in technique_checks if item.get("status") in {"hit", "miss"} and item.get("kind") == "cap"]
+        if positives and score >= 7.5:
+            return _clip_text(f"Playbook-aligned on {positives[0].lower()}.", limit=80)
+        if negatives:
+            return _clip_text(f"Lost points on {negatives[0].lower()}.", limit=80)
+        if positives:
+            return _clip_text(f"Partial strength on {positives[0].lower()}.", limit=80)
+        return self._fallback_rationale_summary(category_key, score=score)
+
+    def _band_rationale_detail(
+        self,
+        *,
+        category_key: str,
+        score: float,
+        technique_checks: list[dict[str, Any]],
+        band: dict[str, Any],
+    ) -> str:
+        positives = [item["label"] for item in technique_checks if item.get("status") in {"hit", "partial"} and item.get("kind") == "reward"]
+        misses = [item["label"] for item in technique_checks if item.get("status") in {"miss", "hit"} and item.get("kind") == "cap"]
+        details: list[str] = []
+        if positives:
+            details.append(f"You showed {positives[0].lower()} in the recorded evidence.")
+        if len(positives) > 1:
+            details.append(f"You also showed {positives[1].lower()}.")
+        if misses:
+            details.append(f"The main limiter was {misses[0].lower()}.")
+        floor = band.get("floor")
+        ceiling = band.get("ceiling")
+        if floor is not None and ceiling is not None:
+            details.append(f"This category stayed inside a {float(floor):.1f}-{float(ceiling):.1f} playbook band.")
+        if not details:
+            return self._fallback_rationale_detail(category_key, score=score)
+        return _clip_text(" ".join(details), limit=400)
+
+    def _band_improvement_target(
+        self,
+        *,
+        category_key: str,
+        score: float,
+        technique_checks: list[dict[str, Any]],
+    ) -> str | None:
+        if score >= 8.0:
+            return None
+        missed_reward = next(
+            (
+                item
+                for item in technique_checks
+                if item.get("status") == "miss" and item.get("kind") == "reward"
+            ),
+            None,
+        )
+        if missed_reward is not None:
+            return _clip_text(f"Sharpen {str(missed_reward['label']).lower()}", limit=60)
+        cap_item = next(
+            (
+                item
+                for item in technique_checks
+                if item.get("status") == "hit" and item.get("kind") == "cap"
+            ),
+            None,
+        )
+        if cap_item is not None:
+            return _clip_text(f"Remove {str(cap_item['label']).lower()}", limit=60)
+        return self._fallback_improvement_target(category_key, score=score)
+
+    def _build_technique_highlights(
+        self,
+        *,
+        technique_evaluation: dict[str, Any],
+        evidence_turn_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        strong = next(
+            (
+                item
+                for item in technique_evaluation.get("technique_checks", [])
+                if isinstance(item, dict) and item.get("status") == "hit" and item.get("kind") == "reward"
+            ),
+            None,
+        )
+        improve = next(
+            (
+                item
+                for item in technique_evaluation.get("technique_checks", [])
+                if isinstance(item, dict)
+                and ((item.get("status") == "miss" and item.get("kind") == "reward") or (item.get("status") == "hit" and item.get("kind") == "cap"))
+            ),
+            None,
+        )
+        highlights: list[dict[str, Any]] = []
+        if strong is not None:
+            strong_turn = next((turn_id for turn_id in strong.get("evidence_turn_ids", []) if isinstance(turn_id, str)), None)
+            highlights.append(
+                {
+                    "type": "strong",
+                    "note": _clip_text(f"You landed {str(strong['label']).lower()} and gave the homeowner something concrete to follow.", limit=240),
+                    "turn_id": strong_turn or (evidence_turn_ids[0] if evidence_turn_ids else None),
+                }
+            )
+        if improve is not None:
+            improve_turn = next((turn_id for turn_id in improve.get("evidence_turn_ids", []) if isinstance(turn_id, str)), None)
+            highlights.append(
+                {
+                    "type": "improve",
+                    "note": _clip_text(f"The call dropped on {str(improve['label']).lower()} - tighten that moment next time.", limit=240),
+                    "turn_id": improve_turn or (evidence_turn_ids[-1] if evidence_turn_ids else None),
+                }
+            )
+        if len(highlights) < 2:
+            highlights.append(
+                {
+                    "type": "strong",
+                    "note": "You created enough structure for the grader to link specific evidence to the call.",
+                    "turn_id": evidence_turn_ids[0] if evidence_turn_ids else None,
+                }
+            )
+        if len(highlights) < 2:
+            highlights.append(
+                {
+                    "type": "improve",
+                    "note": "Make the next step more direct once you have addressed the active concern.",
+                    "turn_id": evidence_turn_ids[-1] if evidence_turn_ids else None,
+                }
+            )
+        return highlights[:4]
+
+    def _build_technique_summary(
+        self,
+        *,
+        category_scores: dict[str, dict[str, Any]],
+        technique_evaluation: dict[str, Any],
+        inflection_points: list[dict[str, Any]],
+    ) -> str:
+        strongest_key = max(CATEGORY_KEYS, key=lambda key: float(category_scores.get(key, {}).get("score", 0.0) or 0.0))
+        weakest_key = min(CATEGORY_KEYS, key=lambda key: float(category_scores.get(key, {}).get("score", 10.0) or 10.0))
+        strongest_label = strongest_key.replace("_", " ")
+        weakest_target = category_scores.get(weakest_key, {}).get("improvement_target") or self._fallback_improvement_target(weakest_key, score=float(category_scores.get(weakest_key, {}).get("score", 0.0) or 0.0)) or "tighten the next-step ask"
+        strongest_check = next(
+            (
+                item
+                for item in technique_evaluation.get("technique_checks", [])
+                if isinstance(item, dict)
+                and item.get("category") == strongest_key
+                and item.get("status") in {"hit", "partial"}
+            ),
+            None,
+        )
+        sentence_one = (
+            f"You were strongest in {strongest_label} because {str(strongest_check['label']).lower()} showed up in the evidence."
+            if strongest_check
+            else f"You were strongest in {strongest_label}, and that gave the call some real structure."
+        )
+        negative_point = next((point for point in inflection_points if point.get("direction") == "negative"), None)
+        if negative_point is not None:
+            sentence_two = _clip_text(
+                f"Turn {negative_point.get('turn_index', '?')} was where things slipped: {negative_point.get('coaching_note', '')}",
+                limit=220,
+            )
+        else:
+            sentence_two = "The biggest dip came when the call stopped moving forward and the next step stayed too soft."
+        sentence_three = f"Next time, {str(weakest_target).rstrip('.').lower()}."
+        return _clip_text(f"{sentence_one} {sentence_two} {sentence_three}", limit=700)
+
+    def _evidence_matches_category_stage(
+        self,
+        *,
+        session: DrillSession,
+        category_key: str,
+        evidence_turn_ids: list[str],
+    ) -> bool:
+        if not evidence_turn_ids:
+            return False
+        stage_hints = CATEGORY_STAGE_HINTS.get(category_key, set())
+        if not stage_hints:
+            return True
+        return any(
+            turn.id in set(evidence_turn_ids) and turn.stage in stage_hints
+            for turn in session.turns
+        )
+
+    def _score_outside_band(self, score: float, band: dict[str, Any]) -> bool:
+        if not isinstance(band, dict) or not band:
+            return False
+        floor = band.get("floor")
+        ceiling = band.get("ceiling")
+        if floor is None or ceiling is None:
+            return False
+        return float(score) < float(floor) - 0.05 or float(score) > float(ceiling) + 0.05
 
     def _fallback_rationale_summary(self, category_key: str, *, score: float) -> str:
         templates = {

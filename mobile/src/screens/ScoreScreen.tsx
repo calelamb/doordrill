@@ -31,12 +31,22 @@ import { RootStackParamList } from "../navigation/types";
 import { fetchRepPlan, fetchRepProgress, fetchRepScenario, fetchRepSession } from "../services/api";
 import { useSession } from "../store/session";
 import { colors } from "../theme/tokens";
-import { CategoryScoreDetail, RepPlan, RepProgress, RepSessionDetail, ScenarioBrief, TranscriptTurn } from "../types";
+import {
+  CategoryScoreDetail,
+  GradingMeta,
+  RepPlan,
+  RepProgress,
+  RepSessionDetail,
+  ScenarioBrief,
+  TechniqueCheck,
+  TranscriptTurn,
+} from "../types";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Score">;
 
 type TabKey = "scorecard" | "transcript";
 type CategoryKey = "opening" | "pitch_delivery" | "objection_handling" | "closing_technique" | "professionalism";
+type HeroState = "processing" | "provisional" | "final" | "no_rep_speech" | "unavailable";
 
 type CategoryRow = {
   key: CategoryKey;
@@ -106,6 +116,10 @@ function scoreValue(value: CategoryScoreDetail | undefined): number {
   return 0;
 }
 
+function hasNumericScore(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 function scoreBand(score: number) {
   if (score < 5) return { bg: colors.dangerSoft, text: colors.danger, border: "rgba(180, 35, 24, 0.2)" };
   if (score < 8) return { bg: colors.warningSoft, text: colors.warning, border: "rgba(180, 83, 9, 0.2)" };
@@ -119,6 +133,70 @@ function difficultyDots(difficulty: number) {
 function formatTurnLabel(turnId: string, turnIndexById: Record<string, number>): string {
   const turnIndex = turnIndexById[turnId];
   return typeof turnIndex === "number" ? `Turn ${turnIndex}` : `Turn ${turnId.slice(0, 4)}`;
+}
+
+export function shouldPollScorecard(detail: RepSessionDetail): boolean {
+  if (detail.scorecard && detail.grading_meta?.status !== "processing") {
+    return false;
+  }
+  if (detail.grading_meta?.status === "processing") {
+    return true;
+  }
+  return detail.session.status === "processing" && !detail.scorecard;
+}
+
+export function heroStateFor(scorecard: RepSessionDetail["scorecard"], gradingMeta?: GradingMeta | null): HeroState {
+  if (gradingMeta?.status === "processing" && !scorecard) {
+    return "processing";
+  }
+  if (gradingMeta?.status === "no_rep_speech") {
+    return "no_rep_speech";
+  }
+  if (scorecard && gradingMeta?.provisional) {
+    return "provisional";
+  }
+  if (scorecard) {
+    return "final";
+  }
+  return "unavailable";
+}
+
+function heroStateLabel(heroState: HeroState): string {
+  if (heroState === "processing") return "Processing";
+  if (heroState === "provisional") return "Provisional";
+  if (heroState === "no_rep_speech") return "No Rep Speech";
+  if (heroState === "final") return "Final";
+  return "Unavailable";
+}
+
+function heroStateMessage(heroState: HeroState, gradingMeta?: GradingMeta | null): string {
+  if (gradingMeta?.message) {
+    return gradingMeta.message;
+  }
+  if (heroState === "processing") {
+    return "We are grounding your scorecard in the playbook and transcript evidence.";
+  }
+  if (heroState === "provisional") {
+    return "This grade is usable now, but the evidence quality leaves room for recalibration.";
+  }
+  if (heroState === "no_rep_speech") {
+    return "No meaningful rep speech was captured, so the score stays at zero.";
+  }
+  if (heroState === "final") {
+    return "Your scorecard is locked to the current transcript evidence.";
+  }
+  return "This session does not have a scorecard yet.";
+}
+
+export function techniqueBuckets(checks: TechniqueCheck[]) {
+  const landed = checks.filter((item) => item.kind === "reward" && (item.status === "hit" || item.status === "partial"));
+  const missed = checks.filter(
+    (item) => (item.kind === "reward" && item.status === "miss") || (item.kind === "cap" && item.status === "hit")
+  );
+  return {
+    landed: landed.slice(0, 3),
+    missed: missed.slice(0, 3),
+  };
 }
 
 function hasMeaningfulDetail(detail?: CategoryScoreDetail): boolean {
@@ -557,7 +635,7 @@ export function ScoreScreen({ route, navigation }: Props) {
           if (!cancelled) setScenario(scenarioResult);
         }
 
-        if (!result.scorecard && pollCount < 5) {
+        if (shouldPollScorecard(result) && pollCount < 10) {
           retryTimer = setTimeout(() => {
             if (!cancelled) setPollCount((current) => current + 1);
           }, 2000);
@@ -583,18 +661,27 @@ export function ScoreScreen({ route, navigation }: Props) {
   }, [pollCount, repId, scenario, sessionId]);
 
   const scorecard = data?.scorecard;
+  const gradingMeta = data?.grading_meta ?? null;
   const transcript = data?.transcript ?? [];
-  const overallScore = scorecard?.overall_score ?? 0;
-  const overallBand = scoreBand(overallScore);
+  const overallScore = hasNumericScore(scorecard?.overall_score) ? scorecard.overall_score : null;
+  const overallBand = scoreBand(overallScore ?? 0);
+  const heroState = heroStateFor(scorecard ?? null, gradingMeta);
   const managerNote = data?.manager_coaching_note?.note ?? data?.manager_note ?? data?.manager_review?.notes ?? null;
   const improvementTargets = scorecard?.improvement_targets ?? [];
   const highlights = (scorecard?.highlights ?? []).slice(0, 4);
   const weaknessTags = scorecard?.weakness_tags ?? [];
+  const { landed: landedChecks, missed: missedChecks } = techniqueBuckets(scorecard?.technique_checks ?? []);
   const nextScenarioSuggestion = plan?.next_scenario_suggestion ?? null;
   const focusSkills = plan?.focus_skills ?? [];
   const personalBestScore = progress?.personal_best ?? null;
-  const showPersonalBestBanner = Boolean(scorecard && progress && (personalBestScore === null || overallScore >= personalBestScore));
-  const showFirstDrillCongrats = Boolean(isFirstDrill && scorecard);
+  const showPersonalBestBanner = Boolean(
+    scorecard &&
+      hasNumericScore(overallScore) &&
+      heroState !== "no_rep_speech" &&
+      progress &&
+      (personalBestScore === null || overallScore >= personalBestScore)
+  );
+  const showFirstDrillCongrats = Boolean(isFirstDrill && scorecard && heroState !== "processing");
   const mostImprovedBadge =
     progress?.most_improved_category && typeof progress.most_improved_delta === "number" && progress.most_improved_delta > 1
       ? {
@@ -623,7 +710,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   }, [plan]);
 
   useEffect(() => {
-    if (scorecard) {
+    if (scorecard && hasNumericScore(overallScore)) {
       RNAnimated.timing(heroBarAnim, {
         toValue: (overallScore / 10) * 100,
         duration: 800,
@@ -816,10 +903,10 @@ export function ScoreScreen({ route, navigation }: Props) {
     if (!scorecard) {
       return (
         <View style={styles.emptyStateCard}>
-          {refreshing ? <ActivityIndicator color={colors.accent} /> : null}
-          <Text style={styles.emptyStateTitle}>{refreshing ? "Grading in progress" : "Scorecard not available"}</Text>
+          {heroState === "processing" || refreshing ? <ActivityIndicator color={colors.accent} /> : null}
+          <Text style={styles.emptyStateTitle}>{heroState === "processing" || refreshing ? "Grading in progress" : "Scorecard not available"}</Text>
           <Text style={styles.emptyStateText}>
-            {refreshing ? "We are still processing your drill." : "This session does not have a scorecard yet."}
+            {heroStateMessage(heroState, gradingMeta)}
           </Text>
         </View>
       );
@@ -860,6 +947,63 @@ export function ScoreScreen({ route, navigation }: Props) {
               {`At this rate, you'll hit target on ${readinessHint.skillLabel} in ~${readinessHint.remaining} more drills`}
             </Text>
           </Animated.View>
+        ) : null}
+
+        {(landedChecks.length > 0 || missedChecks.length > 0) ? (
+          <>
+            <Text style={styles.sectionTitle}>PLAYBOOK CHECKS</Text>
+            <BlurView intensity={40} tint="light" style={styles.techniqueSummaryCard}>
+              {landedChecks.length > 0 ? (
+                <View style={styles.techniqueSummaryBlock}>
+                  <Text style={styles.techniqueSummaryHeading}>What Landed</Text>
+                  {landedChecks.map((item) => (
+                    <Pressable
+                      key={item.id}
+                      onPress={() => item.evidence_turn_ids[0] ? handleEvidencePress(item.evidence_turn_ids[0]) : undefined}
+                      disabled={!item.evidence_turn_ids[0]}
+                      style={({ pressed }) => [styles.techniqueRow, pressed ? styles.techniqueRowPressed : null]}
+                    >
+                      <View style={[styles.techniqueDot, styles.techniqueDotPositive]} />
+                      <View style={styles.techniqueTextWrap}>
+                        <Text style={styles.techniqueLabel}>{item.label}</Text>
+                        <Text style={styles.techniqueStatus}>
+                          {item.evidence_turn_ids[0]
+                            ? `${item.status === "partial" ? "Partially landed" : "Supported"} · ${formatTurnLabel(item.evidence_turn_ids[0], turnIndexById)}`
+                            : item.status === "partial"
+                              ? "Partially landed"
+                              : "Supported"}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+
+              {missedChecks.length > 0 ? (
+                <View style={styles.techniqueSummaryBlock}>
+                  <Text style={styles.techniqueSummaryHeading}>What Missed</Text>
+                  {missedChecks.map((item) => (
+                    <Pressable
+                      key={item.id}
+                      onPress={() => item.evidence_turn_ids[0] ? handleEvidencePress(item.evidence_turn_ids[0]) : undefined}
+                      disabled={!item.evidence_turn_ids[0]}
+                      style={({ pressed }) => [styles.techniqueRow, pressed ? styles.techniqueRowPressed : null]}
+                    >
+                      <View style={[styles.techniqueDot, styles.techniqueDotNegative]} />
+                      <View style={styles.techniqueTextWrap}>
+                        <Text style={styles.techniqueLabel}>{item.label}</Text>
+                        <Text style={styles.techniqueStatus}>
+                          {item.evidence_turn_ids[0]
+                            ? `Coach this next · ${formatTurnLabel(item.evidence_turn_ids[0], turnIndexById)}`
+                            : "Coach this next"}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
+            </BlurView>
+          </>
         ) : null}
 
         {improvementTargets.length > 0 ? (
@@ -1103,11 +1247,19 @@ export function ScoreScreen({ route, navigation }: Props) {
               </Animated.View>
             ) : null}
             <View style={styles.heroBlock}>
-              {/* @ts-ignore */}
-              <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}>
-                <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
-                <Text style={styles.heroLabel}>Overall Score</Text>
-              </Animated.View>
+              {hasNumericScore(overallScore) ? (
+                // @ts-ignore
+                <Animated.View sharedTransitionTag="ai-orb" style={[styles.heroOrb, { backgroundColor: overallBand.bg, borderColor: overallBand.border }]}>
+                  <Text style={[styles.heroValue, { color: overallBand.text }]}>{overallScore.toFixed(1)}</Text>
+                  <Text style={styles.heroLabel}>Overall Score</Text>
+                </Animated.View>
+              ) : (
+                <View style={styles.heroStatusCard}>
+                  {heroState === "processing" ? <ActivityIndicator color={colors.accent} /> : <FileText size={22} color={colors.muted} />}
+                  <Text style={styles.heroStatusTitle}>{heroStateLabel(heroState)}</Text>
+                  <Text style={styles.heroStatusMessage}>{heroStateMessage(heroState, gradingMeta)}</Text>
+                </View>
+              )}
               {showPersonalBestBanner ? (
                 <Animated.View entering={FadeInDown.delay(180).springify()} style={styles.personalBestBannerWrap}>
                   <LinearGradient colors={["#FDE68A", "#F59E0B"]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.personalBestBanner}>
@@ -1116,16 +1268,35 @@ export function ScoreScreen({ route, navigation }: Props) {
                   </LinearGradient>
                 </Animated.View>
               ) : null}
-              <View style={styles.heroBarTrack}>
-                <RNAnimated.View
-                  style={[
-                    styles.heroBarFill,
-                    {
-                      backgroundColor: overallBand.text,
-                      width: heroBarAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }),
-                    },
-                  ]}
-                />
+              {hasNumericScore(overallScore) ? (
+                <View style={styles.heroBarTrack}>
+                  <RNAnimated.View
+                    style={[
+                      styles.heroBarFill,
+                      {
+                        backgroundColor: overallBand.text,
+                        width: heroBarAnim.interpolate({ inputRange: [0, 100], outputRange: ["0%", "100%"] }),
+                      },
+                    ]}
+                  />
+                </View>
+              ) : null}
+              <View style={styles.heroMetaRow}>
+                <View style={[styles.heroMetaChip, heroState === "provisional" ? styles.heroMetaChipWarning : styles.heroMetaChipNeutral]}>
+                  <Text style={[styles.heroMetaChipText, heroState === "provisional" ? styles.heroMetaChipTextWarning : null]}>
+                    {heroStateLabel(heroState)}
+                  </Text>
+                </View>
+                {typeof gradingMeta?.confidence === "number" ? (
+                  <View style={styles.heroMetaChip}>
+                    <Text style={styles.heroMetaChipText}>{`Confidence ${(gradingMeta.confidence * 100).toFixed(0)}%`}</Text>
+                  </View>
+                ) : null}
+                {gradingMeta?.call_quality ? (
+                  <View style={styles.heroMetaChip}>
+                    <Text style={styles.heroMetaChipText}>{`${titleCase(gradingMeta.call_quality)} evidence`}</Text>
+                  </View>
+                ) : null}
               </View>
               <Text style={styles.scenarioName}>{scenario?.name ?? "Scenario"}</Text>
             </View>
@@ -1292,6 +1463,28 @@ const styles = StyleSheet.create({
     shadowRadius: 24,
     elevation: 4,
   },
+  heroStatusCard: {
+    width: "100%",
+    borderRadius: 28,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(22, 101, 52, 0.14)",
+    backgroundColor: "rgba(255,255,255,0.72)",
+    paddingHorizontal: 20,
+    paddingVertical: 22,
+    alignItems: "center",
+    gap: 8,
+  },
+  heroStatusTitle: {
+    fontSize: 20,
+    color: colors.ink,
+    fontFamily: "Poppins_700Bold",
+  },
+  heroStatusMessage: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.muted,
+    textAlign: "center",
+  },
   heroValue: {
     fontSize: 64,
     fontFamily: "Poppins_800ExtraBold",
@@ -1342,6 +1535,38 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: colors.ink,
     marginTop: 16,
+  },
+  heroMetaRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 8,
+    marginTop: 12,
+  },
+  heroMetaChip: {
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    backgroundColor: "rgba(255,255,255,0.78)",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  heroMetaChipWarning: {
+    borderColor: "rgba(180, 83, 9, 0.24)",
+    backgroundColor: colors.warningSoft,
+  },
+  heroMetaChipNeutral: {
+    borderColor: "rgba(22, 101, 52, 0.16)",
+    backgroundColor: "rgba(255,255,255,0.82)",
+  },
+  heroMetaChipText: {
+    fontSize: 11,
+    color: colors.muted,
+    fontFamily: "Poppins_600SemiBold",
+    letterSpacing: 0.3,
+  },
+  heroMetaChipTextWarning: {
+    color: colors.warning,
   },
 
   tabSwitcherShell: {
@@ -1438,6 +1663,58 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.04,
     shadowRadius: 16,
     elevation: 3,
+  },
+  techniqueSummaryCard: {
+    gap: 16,
+    borderRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    backgroundColor: "rgba(255, 255, 255, 0.6)",
+    padding: 20,
+    overflow: "hidden",
+  },
+  techniqueSummaryBlock: {
+    gap: 10,
+  },
+  techniqueSummaryHeading: {
+    fontSize: 13,
+    color: colors.ink,
+    fontFamily: "Poppins_700Bold",
+  },
+  techniqueRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  techniqueRowPressed: {
+    opacity: 0.82,
+  },
+  techniqueDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginTop: 6,
+  },
+  techniqueDotPositive: {
+    backgroundColor: colors.accent,
+  },
+  techniqueDotNegative: {
+    backgroundColor: colors.warning,
+  },
+  techniqueTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  techniqueLabel: {
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.ink,
+    fontFamily: "Poppins_600SemiBold",
+  },
+  techniqueStatus: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.muted,
   },
   readinessHintWrap: {
     marginTop: 10,

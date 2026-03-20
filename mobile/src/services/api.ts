@@ -4,6 +4,7 @@ import {
   AuthTokenResponse,
   CategoryScoreDetail,
   DEFAULT_NOTIFICATION_PREFERENCES,
+  GradingMeta,
   ImprovementTarget,
   InviteValidationResponse,
   NotificationPreferences,
@@ -15,6 +16,7 @@ import {
   RepTrend,
   ScenarioBrief,
   Scorecard,
+  TechniqueCheck,
   TranscriptTurn,
 } from "../types";
 
@@ -33,7 +35,7 @@ type ApiRequestOptions = {
   retryOn401?: boolean;
 };
 
-type RawCategoryScore = number | (Partial<CategoryScoreDetail> & { score?: number }) | null;
+type RawCategoryScore = number | (Partial<CategoryScoreDetail> & { score?: number | null }) | null;
 
 type RawScorecard = Omit<Scorecard, "category_scores" | "improvement_targets" | "scorecard_schema_version"> & {
   scorecard_schema_version?: string;
@@ -45,13 +47,14 @@ type RawRepSessionDetail = Omit<RepSessionDetail, "scorecard" | "transcript" | "
   transcript?: TranscriptTurn[];
   improvement_targets?: ImprovementTarget[];
   manager_coaching_note?: RepSessionDetail["manager_coaching_note"];
+  grading_meta?: GradingMeta | null;
 };
 
 let refreshInFlight: Promise<boolean> | null = null;
 const API_TIMEOUT_MS = 10_000;
 
 async function buildHeaders(headers: HeaderMap | undefined, auth: boolean): Promise<HeaderMap> {
-  const mergedHeaders = {
+  const mergedHeaders: HeaderMap = {
     // Bypass the localtunnel browser-warning page for dev tunnels.
     "bypass-tunnel-reminder": "true",
     ...(headers ?? {})
@@ -205,7 +208,7 @@ function normalizeCategoryScore(value: RawCategoryScore): CategoryScoreDetail {
 
   if (value && typeof value === "object") {
     return {
-      score: typeof value.score === "number" ? value.score : 0,
+      score: typeof value.score === "number" ? value.score : null,
       rationale_summary: value.rationale_summary,
       rationale_detail: value.rationale_detail,
       improvement_target: value.improvement_target ?? null,
@@ -215,7 +218,58 @@ function normalizeCategoryScore(value: RawCategoryScore): CategoryScoreDetail {
     };
   }
 
-  return { score: 0 };
+  return { score: null };
+}
+
+function normalizeTechniqueChecks(value: unknown): TechniqueCheck[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const record = item as Record<string, unknown>;
+      const id = typeof record.id === "string" ? record.id : "";
+      const label = typeof record.label === "string" ? record.label : "";
+      const category = typeof record.category === "string" ? record.category : "";
+      if (!id || !label || !category) {
+        return null;
+      }
+      return {
+        id,
+        label,
+        category,
+        status: typeof record.status === "string" ? record.status : "unknown",
+        kind: typeof record.kind === "string" ? record.kind : "reward",
+        evidence_turn_ids: Array.isArray(record.evidence_turn_ids)
+          ? record.evidence_turn_ids.filter((turnId): turnId is string => typeof turnId === "string" && turnId.length > 0)
+          : [],
+      };
+    })
+    .filter((item): item is TechniqueCheck => Boolean(item));
+}
+
+function normalizeGradingMeta(value: unknown): GradingMeta | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const status = typeof record.status === "string" ? record.status : "";
+  if (!status) {
+    return null;
+  }
+  return {
+    status,
+    source: typeof record.source === "string" ? record.source : null,
+    provisional: Boolean(record.provisional),
+    confidence: typeof record.confidence === "number" ? record.confidence : null,
+    evidence_quality: typeof record.evidence_quality === "string" ? record.evidence_quality : null,
+    session_complexity: typeof record.session_complexity === "number" ? record.session_complexity : null,
+    call_quality: typeof record.call_quality === "string" ? record.call_quality : null,
+    message: typeof record.message === "string" ? record.message : null,
+  };
 }
 
 function normalizeScorecard(
@@ -233,12 +287,14 @@ function normalizeScorecard(
   return {
     ...scorecard,
     scorecard_schema_version: scorecard.scorecard_schema_version ?? "v1",
+    overall_score: typeof scorecard.overall_score === "number" ? scorecard.overall_score : null,
     category_scores: normalizedScores,
     improvement_targets: improvementTargets,
     highlights: scorecard.highlights ?? [],
     ai_summary: scorecard.ai_summary ?? "",
     evidence_turn_ids: Array.isArray(scorecard.evidence_turn_ids) ? scorecard.evidence_turn_ids : [],
     weakness_tags: Array.isArray(scorecard.weakness_tags) ? scorecard.weakness_tags : [],
+    technique_checks: normalizeTechniqueChecks((scorecard as RawScorecard & { technique_checks?: unknown }).technique_checks),
   };
 }
 
@@ -249,6 +305,7 @@ function normalizeRepSessionDetail(payload: RawRepSessionDetail): RepSessionDeta
   return {
     ...payload,
     scorecard: normalizeScorecard(payload.scorecard, improvementTargets),
+    grading_meta: normalizeGradingMeta(payload.grading_meta),
     transcript: Array.isArray(payload.transcript) ? payload.transcript : [],
     manager_coaching_note: managerCoachingNote,
     manager_note: managerCoachingNote?.note ?? null,

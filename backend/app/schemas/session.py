@@ -27,6 +27,26 @@ class SessionResponse(BaseModel):
 RepCategoryScoreValue = float | ScorecardCategoryGrade | CategoryScoreV2 | dict[str, Any]
 
 
+class GradingMetaResponse(BaseModel):
+    status: str
+    source: str | None = None
+    provisional: bool = False
+    confidence: float | None = None
+    evidence_quality: str | None = None
+    session_complexity: int | None = None
+    call_quality: str | None = None
+    message: str | None = None
+
+
+class TechniqueCheckResponse(BaseModel):
+    id: str
+    label: str
+    category: str
+    status: str
+    kind: str
+    evidence_turn_ids: list[str] = Field(default_factory=list)
+
+
 class RepSessionTranscriptEntryResponse(BaseModel):
     turn_index: int
     rep_text: str
@@ -53,11 +73,13 @@ class RepSessionScorecardResponse(BaseModel):
     ai_summary: str
     evidence_turn_ids: list[str] = Field(default_factory=list)
     weakness_tags: list[str] = Field(default_factory=list)
+    technique_checks: list[TechniqueCheckResponse] = Field(default_factory=list)
 
 
 class RepSessionFeedbackResponse(BaseModel):
     session: SessionResponse
     scorecard: RepSessionScorecardResponse | None = None
+    grading_meta: GradingMetaResponse | None = None
     manager_coaching_note: ManagerCoachingNoteResponse | None = None
     transcript: list[RepSessionTranscriptEntryResponse] = Field(default_factory=list)
     improvement_targets: list[RepSessionImprovementTargetResponse] = Field(default_factory=list)
@@ -106,6 +128,7 @@ class SessionReplayResponse(BaseModel):
     conversational_realism: dict[str, Any] = Field(default_factory=dict)
     transport_metrics: dict[str, Any] = Field(default_factory=dict)
     scorecard: dict[str, Any] | None
+    grading_meta: GradingMetaResponse | None = None
     manager_reviews: list[ManagerReviewResponse] = Field(default_factory=list)
     coaching_notes: list[ManagerCoachingNoteResponse] = Field(default_factory=list)
     latest_coaching_note: ManagerCoachingNoteResponse | None = None

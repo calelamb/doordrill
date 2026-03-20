@@ -23,13 +23,33 @@ export type ScenarioBrief = {
 };
 
 export type CategoryScoreDetail = {
-  score: number;
+  score: number | null;
   rationale_summary?: string;
   rationale_detail?: string;
   improvement_target?: string | null;
   behavioral_signals?: string[];
   evidence_turn_ids?: string[];
   confidence?: number;
+};
+
+export type TechniqueCheck = {
+  id: string;
+  label: string;
+  category: string;
+  status: string;
+  kind: string;
+  evidence_turn_ids: string[];
+};
+
+export type GradingMeta = {
+  status: string;
+  source?: string | null;
+  provisional: boolean;
+  confidence?: number | null;
+  evidence_quality?: string | null;
+  session_complexity?: number | null;
+  call_quality?: string | null;
+  message?: string | null;
 };
 
 export type ImprovementTarget = {
@@ -51,7 +71,7 @@ export type TranscriptTurn = {
 
 export type Scorecard = {
   id: string;
-  overall_score: number;
+  overall_score: number | null;
   scorecard_schema_version: string;
   category_scores: Record<string, CategoryScoreDetail>;
   improvement_targets: ImprovementTarget[];
@@ -65,6 +85,7 @@ export type Scorecard = {
   ai_summary: string;
   evidence_turn_ids: string[];
   weakness_tags: string[];
+  technique_checks: TechniqueCheck[];
 };
 
 export type RepSessionDetail = {
@@ -78,6 +99,7 @@ export type RepSessionDetail = {
     status: string;
   };
   scorecard: Scorecard | null;
+  grading_meta?: GradingMeta | null;
   manager_review?: {
     notes?: string | null;
     override_score?: number | null;

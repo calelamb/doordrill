@@ -1,15 +1,41 @@
 export type CategoryScoreValue =
   | number
   | {
-    score: number;
+    score: number | null;
     rationale?: string;
+    rationale_summary?: string;
+    rationale_detail?: string;
+    confidence?: number;
     evidence_turn_ids?: string[];
+    behavioral_signals?: string[];
+    improvement_target?: string | null;
   };
 
 export type HighlightMoment = {
   type: string;
   note: string;
   turn_id?: string;
+  transcript_quote?: string;
+};
+
+export type TechniqueCheck = {
+  id: string;
+  label: string;
+  category: string;
+  status: string;
+  kind: string;
+  evidence_turn_ids: string[];
+};
+
+export type GradingMeta = {
+  status: string;
+  source?: string | null;
+  provisional: boolean;
+  confidence?: number | null;
+  evidence_quality?: string | null;
+  session_complexity?: number | null;
+  call_quality?: string | null;
+  message?: string | null;
 };
 
 export type FeedItem = {
@@ -108,13 +134,16 @@ export type ReplayResponse = {
   transport_metrics: Record<string, number>;
   scorecard: null | {
     id: string;
-    overall_score: number;
+    overall_score: number | null;
+    scorecard_schema_version?: string;
     category_scores: Record<string, CategoryScoreValue>;
     highlights: HighlightMoment[];
     ai_summary: string;
     evidence_turn_ids: string[];
     weakness_tags: string[];
+    technique_checks: TechniqueCheck[];
   };
+  grading_meta?: GradingMeta | null;
   session?: SessionDetail;
   assignment?: AssignmentDetail | null;
   manager_reviews?: ManagerReview[];
@@ -514,13 +543,16 @@ export type RepSessionDetail = {
   };
   scorecard: null | {
     id: string;
-    overall_score: number;
+    overall_score: number | null;
+    scorecard_schema_version?: string;
     category_scores: Record<string, CategoryScoreValue>;
     highlights: HighlightMoment[];
     ai_summary: string;
     evidence_turn_ids: string[];
     weakness_tags: string[];
+    technique_checks?: TechniqueCheck[];
   };
+  grading_meta?: GradingMeta | null;
 };
 
 export type ManagerReview = {

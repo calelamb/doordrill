@@ -1,15 +1,21 @@
 from datetime import datetime, timedelta, timezone
 
 from app.db.session import SessionLocal
+from app.models.grading import GradingRun
+from app.models.postprocess_run import PostprocessRun
 from app.models.assignment import Assignment
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
-from app.models.session import SessionTurn
+from app.models.session import SessionArtifact, SessionTurn
 from app.models.types import AssignmentStatus, SessionStatus, TurnSpeaker
 
 
 def _rep_headers(seed_org: dict[str, str]) -> dict[str, str]:
     return {"x-user-id": seed_org["rep_id"], "x-user-role": "rep"}
+
+
+def _manager_headers(seed_org: dict[str, str]) -> dict[str, str]:
+    return {"x-user-id": seed_org["manager_id"], "x-user-role": "manager"}
 
 
 def _create_session(
@@ -90,6 +96,75 @@ def _add_scorecard(
             ai_summary="Rep API enrichment test scorecard.",
             evidence_turn_ids=list(evidence_turn_ids or []),
             weakness_tags=list(weakness_tags or []),
+        )
+    )
+    db.commit()
+    db.close()
+
+
+def _add_grading_artifact(
+    session_id: str,
+    *,
+    grading_meta: dict | None = None,
+    technique_checks: list[dict] | None = None,
+    grading_status: str = "success",
+    retry_requested: bool = False,
+    call_quality: str = "moderate",
+) -> None:
+    db = SessionLocal()
+    db.add(
+        SessionArtifact(
+            session_id=session_id,
+            artifact_type="grading_technique_evaluation",
+            storage_key=f"session-artifacts/{session_id}/grading_technique_evaluation.json",
+            metadata_json={
+                "grading_status": grading_status,
+                "retry_requested": retry_requested,
+                "grading_meta": grading_meta or {},
+                "technique_checks": list(technique_checks or []),
+                "score_bands": {},
+                "call_quality": call_quality,
+                "message": (grading_meta or {}).get("message"),
+            },
+        )
+    )
+    db.commit()
+    db.close()
+
+
+def _add_grading_run(session_id: str, *, status: str = "running") -> None:
+    db = SessionLocal()
+    db.add(
+        GradingRun(
+            session_id=session_id,
+            scorecard_id=None,
+            prompt_version_id="prompt-version-test",
+            model_name="gpt-test",
+            model_latency_ms=0,
+            input_token_count=None,
+            output_token_count=None,
+            status=status,
+            raw_llm_response=None,
+            parse_error=None,
+            overall_score=None,
+            confidence_score=0.0,
+            started_at=datetime.now(timezone.utc),
+            completed_at=None,
+        )
+    )
+    db.commit()
+    db.close()
+
+
+def _add_grade_postprocess(session_id: str, *, status: str = "running") -> None:
+    db = SessionLocal()
+    db.add(
+        PostprocessRun(
+            session_id=session_id,
+            task_type="grade",
+            status=status,
+            attempts=1,
+            idempotency_key=f"{session_id}:grade",
         )
     )
     db.commit()
@@ -270,6 +345,196 @@ def test_session_detail_includes_improvement_targets_for_v2_scorecard(client, se
             "score": 6.1,
         },
     ]
+
+
+def test_session_detail_includes_grading_meta_and_technique_checks(client, seed_org):
+    session = _create_session(
+        seed_org,
+        started_at=datetime.now(timezone.utc) - timedelta(hours=3),
+        turns=[
+            {
+                "turn_index": 1,
+                "speaker": TurnSpeaker.REP,
+                "stage": "opening",
+                "text": "A couple of your neighbors on the route had us out this week.",
+            }
+        ],
+    )
+    turn_id = str(session["turn_ids"][0])
+    _add_scorecard(
+        str(session["session_id"]),
+        overall_score=7.4,
+        scorecard_schema_version="v2",
+        evidence_turn_ids=[turn_id],
+        category_scores={
+            "opening": {
+                "score": 7.4,
+                "confidence": 0.88,
+                "rationale_summary": "Good neighbor-led opener",
+                "rationale_detail": "The rep led with nearby proof and kept pressure low.",
+                "evidence_turn_ids": [turn_id],
+                "behavioral_signals": ["mentions_social_proof"],
+                "improvement_target": None,
+            }
+        },
+    )
+    _add_grading_artifact(
+        str(session["session_id"]),
+        grading_meta={
+            "status": "provisional",
+            "source": "calibrated_fallback",
+            "provisional": True,
+            "confidence": 0.63,
+            "evidence_quality": "moderate",
+            "session_complexity": 2,
+            "call_quality": "moderate",
+            "message": "This grade is usable now, but the evidence quality leaves room for recalibration.",
+        },
+        technique_checks=[
+            {
+                "id": "opening_neighbor_route_frame",
+                "label": "Neighbor / route framing",
+                "category": "opening",
+                "status": "hit",
+                "kind": "reward",
+                "evidence_turn_ids": [turn_id],
+            }
+        ],
+    )
+
+    response = client.get(
+        f"/rep/sessions/{session['session_id']}",
+        headers=_rep_headers(seed_org),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["grading_meta"]["status"] == "provisional"
+    assert body["grading_meta"]["source"] == "calibrated_fallback"
+    assert body["grading_meta"]["call_quality"] == "moderate"
+    assert body["scorecard"]["technique_checks"] == [
+        {
+            "id": "opening_neighbor_route_frame",
+            "label": "Neighbor / route framing",
+            "category": "opening",
+            "status": "hit",
+            "kind": "reward",
+            "evidence_turn_ids": [turn_id],
+        }
+    ]
+    assert body["scorecard"]["highlights"][0]["transcript_quote"].startswith("A couple of your neighbors")
+
+
+def test_session_detail_returns_processing_grading_meta_without_scorecard(client, seed_org):
+    session = _create_session(
+        seed_org,
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+        turns=[
+            {
+                "turn_index": 1,
+                "speaker": TurnSpeaker.REP,
+                "stage": "opening",
+                "text": "Quick question before I go.",
+            }
+        ],
+    )
+    db = SessionLocal()
+    try:
+        session_row = db.get(DrillSession, str(session["session_id"]))
+        assert session_row is not None
+        session_row.status = SessionStatus.PROCESSING
+        db.commit()
+    finally:
+        db.close()
+    _add_grade_postprocess(str(session["session_id"]), status="running")
+
+    response = client.get(
+        f"/rep/sessions/{session['session_id']}",
+        headers=_rep_headers(seed_org),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scorecard"] is None
+    assert body["grading_meta"]["status"] == "processing"
+    assert body["grading_meta"]["message"] == "Building your scorecard now."
+
+
+def test_manager_replay_includes_grading_meta_and_technique_checks(client, seed_org):
+    session = _create_session(
+        seed_org,
+        started_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        turns=[
+            {
+                "turn_index": 1,
+                "speaker": TurnSpeaker.REP,
+                "stage": "opening",
+                "text": "We were helping a few of your neighbors on the route already.",
+            },
+            {
+                "turn_index": 2,
+                "speaker": TurnSpeaker.AI,
+                "stage": "objection_handling",
+                "text": "Not interested.",
+            },
+        ],
+    )
+    turn_id = str(session["turn_ids"][0])
+    _add_scorecard(
+        str(session["session_id"]),
+        overall_score=6.9,
+        scorecard_schema_version="v2",
+        evidence_turn_ids=[turn_id],
+        weakness_tags=["closing_technique"],
+        category_scores={
+            "opening": {
+                "score": 7.2,
+                "confidence": 0.82,
+                "rationale_summary": "Neighbor framing landed",
+                "rationale_detail": "The rep used nearby proof and earned a response.",
+                "evidence_turn_ids": [turn_id],
+                "behavioral_signals": ["mentions_social_proof"],
+                "improvement_target": None,
+            }
+        },
+    )
+    _add_grading_artifact(
+        str(session["session_id"]),
+        grading_meta={
+            "status": "final",
+            "source": "llm_band_scored",
+            "provisional": False,
+            "confidence": 0.81,
+            "evidence_quality": "strong",
+            "session_complexity": 2,
+            "call_quality": "strong",
+            "message": "This grade is grounded in technique checks against the playbook.",
+        },
+        technique_checks=[
+            {
+                "id": "opening_neighbor_route_frame",
+                "label": "Neighbor / route framing",
+                "category": "opening",
+                "status": "hit",
+                "kind": "reward",
+                "evidence_turn_ids": [turn_id],
+            }
+        ],
+        call_quality="strong",
+    )
+
+    response = client.get(
+        f"/manager/sessions/{session['session_id']}/replay",
+        headers=_manager_headers(seed_org),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["grading_meta"]["status"] == "final"
+    assert body["grading_meta"]["call_quality"] == "strong"
+    assert body["scorecard"]["scorecard_schema_version"] == "v2"
+    assert body["scorecard"]["technique_checks"][0]["id"] == "opening_neighbor_route_frame"
+    assert body["scorecard"]["highlights"][0]["transcript_quote"].startswith("We were helping a few of your neighbors")
 
 
 def test_session_detail_improvement_targets_empty_for_v1_scorecard(client, seed_org):

@@ -13,11 +13,13 @@ from app.core.auth import Actor, require_rep_or_manager
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.assignment import Assignment
+from app.models.grading import GradingRun
+from app.models.postprocess_run import PostprocessRun
 from app.models.prompt_version import PromptVersion
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
-from app.models.session import SessionTurn
+from app.models.session import SessionArtifact, SessionTurn
 from app.models.types import AssignmentStatus, SessionStatus
 from app.models.user import User, Team
 from app.schemas.adaptive_training import RepAdaptivePlanResponse, RepForecastResponse
@@ -68,6 +70,8 @@ notification_service = NotificationService()
 review_service = ManagerReviewService()
 predictive_modeling_service = PredictiveModelingService()
 adaptive_training_service = AdaptiveTrainingService()
+TECHNIQUE_EVAL_ARTIFACT_TYPE = "grading_technique_evaluation"
+PROCESSING_GRADE_STATUSES = {"pending", "queued", "running", "retry_scheduled"}
 
 
 def _get_user_or_404(db: Session, user_id: str, label: str) -> User:
@@ -211,7 +215,162 @@ def _build_improvement_targets(category_scores: dict[str, CategoryScoreV2]) -> l
     return sorted(candidates, key=lambda item: (item["score"], item["label"]))[:3]
 
 
-def _serialize_scorecard(scorecard: Scorecard | None) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+def _latest_grading_artifact(db: Session, session_id: str) -> SessionArtifact | None:
+    return db.scalar(
+        select(SessionArtifact)
+        .where(
+            SessionArtifact.session_id == session_id,
+            SessionArtifact.artifact_type == TECHNIQUE_EVAL_ARTIFACT_TYPE,
+        )
+        .order_by(SessionArtifact.created_at.desc())
+    )
+
+
+def _latest_grading_run(db: Session, session_id: str) -> GradingRun | None:
+    return db.scalar(
+        select(GradingRun)
+        .where(GradingRun.session_id == session_id)
+        .order_by(GradingRun.completed_at.desc(), GradingRun.created_at.desc())
+    )
+
+
+def _latest_grade_postprocess_run(db: Session, session_id: str) -> PostprocessRun | None:
+    return db.scalar(
+        select(PostprocessRun)
+        .where(
+            PostprocessRun.session_id == session_id,
+            PostprocessRun.task_type == "grade",
+        )
+        .order_by(PostprocessRun.created_at.desc())
+    )
+
+
+def _turn_text_by_id(turns: list[SessionTurn]) -> dict[str, str]:
+    text_by_id: dict[str, str] = {}
+    for turn in turns:
+        text = " ".join(
+            part.strip()
+            for part in [
+                turn.normalized_transcript_text or "",
+                turn.raw_transcript_text or "",
+                turn.text or "",
+            ]
+            if isinstance(part, str) and part.strip()
+        ).strip()
+        if text:
+            text_by_id[turn.id] = text[:240]
+    return text_by_id
+
+
+def _serialize_technique_checks(artifact: SessionArtifact | None) -> list[dict[str, Any]]:
+    metadata = artifact.metadata_json if artifact is not None and isinstance(artifact.metadata_json, dict) else {}
+    serialized: list[dict[str, Any]] = []
+    for item in metadata.get("technique_checks", []):
+        if not isinstance(item, dict):
+            continue
+        serialized.append(
+            {
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("label") or ""),
+                "category": str(item.get("category") or ""),
+                "status": str(item.get("status") or "unknown"),
+                "kind": str(item.get("kind") or "reward"),
+                "evidence_turn_ids": [
+                    turn_id
+                    for turn_id in item.get("evidence_turn_ids", [])
+                    if isinstance(turn_id, str) and turn_id.strip()
+                ],
+            }
+        )
+    return [item for item in serialized if item["id"] and item["label"] and item["category"]]
+
+
+def _serialize_grading_meta(
+    *,
+    session: DrillSession,
+    scorecard: Scorecard | None,
+    artifact: SessionArtifact | None,
+    grading_run: GradingRun | None,
+    postprocess_run: PostprocessRun | None,
+) -> dict[str, Any] | None:
+    metadata = artifact.metadata_json if artifact is not None and isinstance(artifact.metadata_json, dict) else {}
+    raw_meta = metadata.get("grading_meta") if isinstance(metadata.get("grading_meta"), dict) else {}
+    grading_status = str(metadata.get("grading_status") or grading_run.status if grading_run else "").strip().lower()
+    retry_requested = bool(metadata.get("retry_requested"))
+    base_meta: dict[str, Any] = {
+        "status": str(raw_meta.get("status") or "").strip() or None,
+        "source": str(raw_meta.get("source") or "").strip() or None,
+        "provisional": bool(raw_meta.get("provisional", False)),
+        "confidence": float(raw_meta["confidence"]) if isinstance(raw_meta.get("confidence"), (int, float)) else None,
+        "evidence_quality": str(raw_meta.get("evidence_quality") or "").strip() or None,
+        "session_complexity": int(raw_meta["session_complexity"]) if isinstance(raw_meta.get("session_complexity"), int) else None,
+        "call_quality": str(raw_meta.get("call_quality") or metadata.get("call_quality") or "").strip() or None,
+        "message": str(raw_meta.get("message") or metadata.get("message") or "").strip() or None,
+    }
+
+    if scorecard is not None:
+        if not base_meta["status"]:
+            is_no_rep_speech = float(scorecard.overall_score or 0.0) == 0.0 and "no_rep_speech" in (scorecard.weakness_tags or [])
+            base_meta["status"] = "no_rep_speech" if is_no_rep_speech else "final"
+        if not base_meta["source"]:
+            base_meta["source"] = "legacy_scorecard"
+        if base_meta["message"] is None:
+            base_meta["message"] = (
+                "No rep speech was captured in this drill."
+                if base_meta["status"] == "no_rep_speech"
+                else "Scorecard complete."
+            )
+        return base_meta
+
+    postprocess_status = str(postprocess_run.status if postprocess_run else "").strip().lower()
+    session_status = session.status.value if hasattr(session.status, "value") else str(session.status)
+    if postprocess_status in PROCESSING_GRADE_STATUSES or grading_status == "running" or session_status == SessionStatus.PROCESSING.value:
+        return {
+            "status": "processing",
+            "source": "postprocess_queue" if postprocess_status else "grading_run",
+            "provisional": False,
+            "confidence": None,
+            "evidence_quality": None,
+            "session_complexity": None,
+            "call_quality": None,
+            "message": "Retrying scorecard generation after a timeout." if retry_requested else "Building your scorecard now.",
+        }
+
+    if grading_status in {"llm_error", "parse_error", "timeout_fallback"}:
+        return {
+            "status": "processing",
+            "source": grading_status,
+            "provisional": False,
+            "confidence": None,
+            "evidence_quality": None,
+            "session_complexity": None,
+            "call_quality": None,
+            "message": "Recalibrating your scorecard from the transcript evidence.",
+        }
+
+    return None
+
+
+def _serialize_highlights(highlights: list[dict[str, Any]] | None, turns: list[SessionTurn]) -> list[dict[str, Any]]:
+    turn_text = _turn_text_by_id(turns)
+    serialized: list[dict[str, Any]] = []
+    for item in highlights or []:
+        if not isinstance(item, dict):
+            continue
+        turn_id = item.get("turn_id")
+        payload = dict(item)
+        if isinstance(turn_id, str) and turn_id in turn_text and "transcript_quote" not in payload:
+            payload["transcript_quote"] = turn_text[turn_id]
+        serialized.append(payload)
+    return serialized
+
+
+def _serialize_scorecard(
+    scorecard: Scorecard | None,
+    *,
+    turns: list[SessionTurn],
+    grading_artifact: SessionArtifact | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     if scorecard is None:
         return None, []
 
@@ -240,10 +399,11 @@ def _serialize_scorecard(scorecard: Scorecard | None) -> tuple[dict[str, Any] | 
             "overall_score": scorecard.overall_score,
             "scorecard_schema_version": schema_version,
             "category_scores": serialized_category_scores,
-            "highlights": scorecard.highlights,
+            "highlights": _serialize_highlights(scorecard.highlights, turns),
             "ai_summary": scorecard.ai_summary,
             "evidence_turn_ids": scorecard.evidence_turn_ids,
             "weakness_tags": scorecard.weakness_tags,
+            "technique_checks": _serialize_technique_checks(grading_artifact),
         },
         improvement_targets,
     )
@@ -459,11 +619,25 @@ def get_session_with_feedback(
         .where(SessionTurn.session_id == session_id)
         .order_by(SessionTurn.turn_index.asc(), SessionTurn.started_at.asc())
     ).all()
-    scorecard_payload, improvement_targets = _serialize_scorecard(scorecard)
+    grading_artifact = _latest_grading_artifact(db, session_id)
+    grading_run = _latest_grading_run(db, session_id)
+    grade_postprocess_run = _latest_grade_postprocess_run(db, session_id)
+    scorecard_payload, improvement_targets = _serialize_scorecard(
+        scorecard,
+        turns=transcript_turns,
+        grading_artifact=grading_artifact,
+    )
     manager_coaching_note = review_service.latest_rep_visible_note(db, session_id=session_id)
     return {
         "session": SessionResponse.model_validate(session).model_dump(mode="json"),
         "scorecard": scorecard_payload,
+        "grading_meta": _serialize_grading_meta(
+            session=session,
+            scorecard=scorecard,
+            artifact=grading_artifact,
+            grading_run=grading_run,
+            postprocess_run=grade_postprocess_run,
+        ),
         "manager_coaching_note": (
             ManagerCoachingNoteResponse.model_validate(manager_coaching_note).model_dump(mode="json")
             if manager_coaching_note
