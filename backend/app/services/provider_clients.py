@@ -374,18 +374,26 @@ class DeepgramSttClient(BaseSttClient):
                         channel = (message.get("channel") or {}).get("alternatives") or []
                         alternative = channel[0] if channel else {}
                         transcript = str(alternative.get("transcript", "")).strip()
-                        is_final = bool(message.get("is_final") or message.get("speech_final"))
+                        # is_final: this time-window is finalized (more windows may follow)
+                        # speech_final: Deepgram VAD detected end of speech — stop here
+                        is_final_window = bool(message.get("is_final"))
+                        speech_final = bool(message.get("speech_final"))
                         if not transcript:
-                            if is_final:
+                            # Empty window: only stop if speech is truly finished
+                            if speech_final:
                                 break
                             continue
 
                         confidence = float(alternative.get("confidence", 0.0) or 0.0)
-                        if is_final:
+                        if is_final_window or speech_final:
+                            # Accumulate every finalized window — long utterances span multiple windows
                             final_segments.append(transcript)
                             confidences.append(confidence)
                             _emit_handler(payload, "on_final", transcript, True)
-                            break
+                            if speech_final:
+                                # Speaker has stopped — we have the full utterance
+                                break
+                            # Otherwise keep consuming: more windows may still arrive
                         else:
                             latest_partial = transcript
                             _emit_handler(payload, "on_partial", transcript, False)
