@@ -97,3 +97,22 @@ def test_spouse_handoff_eligible_triggers_when_considering_and_partner_is_in_con
     )
 
     assert "spouse_handoff_eligible" in plan.active_edge_cases
+
+
+def test_recovery_stage_triggers_after_strong_deescalation():
+    orchestrator = _build_orchestrator("session-recovery")
+    state = orchestrator.get_state("session-recovery")
+    state.stage = "objection_handling"
+    state.emotion = "annoyed"
+    state.emotion_momentum = 1
+    state.objection_pressure = 4
+    state.active_objections = ["price"]
+
+    plan = orchestrator.prepare_rep_turn(
+        "session-recovery",
+        "I understand price matters, and I'm not asking you to decide today. I can show proof from local reviews.",
+    )
+
+    assert plan.stage_after == "recovery"
+    assert plan.emotion_after in {"skeptical", "neutral", "curious"}
+    assert "Current stage: RECOVERY" in plan.system_prompt

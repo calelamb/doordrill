@@ -1230,12 +1230,33 @@ class PromptBuilder:
             "Force the rep to address the actual concern instead of sliding past it."
         ),
         "CONSIDERING": (
-            "You are not sold, but you are willing to consider a low-friction next step. "
-            "Warm up only if the rep is specific, credible, and homeowner-focused."
+            "You are not sold, but you have not walked away either. Something the rep said opened a small crack. "
+            "Behave like a real person who is genuinely undecided: ask a clarifying question, stall with 'I'd have to think about it', "
+            "or float a soft objection that is not a hard no. "
+            "Do NOT cave just because the rep asked nicely. The rep still needs to answer the specific thing that is holding you back. "
+            "Common realistic responses at this stage: 'What does the monthly cost actually look like?', "
+            "'I'd want to run it by my wife first.', 'How long have you guys been operating around here?', "
+            "'I mean, maybe - what would the process look like?' "
+            "Only warm up further if the rep gives a concrete, credible answer to your last question. "
+            "A vague or pushy answer should snap you back toward skeptical."
         ),
         "CLOSE_WINDOW": (
-            "The rep is trying to close. Decide realistically whether you accept, defer, or decline. "
-            "Do not say yes unless the rep has earned trust and reduced friction."
+            "The rep is trying to close. You need a real reason to say yes - not enthusiasm, not pressure. "
+            "Default to a soft decline or a deferral unless the rep has genuinely earned your trust: "
+            "'Let me think about it.', 'I'll talk to my wife and we'll reach out.', 'Not today, but maybe.' "
+            "If the rep is using urgency pressure ('only today', 'right now'), resist harder - real homeowners hate that. "
+            "The only things that can move you to yes at this stage are that all your major objections have been addressed specifically, "
+            "the rep has been calm and credible throughout, and the ask is low-friction like a free inspection or quick look. "
+            "If all three are true, it is realistic to agree to a low-commitment next step. "
+            "If one or more is missing, give a polite but firm deferral and do not reopen it."
+        ),
+        "RECOVERY": (
+            "The rep just did something that de-escalated the conversation after a difficult moment - "
+            "they acknowledged your concern, backed off pressure, or gave a specific credible answer. "
+            "React to that. Do not immediately forgive everything, but show that you noticed: "
+            "'Okay, that's actually a fair point.', 'Alright, I can hear that.', 'That makes more sense.' "
+            "You are not fully back onside yet - stay slightly guarded - but the tone softens measurably. "
+            "Do not raise a new objection this turn unless the rep's recovery was unconvincing."
         ),
         "ENDED": (
             "The conversation is over. End it naturally and do not reopen the sale."
@@ -1247,6 +1268,7 @@ class PromptBuilder:
         "objection_handling": "OBJECTING",
         "considering": "CONSIDERING",
         "close_attempt": "CLOSE_WINDOW",
+        "recovery": "RECOVERY",
         "ended": "ENDED",
     }
 
@@ -1259,7 +1281,7 @@ class PromptBuilder:
             "Layer 1: hardcoded homeowner immersion contract.\n"
             "Layer 2: persona fields: name, attitude, concerns, objection_queue, buy_likelihood, softening_condition, household_type, home_ownership_years, pest_history, price_sensitivity, communication_style.\n"
             "Layer 2B: stable realism traits controlling disclosure style, skepticism threshold, and willingness to book.\n"
-            "Layer 3: stage-aware instructions covering DOOR_OPEN, LISTENING, OBJECTING, CONSIDERING, CLOSE_WINDOW, ENDED.\n"
+            "Layer 3: stage-aware instructions covering DOOR_OPEN, LISTENING, OBJECTING, CONSIDERING, CLOSE_WINDOW, RECOVERY, ENDED.\n"
             "Layer 3A: recent conversation memory and latest rep utterance.\n"
             "Layer 3A-PLAN: deterministic response-plan contract covering must-answer behavior, friction gates, stance, and semantic anchors.\n"
             "Layer 3B: emotional state machine framing with resistance level, objection pressure, active objections, and latent objections.\n"
@@ -1623,7 +1645,7 @@ class PromptBuilder:
     def _response_cap_rule(self, canonical_stage: str) -> str:
         if canonical_stage in {"DOOR_OPEN", "ENDED"}:
             return "Maximum 10 words."
-        if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW"}:
+        if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW", "RECOVERY"}:
             return "Maximum 30 words. You may think out loud briefly."
         return "Maximum 20 words."
 
@@ -1646,7 +1668,7 @@ class PromptBuilder:
         return "Respond in no more than three sentences."
 
     def _internal_thought_rule(self, canonical_stage: str) -> str:
-        if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW"}:
+        if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW", "RECOVERY"}:
             return "Brief natural thinking out loud is allowed. Do not expose coaching notes, scoring, or model behavior."
         return "Do not narrate internal thoughts, coaching notes, scoring, or model behavior."
 
@@ -1964,6 +1986,13 @@ class ConversationOrchestrator:
             pressure_after=state.objection_pressure,
             analysis=analysis,
         )
+        if self._should_enter_recovery_stage(
+            previous_emotion=emotion_before,
+            next_emotion=state.emotion,
+            emotion_momentum=state.emotion_momentum,
+        ):
+            stage_after = "recovery"
+            state.stage = stage_after
         state.resistance_level = self._emotion_to_resistance(state.emotion)
         state.last_behavior_signals = list(analysis.behavioral_signals)
         state.homeowner_posture = analysis.homeowner_posture
@@ -2080,6 +2109,8 @@ class ConversationOrchestrator:
             return objection_stage
         if analysis.confidence < 0.6:
             return self._detect_stage(rep_text, state, context, objection_tags=objection_tags)
+        if state.stage == "recovery":
+            return considering_stage if state.objection_pressure <= 2 else objection_stage
         return state.stage
 
     def _next_ignored_objection_streak_from_analysis(
@@ -2199,6 +2230,19 @@ class ConversationOrchestrator:
             return True
         strong_combo = {"acknowledges_concern", "reduces_pressure", "personalizes_pitch"}
         return strong_combo.issubset(set(analysis.behavioral_signals))
+
+    def _should_enter_recovery_stage(
+        self,
+        *,
+        previous_emotion: str,
+        next_emotion: str,
+        emotion_momentum: int,
+    ) -> bool:
+        if previous_emotion not in {"annoyed", "hostile"}:
+            return False
+        if emotion_momentum < 2:
+            return False
+        return self._emotion_to_resistance(next_emotion) < self._emotion_to_resistance(previous_emotion)
 
     def _initialize_state_from_context(self, context: SessionPromptContext) -> ConversationState:
         context.persona = self._enrich_persona(context.persona, context.scenario_snapshot)

@@ -86,6 +86,13 @@ class ReconstructedTimeline:
 class TurnEnrichmentService:
     """Populate enriched turn columns and fact turn events from the immutable event ledger."""
 
+    def build_timeline(self, db: Session, session_id: str) -> ReconstructedTimeline:
+        session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
+        if session is None:
+            raise ValueError("session not found")
+        events = self._load_ordered_events(db, session_id)
+        return self._reconstruct_state_timeline(events)
+
     def enrich_session(self, db: Session, session_id: str) -> dict[str, int]:
         session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
         if session is None:

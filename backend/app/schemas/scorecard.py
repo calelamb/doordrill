@@ -39,7 +39,7 @@ class StructuredScorecardPayloadV2(BaseModel):
     category_scores: dict[str, CategoryScoreV2]
     overall_score: float = Field(ge=0, le=10)
     highlights: list[ScorecardHighlight] = Field(min_length=2, max_length=4)
-    ai_summary: str = Field(min_length=1, max_length=400)
+    ai_summary: str = Field(min_length=1, max_length=700)
     weakness_tags: list[str] = Field(default_factory=list)
     evidence_quality: Literal["strong", "moderate", "weak"]
     session_complexity: int = Field(ge=1, le=5)

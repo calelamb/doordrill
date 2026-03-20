@@ -1,4 +1,4 @@
-from app.services.micro_behavior_engine import ConversationalMicroBehaviorEngine
+from app.services.micro_behavior_engine import HESITATION_VARIANTS, ConversationalMicroBehaviorEngine
 
 
 def test_hesitation_and_filler_are_injected_for_skeptical_response():
@@ -14,9 +14,10 @@ def test_hesitation_and_filler_are_injected_for_skeptical_response():
         active_objections=["incumbent_provider"],
     )
 
-    assert plan.transformed_text.startswith(("Uh...", "Well...", "I mean..."))
+    assert any(plan.transformed_text.startswith(variant) for variant in HESITATION_VARIANTS["skeptical"])
     assert any(behavior == "hesitation_mode" for behavior in plan.behaviors)
     assert any("tone:" in behavior for behavior in plan.behaviors)
+    assert 300 <= plan.pause_profile["opening_pause_ms"] <= 450
     assert plan.realism_score >= 6.0
 
 
@@ -51,6 +52,14 @@ def test_sentence_length_and_pause_profiles_vary_by_emotion():
         behavioral_signals=["acknowledges_concern"],
         active_objections=["timing"],
     )
+    interested_plan = engine.apply_to_response(
+        session_id="session-3",
+        raw_text="Okay, what would the process actually look like if I wanted to learn more about it?",
+        emotion_before="curious",
+        emotion_after="interested",
+        behavioral_signals=["acknowledges_concern", "explains_value"],
+        active_objections=["timing"],
+    )
     hostile_plan = engine.apply_to_response(
         session_id="session-3",
         raw_text="I do not want to keep talking about this if you are going to pressure me.",
@@ -62,8 +71,9 @@ def test_sentence_length_and_pause_profiles_vary_by_emotion():
 
     assert curious_plan.sentence_length == "long"
     assert curious_plan.pause_profile["opening_pause_ms"] >= 300
+    assert interested_plan.pause_profile["opening_pause_ms"] > 400
     assert hostile_plan.sentence_length == "short"
-    assert hostile_plan.pause_profile["opening_pause_ms"] <= 140
+    assert hostile_plan.pause_profile["opening_pause_ms"] < 100
 
 
 def test_recent_variants_are_not_reused_immediately():

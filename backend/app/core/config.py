@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     deepgram_base_url: str = Field(default="https://api.deepgram.com", alias="DEEPGRAM_BASE_URL")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    grading_model: str = Field(default="gpt-4o-mini", alias="GRADING_MODEL")
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     embedding_model: str = Field(default="text-embedding-3-small", alias="EMBEDDING_MODEL")
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
@@ -73,6 +74,7 @@ class Settings(BaseSettings):
     elevenlabs_base_url: str = Field(default="https://api.elevenlabs.io", alias="ELEVENLABS_BASE_URL")
     deepgram_model: str = Field(default="nova-3", alias="DEEPGRAM_MODEL")
     provider_timeout_seconds: float = Field(default=10.0, alias="PROVIDER_TIMEOUT_SECONDS")
+    grading_timeout_seconds: float = Field(default=20.0, alias="GRADING_TIMEOUT_SECONDS")
 
     use_celery: bool = Field(default=False, alias="USE_CELERY")
     celery_broker_url: str = Field(default="redis://localhost:6379/0", alias="CELERY_BROKER_URL")

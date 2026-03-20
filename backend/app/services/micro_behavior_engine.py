@@ -6,20 +6,113 @@ from dataclasses import dataclass, field
 from typing import Any
 
 HESITATION_VARIANTS = {
-    "neutral": ("Uh...", "Well...", "Hmm..."),
-    "skeptical": ("Uh...", "Well...", "I mean..."),
-    "curious": ("Hmm...", "Well...", "So..."),
-    "interested": ("Okay...", "Well...", "So..."),
+    "neutral": (
+        "Uh...",
+        "Well...",
+        "Hmm...",
+        "I mean...",
+        "Let me think...",
+        "Okay...",
+        "So...",
+        "Right...",
+    ),
+    "skeptical": (
+        "Uh...",
+        "Well...",
+        "I mean...",
+        "Hm.",
+        "Look...",
+        "I don't know...",
+        "Right, so...",
+        "Okay but...",
+    ),
+    "curious": (
+        "Hmm...",
+        "Well...",
+        "So...",
+        "Interesting...",
+        "Oh, okay...",
+        "Wait, so...",
+        "Huh...",
+        "Tell me...",
+    ),
+    "interested": (
+        "Okay...",
+        "Well...",
+        "So...",
+        "Right...",
+        "Got it...",
+        "Alright...",
+        "Yeah...",
+        "And...",
+    ),
+    "annoyed": (
+        "Look...",
+        "Okay so...",
+        "I mean...",
+        "Yeah, I heard you...",
+        "Alright...",
+        "Okay, but...",
+    ),
+    "hostile": (
+        "No...",
+        "Look...",
+        "Yeah, no...",
+        "Okay, stop...",
+        "Listen...",
+        "Absolutely not...",
+    ),
+    "considering": (
+        "Okay...",
+        "Well...",
+        "I mean...",
+        "Right...",
+        "Let me think...",
+        "So...",
+    ),
 }
 FILLER_VARIANTS = {
-    "neutral": ("you know", "I mean", "like"),
-    "skeptical": ("I mean", "you know"),
-    "curious": ("you know", "like"),
-    "interested": ("I mean", "you know"),
+    "neutral": ("you know", "I mean", "like", "sort of", "kind of"),
+    "skeptical": ("I mean", "you know", "honestly", "look", "kind of"),
+    "curious": ("you know", "like", "actually", "I guess", "kind of"),
+    "interested": ("I mean", "you know", "right", "exactly", "yeah"),
+    "annoyed": ("look", "I mean", "honestly", "seriously", "okay"),
+    "hostile": ("look", "honestly", "seriously", "frankly", "listen"),
+    "considering": ("I mean", "you know", "kind of", "I guess", "actually"),
 }
 INTERRUPTION_VARIANTS = {
-    "annoyed": ("Hold on,", "Wait,", "Look,"),
-    "hostile": ("No, hold on,", "Sorry, let me stop you there,", "Wait a second,"),
+    "annoyed": (
+        "Hold on,",
+        "Wait,",
+        "Look,",
+        "Okay, stop.",
+        "Let me jump in here.",
+        "Actually,",
+        "No, hang on.",
+    ),
+    "hostile": (
+        "No, hold on,",
+        "Sorry, let me stop you there,",
+        "Wait a second,",
+        "No, stop.",
+        "I'm going to cut you off,",
+        "Okay, I've heard enough.",
+        "That's not it, listen,",
+    ),
+}
+TRAILING_OFF_VARIANTS = {
+    "skeptical": (
+        "I just don't know...",
+        "It's just that...",
+        "I'd have to think about it...",
+        "I mean, maybe...",
+    ),
+    "considering": (
+        "I guess the thing is...",
+        "It's just...",
+        "I'm not sure, it's...",
+        "Maybe, I just...",
+    ),
 }
 TONE_BY_TRANSITION = {
     ("neutral", "skeptical"): "guarded",
@@ -33,6 +126,7 @@ DEFAULT_TONE_BY_EMOTION = {
     "hostile": "confrontational",
     "curious": "exploratory",
     "interested": "warm",
+    "considering": "guarded",
 }
 SENTENCE_LENGTH_BY_EMOTION = {
     "hostile": "short",
@@ -41,7 +135,18 @@ SENTENCE_LENGTH_BY_EMOTION = {
     "neutral": "medium",
     "curious": "long",
     "interested": "long",
+    "considering": "medium",
 }
+PAUSE_BEFORE_OFFSET_BY_EMOTION = {
+    "hostile": -80,
+    "annoyed": -40,
+    "neutral": 0,
+    "skeptical": 60,
+    "curious": 120,
+    "interested": 160,
+    "considering": 80,
+}
+RECENT_VARIANT_WINDOW = 4
 SEMANTIC_KEYWORDS_BY_OBJECTION = {
     "price": ("price", "cost", "expensive", "budget", "monthly"),
     "price_per_month": ("monthly", "payment", "month", "rate"),
@@ -59,6 +164,7 @@ class MicroBehaviorSessionState:
     recent_fillers: list[str] = field(default_factory=list)
     recent_hesitations: list[str] = field(default_factory=list)
     recent_interruptions: list[str] = field(default_factory=list)
+    recent_trailing_offs: list[str] = field(default_factory=list)
     recent_tones: list[str] = field(default_factory=list)
     persona: dict[str, Any] = field(default_factory=dict)
     turn_count: int = 0
@@ -129,7 +235,7 @@ class ConversationalMicroBehaviorEngine:
             interruption_type = "homeowner_cuts_off_rep"
             opener = self._pick_variant(
                 session_id,
-                f"interrupt:{emotion_after}",
+                f"interrupt:{emotion_after}:{state.turn_count}",
                 INTERRUPTION_VARIANTS.get(emotion_after, INTERRUPTION_VARIANTS["annoyed"]),
                 state.recent_interruptions,
             )
@@ -139,7 +245,7 @@ class ConversationalMicroBehaviorEngine:
         if self._should_hesitate(emotion_after, behavioral_signals, trimmed_text):
             hesitation = self._pick_variant(
                 session_id,
-                f"hesitation:{emotion_after}",
+                f"hesitation:{emotion_after}:{state.turn_count}",
                 HESITATION_VARIANTS.get(emotion_after, HESITATION_VARIANTS["neutral"]),
                 state.recent_hesitations,
             )
@@ -149,12 +255,22 @@ class ConversationalMicroBehaviorEngine:
         if self._should_use_filler(emotion_after, behavioral_signals, trimmed_text):
             filler = self._pick_variant(
                 session_id,
-                f"filler:{emotion_after}",
+                f"filler:{emotion_after}:{state.turn_count}",
                 FILLER_VARIANTS.get(emotion_after, FILLER_VARIANTS["neutral"]),
                 state.recent_fillers,
             )
             trimmed_text = self._insert_filler(trimmed_text, filler)
             self._remember(state.recent_fillers, filler)
+
+        if self._should_trail_off(session_id=session_id, emotion_after=emotion_after, sentence_length=sentence_length, turn_count=state.turn_count):
+            trailing_variant = self._pick_variant(
+                session_id,
+                f"trailing:{emotion_after}:{state.turn_count}",
+                TRAILING_OFF_VARIANTS.get(emotion_after, TRAILING_OFF_VARIANTS["skeptical"]),
+                state.recent_trailing_offs,
+            )
+            trimmed_text = self._apply_trailing_off(trimmed_text, trailing_variant)
+            self._remember(state.recent_trailing_offs, trailing_variant)
 
         behaviors = self._derive_behaviors(
             emotion_before=emotion_before,
@@ -165,7 +281,13 @@ class ConversationalMicroBehaviorEngine:
             sentence_length=sentence_length,
             tone=tone,
         )
-        segments = self._segment_text(trimmed_text, tone=tone, behaviors=behaviors, sentence_length=sentence_length)
+        segments = self._segment_text(
+            trimmed_text,
+            tone=tone,
+            behaviors=behaviors,
+            sentence_length=sentence_length,
+            emotion_after=emotion_after,
+        )
         pause_profile = self._summarize_pauses(segments)
         realism_score = self._score_realism(
             behaviors=behaviors,
@@ -296,6 +418,19 @@ class ConversationalMicroBehaviorEngine:
             return False
         return "explains_value" in behavioral_signals or emotion_after in {"neutral", "curious"}
 
+    def _should_trail_off(
+        self,
+        *,
+        session_id: str,
+        emotion_after: str,
+        sentence_length: str,
+        turn_count: int,
+    ) -> bool:
+        if sentence_length != "medium" or emotion_after not in TRAILING_OFF_VARIANTS:
+            return False
+        digest = hashlib.sha256(f"{session_id}:trailing:{emotion_after}:{turn_count}".encode("utf-8")).hexdigest()
+        return (int(digest[:8], 16) % 10) < 3
+
     def _insert_filler(self, text: str, filler: str) -> str:
         sentences = self._split_sentences(text)
         if not sentences:
@@ -310,6 +445,16 @@ class ConversationalMicroBehaviorEngine:
             sentences[0] = " ".join(words)
         updated = " ".join(sentences).strip()
         return updated[0].upper() + updated[1:] if updated else updated
+
+    def _apply_trailing_off(self, text: str, trailing_variant: str) -> str:
+        sentences = self._split_sentences(text)
+        if not sentences:
+            return trailing_variant
+        if len(sentences) == 1:
+            base = sentences[0].rstrip(".!? ")
+            return f"{base}. {trailing_variant}".strip()
+        sentences[-1] = trailing_variant
+        return " ".join(sentences).strip()
 
     def _derive_behaviors(
         self,
@@ -337,6 +482,8 @@ class ConversationalMicroBehaviorEngine:
             behaviors.append("hesitation_mode")
         if emotion_after in {"neutral", "curious", "interested"}:
             behaviors.append("filler_mode")
+        if emotion_after in TRAILING_OFF_VARIANTS and sentence_length == "medium":
+            behaviors.append("trailing_off_available")
         return behaviors
 
     def _segment_text(
@@ -346,6 +493,7 @@ class ConversationalMicroBehaviorEngine:
         tone: str,
         behaviors: list[str],
         sentence_length: str,
+        emotion_after: str,
     ) -> list[MicroBehaviorSegment]:
         sentences = self._split_sentences(text)
         if not sentences:
@@ -353,7 +501,13 @@ class ConversationalMicroBehaviorEngine:
         segments: list[MicroBehaviorSegment] = []
         count = len(sentences)
         for index, sentence in enumerate(sentences):
-            pause_before = self._pause_before_ms(index=index, tone=tone, sentence_length=sentence_length, sentence=sentence)
+            pause_before = self._pause_before_ms(
+                index=index,
+                tone=tone,
+                sentence_length=sentence_length,
+                sentence=sentence,
+                emotion_after=emotion_after,
+            )
             pause_after = self._pause_after_ms(index=index, count=count, tone=tone)
             segments.append(
                 MicroBehaviorSegment(
@@ -371,16 +525,26 @@ class ConversationalMicroBehaviorEngine:
             )
         return segments
 
-    def _pause_before_ms(self, *, index: int, tone: str, sentence_length: str, sentence: str) -> int:
+    def _pause_before_ms(
+        self,
+        *,
+        index: int,
+        tone: str,
+        sentence_length: str,
+        sentence: str,
+        emotion_after: str,
+    ) -> int:
         if index == 0 and tone in {"exploratory", "guarded", "measured"}:
-            return 320
-        if index == 0 and tone in {"sharp", "cutting", "confrontational"}:
-            return 80
-        if sentence.startswith(("Uh...", "Well...", "Hmm...", "Okay...", "So...")):
-            return 420
-        if sentence_length == "long":
-            return 260 if index > 0 else 360
-        return 180 if index > 0 else 140
+            base_pause = 320
+        elif index == 0 and tone in {"sharp", "cutting", "confrontational"}:
+            base_pause = 80
+        elif sentence.startswith(tuple({variant for values in HESITATION_VARIANTS.values() for variant in values})):
+            base_pause = 420
+        elif sentence_length == "long":
+            base_pause = 260 if index > 0 else 360
+        else:
+            base_pause = 180 if index > 0 else 140
+        return max(40, base_pause + PAUSE_BEFORE_OFFSET_BY_EMOTION.get(emotion_after, 0))
 
     def _pause_after_ms(self, *, index: int, count: int, tone: str) -> int:
         if index == count - 1:
@@ -430,12 +594,12 @@ class ConversationalMicroBehaviorEngine:
         return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()]
 
     def _pick_variant(self, session_id: str, namespace: str, options: tuple[str, ...], recent: list[str]) -> str:
-        candidates = [option for option in options if option not in recent[-2:]] or list(options)
+        candidates = [option for option in options if option not in recent[-RECENT_VARIANT_WINDOW:]] or list(options)
         digest = hashlib.sha256(f"{session_id}:{namespace}:{len(recent)}".encode("utf-8")).hexdigest()
         index = int(digest[:8], 16) % len(candidates)
         return candidates[index]
 
     def _remember(self, bucket: list[str], value: str) -> None:
         bucket.append(value)
-        if len(bucket) > 4:
+        if len(bucket) > RECENT_VARIANT_WINDOW * 2:
             del bucket[0]

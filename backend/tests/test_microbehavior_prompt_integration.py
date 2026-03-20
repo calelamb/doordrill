@@ -9,7 +9,12 @@ from app.services.conversation_orchestrator import (
     PromptBuilder,
 )
 from app.services.micro_behavior_engine import MicroBehaviorPlan
-from app.services.micro_behavior_engine import ConversationalMicroBehaviorEngine
+from app.services.micro_behavior_engine import (
+    FILLER_VARIANTS,
+    HESITATION_VARIANTS,
+    INTERRUPTION_VARIANTS,
+    ConversationalMicroBehaviorEngine,
+)
 
 
 def _persona() -> HomeownerPersona:
@@ -112,6 +117,13 @@ def test_compute_behavior_directives_sets_interruption_mode_for_hostile_pushback
 
     assert directives.interruption_mode is True
     assert "Interrupt the rep:" in directives.directive_text
+
+
+def test_micro_behavior_variant_pools_are_deep_enough():
+    assert all(len(options) >= 6 for options in HESITATION_VARIANTS.values())
+    assert all(len(options) >= 5 for options in FILLER_VARIANTS.values())
+    assert len(INTERRUPTION_VARIANTS["annoyed"]) >= 7
+    assert len(INTERRUPTION_VARIANTS["hostile"]) >= 7
 
 
 def test_compute_behavior_directives_leaves_interruption_mode_off_for_neutral_signals():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -8,12 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.db.session import SessionLocal
 from app.models.postprocess_run import PostprocessRun
 from app.models.scenario import Scenario
 from app.models.session import Session as DrillSession
 from app.models.user import User
 from app.services.adaptive_training_service import AdaptiveTrainingService
 from app.services.grading_service import GradingService
+from app.services.inflection_point_service import InflectionPointService
 from app.services.notification_service import NotificationService
 from app.services.transcript_cleanup_service import TranscriptCleanupService
 from app.services.turn_enrichment_service import TurnEnrichmentService
@@ -29,10 +32,12 @@ class SessionPostprocessService:
         self.settings = get_settings()
         self.cleanup_service = TranscriptCleanupService()
         self.grading_service = GradingService()
+        self.inflection_point_service = InflectionPointService()
         self.adaptive_training_service = AdaptiveTrainingService()
         self.notification_service = NotificationService()
         self.turn_enrichment_service = TurnEnrichmentService()
         self.warehouse_etl_service = WarehouseEtlService()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def _ensure_run_row(self, db: Session, *, session_id: str, task_type: str) -> PostprocessRun:
         row = db.scalar(
@@ -85,9 +90,16 @@ class SessionPostprocessService:
                 result = await self.cleanup_service.cleanup_session_transcript(db, session_id)
                 payload = {"artifact_id": result.id}
             elif task_type == "grade":
+                timeline = self.turn_enrichment_service.build_timeline(db, session_id)
+                inflection_artifact = self.inflection_point_service.write_session_artifact(
+                    db,
+                    session_id=session_id,
+                    timeline=timeline,
+                )
                 result = await self.grading_service.grade_session(db, session_id=session_id)
+                retry_requested = bool(getattr(result, "retry_requested", False))
                 session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
-                if session is not None:
+                if session is not None and not retry_requested:
                     scenario_name = db.scalar(select(Scenario.name).where(Scenario.id == session.scenario_id)) or "your drill"
                     await self.notification_service.notify_rep_score_ready(
                         db,
@@ -122,13 +134,24 @@ class SessionPostprocessService:
                         )
                 payload = {
                     "scorecard_id": result.id,
+                    "inflection_artifact_id": inflection_artifact.id,
                     "turn_enrichment": enrichment,
                     "adaptive_outcome_id": adaptive_outcome.id if adaptive_outcome is not None else None,
                     "warehouse_write": warehouse_write,
+                    "retry_requested": retry_requested,
                 }
             else:
                 result = await self.notification_service.notify_manager_session_completed(db, session_id)
                 payload = {"notification": result}
+
+            if task_type == "grade" and payload.get("retry_requested"):
+                delay = self.settings.notification_retry_base_seconds * (2 ** max(0, row.attempts - 1))
+                row.status = "retry_scheduled"
+                row.last_error = str(getattr(result, "retry_reason", "grading timeout"))[:1000]
+                row.next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=min(delay, 3600))
+                row.completed_at = None
+                db.commit()
+                return {"task_type": task_type, "status": "retry_scheduled", "run_id": row.id, **payload}
 
             row.status = "completed"
             row.completed_at = datetime.now(timezone.utc)
@@ -166,7 +189,25 @@ class SessionPostprocessService:
                     return {"mode": "celery", "session_id": session_id}
             except Exception:
                 logger.exception("Failed to enqueue post-session tasks, falling back inline", extra={"session_id": session_id})
-        return await self.run_inline(db, session_id)
+        for task_type in TASK_TYPES:
+            row = self._ensure_run_row(db, session_id=session_id, task_type=task_type)
+            if row.status != "completed":
+                row.status = "queued"
+                row.next_retry_at = None
+        db.commit()
+        task = asyncio.create_task(self._run_inline_background(session_id))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return {"mode": "background", "session_id": session_id}
+
+    async def _run_inline_background(self, session_id: str) -> None:
+        db = SessionLocal()
+        try:
+            await self.run_inline(db, session_id)
+        except Exception:
+            logger.exception("Background postprocess failed", extra={"session_id": session_id})
+        finally:
+            db.close()
 
     async def retry_due_runs(self, db: Session, *, limit: int = 50) -> dict[str, Any]:
         stmt = (
