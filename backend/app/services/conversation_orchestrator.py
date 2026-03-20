@@ -57,12 +57,43 @@ ACKNOWLEDGEMENT_PHRASES = (
 )
 RAPPORT_PHRASES = (
     "how are you",
+    "how's it going",
+    "how are you doing",
+    "how you doing",
+    "what's up",
+    "good to see",
     "hope you're doing well",
     "appreciate your time",
     "thanks for your time",
     "noticed",
     "neighbor",
     "local",
+    "hope i'm not interrupting",
+    "sorry to bother",
+    "sorry to bug",
+    "quick second",
+)
+# Phrases where the rep is using a nearby customer or neighbor as social proof.
+SOCIAL_PROOF_PHRASES = (
+    "house down the street",
+    "down the street",
+    "next door",
+    "neighbor's house",
+    "neighbor of yours",
+    "your neighbor",
+    "street over",
+    "few houses down",
+    "couple houses down",
+    "house over",
+    "homes in the area",
+    "homes on your street",
+    "in this neighborhood",
+    "in the neighborhood",
+    "in your neighborhood",
+    "around here",
+    "nearby homes",
+    "nearby houses",
+    "your area",
 )
 VALUE_PHRASES = (
     "save",
@@ -163,6 +194,7 @@ BUY_LIKELIHOOD_BIAS = {
 HELPFUL_SIGNALS = {
     "acknowledges_concern",
     "builds_rapport",
+    "mentions_social_proof",
     "explains_value",
     "provides_proof",
     "reduces_pressure",
@@ -810,6 +842,10 @@ class ConversationTurnAnalyzer:
             signals.append("acknowledges_concern")
         if any(phrase in text for phrase in RAPPORT_PHRASES):
             signals.append("builds_rapport")
+        if any(phrase in text for phrase in SOCIAL_PROOF_PHRASES):
+            # Rep is name-dropping a nearby customer or neighbor — distinct from
+            # generic rapport; the homeowner should react to the specific claim.
+            signals.append("mentions_social_proof")
         if any(phrase in text for phrase in VALUE_PHRASES):
             signals.append("explains_value")
         if any(phrase in text for phrase in PROOF_PHRASES):
@@ -1028,6 +1064,13 @@ class ConversationTurnAnalyzer:
             return f"React to the rep first, then surface {recommended_next_objection.replace('_', ' ')} if it still matters."
         if resolved_objections:
             return "Answer directly and test the offer with a practical homeowner follow-up."
+        if "mentions_social_proof" in behavioral_signals:
+            return (
+                "The rep just name-dropped a neighbor or nearby house. React to that specific claim first — "
+                "a real homeowner would acknowledge it (curious, skeptical, or dismissive) before anything else. "
+                "Don't skip past it. Something like 'Oh yeah? The Joneses?' or 'Hm, okay, and what were you doing for them?' "
+                "is natural. Then, if relevant, raise your first concern."
+            )
         if "provides_proof" in behavioral_signals or "explains_value" in behavioral_signals:
             return "Acknowledge the new detail briefly, then pressure-test it with a natural follow-up."
         if direct_response_required:
@@ -1048,12 +1091,20 @@ class ConversationTurnAnalyzer:
 class PromptBuilder:
     STAGE_GUIDANCE = {
         "DOOR_OPEN": (
-            "Open the interaction as a real homeowner answering the door. "
-            "Be brief, mildly guarded, and do not hand the rep easy momentum."
+            "You just opened your front door to a stranger. You don't know yet why they're here. "
+            "If the rep simply greets you ('hey how's it going', 'hi there', 'good afternoon'), "
+            "respond the way any normal person would — brief, casual, slightly guarded: "
+            "'Good, can I help you?' or 'Hey, what's up?' or 'Yeah?' or 'Fine, what can I do for you?' "
+            "Do NOT immediately interrogate their purpose before they've introduced themselves. "
+            "Let them speak first. If they mention a neighbor or nearby house, react to that specifically "
+            "before deciding how guarded to be — that's a concrete claim you'd notice. "
+            "Do not manufacture objections yet; the pitch hasn't started."
         ),
         "LISTENING": (
-            "Listen and react to the actual pitch. "
-            "Ask a short clarifying question when the rep is vague, generic, or skips credibility."
+            "The rep is now pitching. Listen to what they actually say and react to the specific content. "
+            "If they say something vague or generic, call it out with a short question. "
+            "If they mention a real detail (neighbor, price, specific service), react to that detail. "
+            "Do not give a scripted objection — respond to what was literally just said."
         ),
         "OBJECTING": (
             "Raise the next realistic objection from your queue. "
@@ -1230,8 +1281,13 @@ class PromptBuilder:
             "Never break character.\n"
             f"{sentence_rule}\n"
             f"{response_cap}\n"
-            "React only to what the rep actually says.\n"
+            "React only to what the rep ACTUALLY says — not what you expect them to say.\n"
             "Your first sentence must directly answer or react to the rep's latest point.\n"
+            "If the rep just greeted you and hasn't pitched yet, respond like a normal person answering "
+            "their door — brief and slightly guarded, not interrogating. Don't jump to 'what are you selling' "
+            "before they've had a chance to introduce themselves.\n"
+            "If the rep mentions something specific (a neighbor, a house nearby, a name), acknowledge that "
+            "specific thing before adding any resistance. Real people notice and react to concrete details.\n"
             "Do not volunteer extra information the rep has not earned.\n"
             "Carry unresolved concerns forward naturally instead of forgetting them.\n"
             f"{internal_rule}"
