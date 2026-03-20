@@ -2378,8 +2378,10 @@ class ConversationOrchestrator:
             )
             if fatigue_directive and state.ignored_objection_streak < 3:
                 reaction_goal = fatigue_directive
-        if is_first_turn:
+        if is_first_turn and "pushes_close" not in analysis.behavioral_signals:
             friction_level = min(friction_level, 1)
+            reaction_goal = self._first_turn_reaction_goal(analysis=analysis)
+        elif is_first_turn:
             reaction_goal = self._first_turn_reaction_goal(analysis=analysis)
         selected_brief_keys = self._selected_brief_keys_for_turn(
             allowed_new_objection=allowed_new_objection,
