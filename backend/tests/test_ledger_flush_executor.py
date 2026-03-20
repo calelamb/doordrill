@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import uuid
 
 import pytest
@@ -9,7 +10,8 @@ import app.db.session as db_session_module
 import app.services.ledger_service as ledger_service_module
 from app.models import Base
 from app.db.session import SessionLocal
-from app.models.session import SessionEvent
+from app.models.session import SessionEvent, SessionTurn
+from app.models.types import TurnSpeaker
 from app.services.ledger_buffer import InMemoryEventBuffer
 from app.services.ledger_service import SessionLedgerService
 
@@ -202,3 +204,27 @@ async def test_flush_multiple_events_in_one_batch(reset_db):
         assert {r.event_id for r in stored} == set(event_ids)
     finally:
         db.close()
+
+
+def test_compact_turn_payload_includes_homeowner_signal_metadata():
+    ledger = make_ledger()
+    summary: list[dict] = []
+    turn = SessionTurn(
+        session_id="session-artifact",
+        turn_index=2,
+        speaker=TurnSpeaker.AI,
+        stage="objection_handling",
+        text="Okay, that makes sense. How does that work?",
+        started_at=datetime.now(timezone.utc),
+        ended_at=datetime.now(timezone.utc),
+        objection_tags=[],
+    )
+
+    payload = ledger._compact_turn_payload(
+        turn=turn,
+        detector=ledger_service_module.HomeownerSignalDetector(),
+        homeowner_signal_summary=summary,
+    )
+
+    assert payload["homeowner_signals"]["signals"] == ["warming"]
+    assert summary[0]["signals"] == ["warming"]

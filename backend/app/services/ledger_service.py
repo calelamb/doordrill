@@ -14,6 +14,7 @@ from app.db.session import SessionLocal
 from app.models.session import SessionArtifact, SessionEvent, SessionTurn
 from app.models.types import EventDirection, TurnSpeaker
 from app.services.ledger_buffer import BaseEventBuffer
+from app.services.homeowner_signal_detector import HomeownerSignalDetector
 
 logger = logging.getLogger(__name__)
 
@@ -126,20 +127,14 @@ class SessionLedgerService:
         turns = db.scalars(
             select(SessionTurn).where(SessionTurn.session_id == session_id).order_by(SessionTurn.turn_index.asc())
         ).all()
+        detector = HomeownerSignalDetector()
+        homeowner_signal_summary: list[dict[str, Any]] = []
         canonical = [
-            {
-                "turn_index": t.turn_index,
-                "speaker": t.speaker.value,
-                "stage": t.stage,
-                "text": t.text,
-                "raw_transcript_text": t.raw_transcript_text,
-                "normalized_transcript_text": t.normalized_transcript_text,
-                "transcript_provider": t.transcript_provider,
-                "transcript_confidence": t.transcript_confidence,
-                "started_at": t.started_at.isoformat(),
-                "ended_at": t.ended_at.isoformat(),
-                "objection_tags": t.objection_tags,
-            }
+            self._compact_turn_payload(
+                turn=t,
+                detector=detector,
+                homeowner_signal_summary=homeowner_signal_summary,
+            )
             for t in turns
         ]
         storage_key = f"sessions/{session_id}/canonical_transcript.json"
@@ -147,12 +142,49 @@ class SessionLedgerService:
             session_id=session_id,
             artifact_type="canonical_transcript",
             storage_key=storage_key,
-            metadata_json={"turn_count": len(canonical), "transcript": canonical},
+            metadata_json={
+                "turn_count": len(canonical),
+                "transcript": canonical,
+                "homeowner_signal_summary": homeowner_signal_summary,
+            },
         )
         db.add(artifact)
         db.commit()
         db.refresh(artifact)
         return artifact
+
+    def _compact_turn_payload(
+        self,
+        *,
+        turn: SessionTurn,
+        detector: HomeownerSignalDetector,
+        homeowner_signal_summary: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        payload = {
+            "turn_index": turn.turn_index,
+            "speaker": turn.speaker.value,
+            "stage": turn.stage,
+            "text": turn.text,
+            "raw_transcript_text": turn.raw_transcript_text,
+            "normalized_transcript_text": turn.normalized_transcript_text,
+            "transcript_provider": turn.transcript_provider,
+            "transcript_confidence": turn.transcript_confidence,
+            "started_at": turn.started_at.isoformat(),
+            "ended_at": turn.ended_at.isoformat(),
+            "objection_tags": turn.objection_tags,
+        }
+        if turn.speaker == TurnSpeaker.AI:
+            snapshot = detector.detect(turn.text)
+            payload["homeowner_signals"] = snapshot.to_payload()
+            if snapshot.signals:
+                homeowner_signal_summary.append(
+                    {
+                        "turn_index": turn.turn_index,
+                        "signals": list(snapshot.signals),
+                        "pending_test_question": snapshot.pending_test_question,
+                    }
+                )
+        return payload
 
 
 def _parse_iso(value: str | None) -> datetime:

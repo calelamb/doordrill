@@ -19,6 +19,8 @@ from app.services.micro_behavior_engine import (
     SENTENCE_LENGTH_BY_EMOTION,
     TONE_BY_TRANSITION,
 )
+from app.services.conversation_shared import OBJECTION_SEMANTIC_ANCHORS
+from app.services.homeowner_signal_detector import HomeownerSignalDetector
 from app.services.org_prompt_rendering import build_company_context_layer
 from app.services.prompt_version_resolver import prompt_version_resolver
 
@@ -207,6 +209,26 @@ HARMFUL_SIGNALS = {
     "ignores_objection",
     "high_difficulty_backfire",
 }
+COMMUNICATION_STYLE_DIRECTIVES = {
+    "terse": (
+        "You speak in short bursts. Keep responses to one or two quick sentences and do not volunteer extra detail."
+    ),
+    "chatty": (
+        "You are a talker. Use three to four natural sentences when the stage allows it, and you may riff briefly before circling back."
+    ),
+    "confrontational": (
+        "You get right to the point and challenge claims directly. Use rhetorical pushback like 'Prove it.' when it fits."
+    ),
+    "analytical": (
+        "You ask specific, probing follow-ups and want evidence, tradeoffs, and concrete details."
+    ),
+}
+COMMUNICATION_STYLE_SENTENCE_LENGTH = {
+    "terse": "short",
+    "chatty": "long",
+    "confrontational": "short",
+    "analytical": "medium",
+}
 EDGE_CASE_DIRECTIVES = {
     "no_intro": (
         "The rep did not introduce themselves or their company. "
@@ -239,6 +261,35 @@ OBJECTION_RESOLUTION_SIGNALS: dict[str, frozenset[str]] = {
     "decision_authority": frozenset({"acknowledges_concern", "reduces_pressure", "invites_dialogue"}),
     "safety_environment": frozenset({"acknowledges_concern", "provides_proof", "personalizes_pitch"}),
 }
+STANCE_ANCHOR_BLOCKLIST = {
+    "firm_resistance": {"curious", "interested in", "open to"},
+    "cautiously_open": {"skeptical of", "doubts", "refuses"},
+    "low_friction_considering": {"refuses", "stonewalling", "not interested"},
+    "aggressive_pushback": {"curious", "interested in", "open to"},
+    "warming": {"skeptical of", "doubts", "refuses"},
+    "resigned": {"still fighting", "raising new objections"},
+}
+POSTURE_FRICTION_RANGES = {
+    "aggressive_pushback": (3, 5),
+    "pushing_back": (3, 5),
+    "shutting_down": (3, 5),
+    "defensive": (2, 4),
+    "guarded": (1, 3),
+    "testing_claims": (1, 3),
+    "reserved": (1, 3),
+    "evaluating": (1, 3),
+    "warming": (0, 2),
+    "warming_up": (0, 2),
+    "open": (0, 1),
+    "resigned": (0, 3),
+}
+BOOKING_SCORE_THRESHOLDS = {
+    "booking_possible": 6,
+    "inspection_only": 3,
+    "info_only": 1,
+    "not_allowed": 0,
+}
+MAX_RAPPORT_SCORE = 6
 EMOTION_RESPONSE_STYLE = {
     "interested": "You are leaning in and want specifics. Ask practical next-step questions if the rep is clear.",
     "curious": "You are open but still evaluating. Ask follow-up questions and invite details.",
@@ -287,14 +338,6 @@ OBJECTION_WORDING_VARIANTS: dict[str, tuple[str, ...]] = {
         "I am busy right now",
         "I do not have room for this today",
     ),
-}
-OBJECTION_SEMANTIC_ANCHORS: dict[str, tuple[str, ...]] = {
-    "price": ("budget", "monthly cost", "value"),
-    "trust": ("legit", "proof", "company reputation"),
-    "spouse": ("partner", "shared decision", "not deciding alone"),
-    "incumbent_provider": ("already covered", "switching", "current provider"),
-    "safety_environment": ("kids", "pets", "chemicals"),
-    "timing": ("busy", "schedule", "right now"),
 }
 NEXT_STEP_ACCEPTABILITY_ORDER = {
     "not_allowed": 0,
@@ -417,10 +460,12 @@ class ScenarioSnapshot:
 class ConversationState:
     stage: str = DEFAULT_STAGE
     emotion: str = "neutral"
+    emotion_momentum: int = 0
     resistance_level: int = 2
     rep_turns: int = 0
     ai_turns: int = 0
     rapport_score: int = 0
+    turns_since_positive_signal: int = 0
     persona_concerns: list[str] = field(default_factory=list)
     active_objections: list[str] = field(default_factory=list)
     queued_objections: list[str] = field(default_factory=list)
@@ -428,6 +473,9 @@ class ConversationState:
     active_edge_cases: list[str] = field(default_factory=list)
     objection_pressure: int = 0
     ignored_objection_streak: int = 0
+    interruption_count: int = 0
+    objection_raise_count: dict[str, int] = field(default_factory=dict)
+    pending_test_question: str | None = None
     last_behavior_signals: list[str] = field(default_factory=list)
     reaction_intent: str = "React briefly and keep the homeowner grounded."
     homeowner_posture: str = "reserved"
@@ -678,8 +726,11 @@ class TurnAnalysis:
     recommended_next_objection: str | None
     reaction_intent: str
     homeowner_posture: str
+    homeowner_signals: list[str]
     direct_response_required: bool
     confidence: float
+    pending_test_question: str | None = None
+    missed_pending_test: bool = False
     resolution_progress: dict[str, int] = field(default_factory=dict)
 
     def to_payload(self) -> dict[str, Any]:
@@ -697,8 +748,11 @@ class TurnAnalysis:
             "recommended_next_objection": self.recommended_next_objection,
             "reaction_intent": self.reaction_intent,
             "homeowner_posture": self.homeowner_posture,
+            "homeowner_signals": list(self.homeowner_signals),
             "direct_response_required": self.direct_response_required,
             "confidence": self.confidence,
+            "pending_test_question": self.pending_test_question,
+            "missed_pending_test": self.missed_pending_test,
             "resolution_progress": dict(self.resolution_progress),
         }
 
@@ -734,6 +788,9 @@ class HomeownerResponsePlan:
 
 
 class ConversationTurnAnalyzer:
+    def __init__(self) -> None:
+        self._homeowner_signal_detector = HomeownerSignalDetector()
+
     def analyze(
         self,
         *,
@@ -742,9 +799,22 @@ class ConversationTurnAnalyzer:
         context: SessionPromptContext | None,
         db: Session | None = None,
     ) -> TurnAnalysis:
+        latest_homeowner_text = self._latest_homeowner_text(context)
+        homeowner_signal_snapshot = self._homeowner_signal_detector.detect(latest_homeowner_text)
+        pending_test_question = state.pending_test_question or homeowner_signal_snapshot.pending_test_question
         text = rep_text.lower()
         referenced_concerns = self._extract_objection_tags(text, db=db)
         behavioral_signals = self._evaluate_rep_behavior(text, rep_text)
+        pending_test_addressed = self._check_pending_test(
+            pending_test_question=pending_test_question,
+            rep_text=rep_text,
+            behavioral_signals=behavioral_signals,
+        )
+        missed_pending_test = bool(pending_test_question) and not pending_test_addressed
+        if missed_pending_test:
+            behavioral_signals = self._dedupe([*behavioral_signals, "ignores_objection"])
+        elif pending_test_question:
+            pending_test_question = None
         addressed_objections = self._addressed_objections(
             referenced_concerns=referenced_concerns,
             active_objections=list(state.active_objections),
@@ -758,6 +828,8 @@ class ConversationTurnAnalyzer:
             behavioral_signals=behavioral_signals,
         )
         objection_status = self._overall_objection_status(objection_status_map, resolved, partial)
+        if missed_pending_test:
+            objection_status = "ignored"
         helpful_count = sum(1 for signal in behavioral_signals if signal in HELPFUL_SIGNALS)
         harmful_count = sum(1 for signal in behavioral_signals if signal in HARMFUL_SIGNALS)
         rapport_delta = (
@@ -801,13 +873,17 @@ class ConversationTurnAnalyzer:
             resolved_objections=resolved,
             recommended_next_objection=recommended_next_objection,
             behavioral_signals=behavioral_signals,
+            homeowner_signals=homeowner_signal_snapshot.signals,
+            pending_test_question=pending_test_question,
+            missed_pending_test=missed_pending_test,
         )
         confidence = min(
             0.95,
             0.55
             + (0.04 * len(behavioral_signals))
             + (0.05 * len(referenced_concerns))
-            + (0.03 * len(resolved)),
+            + (0.03 * len(resolved))
+            + (0.02 * len(homeowner_signal_snapshot.signals)),
         )
         return TurnAnalysis(
             stage_intent=stage_intent,
@@ -823,8 +899,11 @@ class ConversationTurnAnalyzer:
             recommended_next_objection=recommended_next_objection,
             reaction_intent=reaction_intent,
             homeowner_posture=homeowner_posture,
+            homeowner_signals=homeowner_signal_snapshot.signals,
             direct_response_required=direct_response_required,
             confidence=round(confidence, 3),
+            pending_test_question=pending_test_question,
+            missed_pending_test=missed_pending_test,
             resolution_progress=progress,
         )
 
@@ -1055,9 +1134,18 @@ class ConversationTurnAnalyzer:
         resolved_objections: list[str],
         recommended_next_objection: str | None,
         behavioral_signals: list[str],
+        homeowner_signals: list[str],
+        pending_test_question: str | None,
+        missed_pending_test: bool,
     ) -> str:
+        del homeowner_signals
         if stage_intent == "attempt_close" and objection_status != "resolved":
             return "Push back on the closing pressure before discussing next steps."
+        if missed_pending_test and pending_test_question:
+            return (
+                f"The rep dodged your test question: '{pending_test_question}'. "
+                "Bring it back directly and make them answer it before moving on."
+            )
         if objection_status == "ignored":
             return "React directly, then restate the unresolved concern without softening."
         if resolved_objections and recommended_next_objection:
@@ -1087,6 +1175,36 @@ class ConversationTurnAnalyzer:
             ordered.append(value)
         return ordered
 
+    def _latest_homeowner_text(self, context: SessionPromptContext | None) -> str | None:
+        if context is None:
+            return None
+        for turn in reversed(context.turn_history):
+            if turn.speaker == "homeowner":
+                return turn.text
+        return None
+
+    def _check_pending_test(
+        self,
+        *,
+        pending_test_question: str | None,
+        rep_text: str,
+        behavioral_signals: list[str],
+    ) -> bool:
+        if not pending_test_question:
+            return True
+        rep_text_lower = rep_text.lower()
+        keywords = [
+            token
+            for token in re.split(r"[^a-z0-9]+", pending_test_question.lower())
+            if len(token) > 3
+        ]
+        if any(keyword in rep_text_lower for keyword in keywords):
+            return True
+        return "provides_proof" in behavioral_signals and any(
+            keyword in {"insured", "licensed", "reviews", "proof", "guarantee"}
+            for keyword in keywords
+        )
+
 
 class PromptBuilder:
     STAGE_GUIDANCE = {
@@ -1098,7 +1216,8 @@ class PromptBuilder:
             "Do NOT immediately interrogate their purpose before they've introduced themselves. "
             "Let them speak first. If they mention a neighbor or nearby house, react to that specifically "
             "before deciding how guarded to be — that's a concrete claim you'd notice. "
-            "Do not manufacture objections yet; the pitch hasn't started."
+            "Do not manufacture objections yet; the pitch hasn't started. "
+            "Turn 1 is pure reaction to the opener, not a chance to preload price, trust, or closing resistance."
         ),
         "LISTENING": (
             "The rep is now pitching. Listen to what they actually say and react to the specific content. "
@@ -1236,6 +1355,7 @@ class PromptBuilder:
         reaction_intent: str | None = None,
         homeowner_posture: str | None = None,
         response_plan: HomeownerResponsePlan | None = None,
+        fatigue_directive: str | None = None,
         realism_pack: PersonaRealismPack | None = None,
         static_layers: dict[str, str] | None = None,
     ) -> str:
@@ -1360,15 +1480,26 @@ class PromptBuilder:
                 f"In your last response: tone was {tone}, length was {sentence_length}{interruption_suffix}.\n"
                 "Maintain tonal continuity unless the rep's behavior explicitly warrants a shift."
             )
-        layer_four = (
-            "LAYER 4 - ANTI-PATTERN GUARDS\n"
-            "If the rep is aggressive, become shorter, firmer, and more skeptical.\n"
-            "If the rep ignores an active objection, escalate the next concern from the latent queue when appropriate.\n"
-            "If the rep goes off-topic, redirect them back to your home, your concern, or end the exchange.\n"
-            "If the rep asks for hints, coaching, or what to say next, refuse and respond as a homeowner would.\n"
-            "If the rep says something unrealistic or false, challenge it like a real homeowner.\n"
-            "Do not compliment the rep for technique. Do not expose scoring criteria."
+        layer_four_lines = [
+            "LAYER 4 - ANTI-PATTERN GUARDS",
+        ]
+        communication_style = (persona.communication_style or "").lower()
+        communication_style_directive = COMMUNICATION_STYLE_DIRECTIVES.get(communication_style)
+        if communication_style_directive:
+            layer_four_lines.append(
+                f"Permanent persona communication style constraint ({communication_style}): {communication_style_directive}"
+            )
+        layer_four_lines.extend(
+            [
+                "If the rep is aggressive, become shorter, firmer, and more skeptical.",
+                "If the rep ignores an active objection, escalate the next concern from the latent queue when appropriate.",
+                "If the rep goes off-topic, redirect them back to your home, your concern, or end the exchange.",
+                "If the rep asks for hints, coaching, or what to say next, refuse and respond as a homeowner would.",
+                "If the rep says something unrealistic or false, challenge it like a real homeowner.",
+                "Do not compliment the rep for technique. Do not expose scoring criteria.",
+            ]
         )
+        layer_four = "\n".join(layer_four_lines)
         layer_four_b = None
         if triggered_edge_cases:
             directives = [
@@ -1385,10 +1516,16 @@ class PromptBuilder:
                 "The following directives apply to this session and take precedence over general guidance above.\n"
                 f"{conversation_prompt_content.strip()}"
             )
+        layer_five_fatigue = None
+        if fatigue_directive and fatigue_directive.strip():
+            layer_five_fatigue = (
+                "LAYER 5A - CONVERSATION FATIGUE\n"
+                f"{fatigue_directive.strip()}"
+            )
         layer_five = None
         if company_context and company_context.strip():
             layer_five = (
-                "LAYER 5 - WHAT YOU MAY KNOW ABOUT THIS COMPANY\n"
+                "LAYER 5B - WHAT YOU MAY KNOW ABOUT THIS COMPANY\n"
                 "Before they knocked, you may have encountered this company through a flyer, neighbor mention, "
                 "or a quick online search. The following is what you found. Use it to make your objections "
                 "specific and grounded - but speak naturally, not like you memorized it. Express uncertainty "
@@ -1416,6 +1553,8 @@ class PromptBuilder:
             parts.append(layer_four_b)
         if layer_five_override:
             parts.append(layer_five_override)
+        if layer_five_fatigue:
+            parts.append(layer_five_fatigue)
         if layer_five:
             parts.append(layer_five)
         parts.append(hard_rule)
@@ -1770,9 +1909,15 @@ class ConversationOrchestrator:
             db=db,
         )
         objection_tags = list(analysis.referenced_concerns)
-        if state.active_objections and not analysis.resolved_objections and analysis.objection_status in {"ignored", "carried"}:
+        if turn_number > 1 and state.active_objections and not analysis.resolved_objections and analysis.objection_status in {"ignored", "carried"}:
             analysis.behavioral_signals = self._dedupe([*analysis.behavioral_signals, "ignores_objection"])
             analysis.pressure_delta += 1
+            if analysis.objection_status == "carried":
+                analysis.objection_status = "ignored"
+                analysis.objection_status_map = {
+                    tag: ("ignored" if status == "carried" else status)
+                    for tag, status in analysis.objection_status_map.items()
+                }
         if context is not None and context.scenario_snapshot.difficulty >= 4 and any(
             signal in {"pushes_close", "dismisses_concern"} for signal in analysis.behavioral_signals
         ):
@@ -1796,16 +1941,25 @@ class ConversationOrchestrator:
             has_active_objections=bool(state.active_objections),
         )
         self._surface_objections_from_analysis(state, analysis)
+        if state.ignored_objection_streak >= 3 and "ignored_objection_wall" not in active_edge_cases:
+            active_edge_cases.append("ignored_objection_wall")
+        state.active_edge_cases = list(self._dedupe(active_edge_cases))
         state.objection_status_map = dict(analysis.objection_status_map)
-        state.rapport_score = max(-2, min(4, state.rapport_score + analysis.rapport_delta))
+        state.rapport_score = max(-2, min(MAX_RAPPORT_SCORE, state.rapport_score + analysis.rapport_delta))
+        helpful_signal_count = sum(1 for signal in analysis.behavioral_signals if signal in HELPFUL_SIGNALS)
+        if helpful_signal_count:
+            state.turns_since_positive_signal = 0
+        else:
+            state.turns_since_positive_signal += 1
         state.objection_pressure = self._next_objection_pressure_from_analysis(
             current_pressure=objection_pressure_before,
             analysis=analysis,
             active_count=len(state.active_objections),
             ignored_streak=state.ignored_objection_streak,
         )
-        state.emotion = self._transition_emotion_from_analysis(
+        state.emotion, state.emotion_momentum = self._transition_emotion_from_analysis(
             current_emotion=emotion_before,
+            current_momentum=state.emotion_momentum,
             pressure_before=objection_pressure_before,
             pressure_after=state.objection_pressure,
             analysis=analysis,
@@ -1813,6 +1967,7 @@ class ConversationOrchestrator:
         state.resistance_level = self._emotion_to_resistance(state.emotion)
         state.last_behavior_signals = list(analysis.behavioral_signals)
         state.homeowner_posture = analysis.homeowner_posture
+        state.pending_test_question = analysis.pending_test_question
         state.last_turn_analysis = analysis.to_payload()
         state.last_updated = datetime.now(timezone.utc)
 
@@ -1833,6 +1988,16 @@ class ConversationOrchestrator:
             emotion_after=state.emotion,
             behavioral_signals=analysis.behavioral_signals,
             active_objections=list(state.active_objections),
+            communication_style=context.persona.communication_style if context is not None else None,
+            ignored_objection_streak=state.ignored_objection_streak,
+            rep_turns=state.rep_turns,
+            rapport_score=state.rapport_score,
+        )
+        if behavior_directives.interruption_mode:
+            state.interruption_count += 1
+        fatigue_directive = self._fatigue_modifier(
+            rep_turns=state.rep_turns,
+            rapport_score=state.rapport_score,
         )
         system_prompt = self._build_system_prompt(
             stage_after=stage_after,
@@ -1843,6 +2008,7 @@ class ConversationOrchestrator:
             reaction_intent=response_plan.reaction_goal,
             homeowner_posture=analysis.homeowner_posture,
             response_plan=response_plan,
+            fatigue_directive=fatigue_directive,
             recent_turns=[*(context.turn_history if context is not None else []), ConversationTurnRecord(speaker="rep", text=rep_text, stage=stage_after)],
         )
 
@@ -1957,40 +2123,82 @@ class ConversationOrchestrator:
         self,
         *,
         current_emotion: str,
+        current_momentum: int,
         pressure_before: int,
         pressure_after: int,
         analysis: TurnAnalysis,
-    ) -> str:
+    ) -> tuple[str, int]:
         helpful_count = sum(1 for signal in analysis.behavioral_signals if signal in HELPFUL_SIGNALS)
         harmful_count = sum(1 for signal in analysis.behavioral_signals if signal in HARMFUL_SIGNALS)
+        next_momentum = self._next_emotion_momentum(
+            current_momentum=current_momentum,
+            helpful_count=helpful_count,
+            harmful_count=harmful_count,
+        )
 
         if (
             analysis.objection_status == "ignored"
             and "pushes_close" in analysis.behavioral_signals
             and pressure_after >= 4
         ):
-            return "hostile"
+            return "hostile", min(-1, next_momentum)
         if analysis.objection_status == "ignored" and pressure_after >= 4:
-            return "hostile" if current_emotion == "annoyed" else "annoyed"
+            target_emotion = "hostile" if current_emotion == "annoyed" else "annoyed"
+            return target_emotion, min(-1, next_momentum)
         if "dismisses_concern" in analysis.behavioral_signals and pressure_after >= 4:
-            return "hostile"
+            return "hostile", min(-1, next_momentum)
         if pressure_after >= MAX_OBJECTION_PRESSURE:
-            return "hostile"
+            return "hostile", min(-1, next_momentum)
+        if current_emotion == "annoyed" and "pushes_close" in analysis.behavioral_signals:
+            return "hostile", min(-1, next_momentum)
+
+        target_emotion = current_emotion
         if analysis.resolved_objections and helpful_count >= 3 and pressure_after <= 1:
-            return "curious" if current_emotion in {"skeptical", "neutral"} else self._soften_emotion(current_emotion, 1)
-        if analysis.resolved_objections and helpful_count >= 2:
-            return self._soften_emotion(current_emotion, 1)
-        if analysis.partially_addressed_objections and helpful_count >= 2 and pressure_after <= pressure_before:
-            return self._soften_emotion(current_emotion, 1)
-        if harmful_count >= 2 or pressure_after > pressure_before:
-            return self._harden_emotion(current_emotion, 1)
-        if pressure_after < pressure_before:
-            return self._soften_emotion(current_emotion, 1)
-        if current_emotion == "neutral" and helpful_count >= 1:
-            return "curious"
-        if current_emotion == "neutral" and harmful_count >= 1:
-            return "skeptical"
-        return current_emotion
+            target_emotion = (
+                "curious" if current_emotion in {"skeptical", "neutral"} else self._soften_emotion(current_emotion, 1)
+            )
+        elif analysis.resolved_objections and helpful_count >= 2:
+            target_emotion = self._soften_emotion(current_emotion, 1)
+        elif analysis.partially_addressed_objections and helpful_count >= 2 and pressure_after <= pressure_before:
+            target_emotion = self._soften_emotion(current_emotion, 1)
+        elif harmful_count >= 2 or pressure_after > pressure_before:
+            target_emotion = self._harden_emotion(current_emotion, 1)
+        elif pressure_after < pressure_before:
+            target_emotion = self._soften_emotion(current_emotion, 1)
+        elif current_emotion == "neutral" and helpful_count >= 1:
+            target_emotion = "curious"
+        elif current_emotion == "neutral" and harmful_count >= 1:
+            target_emotion = "skeptical"
+
+        if self._is_warming_transition(current_emotion=current_emotion, target_emotion=target_emotion):
+            if self._strong_recovery_turn(analysis=analysis, helpful_count=helpful_count):
+                return target_emotion, max(2, next_momentum)
+            if next_momentum >= 2:
+                return self._soften_emotion(current_emotion, 1), next_momentum
+            return current_emotion, next_momentum
+        return target_emotion, next_momentum
+
+    def _next_emotion_momentum(
+        self,
+        *,
+        current_momentum: int,
+        helpful_count: int,
+        harmful_count: int,
+    ) -> int:
+        if helpful_count > harmful_count:
+            return min(3, current_momentum + 1) if current_momentum > 0 else 1
+        if harmful_count > helpful_count:
+            return max(-3, current_momentum - 1) if current_momentum < 0 else -1
+        return current_momentum
+
+    def _is_warming_transition(self, *, current_emotion: str, target_emotion: str) -> bool:
+        return self._emotion_to_resistance(target_emotion) < self._emotion_to_resistance(current_emotion)
+
+    def _strong_recovery_turn(self, *, analysis: TurnAnalysis, helpful_count: int) -> bool:
+        if helpful_count >= 3:
+            return True
+        strong_combo = {"acknowledges_concern", "reduces_pressure", "personalizes_pitch"}
+        return strong_combo.issubset(set(analysis.behavioral_signals))
 
     def _initialize_state_from_context(self, context: SessionPromptContext) -> ConversationState:
         context.persona = self._enrich_persona(context.persona, context.scenario_snapshot)
@@ -2071,25 +2279,37 @@ class ConversationOrchestrator:
         stage_after: str,
     ) -> HomeownerResponsePlan:
         realism_pack = context.realism_pack if context is not None else None
+        persona = context.persona if context is not None else None
+        is_first_turn = self._is_first_meaningful_turn(state)
         fast_path_prompt = analysis.direct_response_required and analysis.objection_status not in {"ignored"} and len(state.active_objections) <= 1
         friction_gates = self._friction_gates_for_turn(state=state, analysis=analysis, realism_pack=realism_pack)
-        next_step_acceptability = self._next_step_acceptability_from_gates(
+        booking_score = self._compute_booking_score(state=state, persona=persona)
+        next_step_acceptability = self._next_step_acceptability_from_score(
             stage_after=stage_after,
-            friction_gates=friction_gates,
-            realism_pack=realism_pack,
+            booking_score=booking_score,
+            persona=persona,
             active_objections=list(state.active_objections),
-            objection_pressure=state.objection_pressure,
         )
         friction_level = self._friction_level_for_turn(
             next_step_acceptability=next_step_acceptability,
             active_objections=list(state.active_objections),
             objection_pressure=state.objection_pressure,
             emotion=state.emotion,
+            turns_since_positive_signal=state.turns_since_positive_signal,
         )
+        if "warming" in analysis.homeowner_signals:
+            friction_level = max(1, friction_level - 1)
+        if "hardening" in analysis.homeowner_signals or analysis.missed_pending_test:
+            friction_level = min(5, friction_level + 1)
         allowed_new_objection = self._allowed_new_objection_for_turn(
             analysis=analysis,
             state=state,
             next_step_acceptability=next_step_acceptability,
+        )
+        if is_first_turn:
+            allowed_new_objection = None
+        primary_objection = allowed_new_objection or (
+            analysis.recommended_next_objection if analysis.objection_status == "ignored" else None
         )
         semantic_anchors = self._semantic_anchors_for_turn(
             analysis=analysis,
@@ -2097,21 +2317,70 @@ class ConversationOrchestrator:
             allowed_new_objection=allowed_new_objection,
             rep_text=rep_text,
         )
+        if is_first_turn:
+            semantic_anchors = self._first_turn_semantic_anchors(
+                analysis=analysis,
+                rep_text=rep_text,
+            )
         wording_rotation_hint = self._wording_rotation_hint(
             state=state,
-            primary_objection=allowed_new_objection or analysis.recommended_next_objection,
+            primary_objection=primary_objection,
         )
+        if is_first_turn:
+            wording_rotation_hint = None
         stance = self._response_stance_for_turn(
             state=state,
             next_step_acceptability=next_step_acceptability,
             friction_level=friction_level,
             analysis=analysis,
         )
+        clamped_friction_level = self._resolve_posture_friction_conflict(
+            posture=analysis.homeowner_posture,
+            friction_level=friction_level,
+        )
+        if clamped_friction_level != friction_level:
+            logger.warning(
+                "posture_friction_conflict_clamped",
+                extra={
+                    "posture": analysis.homeowner_posture,
+                    "friction_level": friction_level,
+                    "clamped_friction_level": clamped_friction_level,
+                },
+            )
+            friction_level = clamped_friction_level
+            stance = self._response_stance_for_turn(
+                state=state,
+                next_step_acceptability=next_step_acceptability,
+                friction_level=friction_level,
+                analysis=analysis,
+            )
+        semantic_anchors = self._validate_anchors(semantic_anchors, stance)
         reaction_goal = analysis.reaction_intent
         if next_step_acceptability == "not_allowed" and analysis.stage_intent == "attempt_close":
             reaction_goal = "Answer the rep directly, then reject the close because they have not earned enough trust or value yet."
         elif fast_path_prompt:
             reaction_goal = "Give a direct homeowner answer first, then only add one grounded concern if it still matters."
+        if state.ignored_objection_streak and not is_first_turn:
+            reaction_goal = self._ignored_objection_reaction_goal(
+                streak=state.ignored_objection_streak,
+                objection=(
+                    analysis.pending_test_question
+                    if analysis.missed_pending_test
+                    else (primary_objection or (state.active_objections[0] if state.active_objections else None))
+                ),
+            )
+        if primary_objection and not is_first_turn:
+            raise_count = self._increment_objection_raise_count(state, primary_objection)
+            fatigue_directive = self._objection_fatigue_directive(
+                objection=primary_objection,
+                raise_count=raise_count,
+                emotion=state.emotion,
+            )
+            if fatigue_directive and state.ignored_objection_streak < 3:
+                reaction_goal = fatigue_directive
+        if is_first_turn:
+            friction_level = min(friction_level, 1)
+            reaction_goal = self._first_turn_reaction_goal(analysis=analysis)
         selected_brief_keys = self._selected_brief_keys_for_turn(
             allowed_new_objection=allowed_new_objection,
             semantic_anchors=semantic_anchors,
@@ -2155,24 +2424,27 @@ class ConversationOrchestrator:
             "decision_readiness": decision_gate,
         }
 
-    def _next_step_acceptability_from_gates(
+    def _next_step_acceptability_from_score(
         self,
         *,
         stage_after: str,
-        friction_gates: dict[str, bool],
-        realism_pack: PersonaRealismPack | None,
+        booking_score: int,
+        persona: HomeownerPersona | None,
         active_objections: list[str],
-        objection_pressure: int,
     ) -> str:
-        if not friction_gates.get("trust") or objection_pressure >= 4:
-            return "not_allowed"
-        if active_objections or not friction_gates.get("value"):
+        del stage_after
+        threshold_shift = 2 if persona is not None and persona.buy_likelihood == "low" else 0
+        booking_threshold = BOOKING_SCORE_THRESHOLDS["booking_possible"] + threshold_shift
+        inspection_threshold = BOOKING_SCORE_THRESHOLDS["inspection_only"] + threshold_shift
+        info_threshold = BOOKING_SCORE_THRESHOLDS["info_only"] + threshold_shift
+
+        if booking_score >= booking_threshold and not active_objections:
+            return "booking_possible"
+        if booking_score >= inspection_threshold and not active_objections:
+            return "inspection_only"
+        if booking_score >= info_threshold:
             return "info_only"
-        if not friction_gates.get("decision_readiness"):
-            return "inspection_only"
-        if realism_pack is not None and realism_pack.willingness_to_book == "very_reluctant" and stage_after == "close_attempt":
-            return "inspection_only"
-        return "booking_possible"
+        return "not_allowed"
 
     def _friction_level_for_turn(
         self,
@@ -2181,10 +2453,12 @@ class ConversationOrchestrator:
         active_objections: list[str],
         objection_pressure: int,
         emotion: str,
+        turns_since_positive_signal: int,
     ) -> int:
         base = 2 + len(active_objections)
         base += 1 if emotion in {"skeptical", "annoyed", "hostile"} else 0
         base += 1 if objection_pressure >= 3 else 0
+        base += min(2, turns_since_positive_signal // 2)
         base -= NEXT_STEP_ACCEPTABILITY_ORDER.get(next_step_acceptability, 0)
         return max(1, min(5, base))
 
@@ -2225,6 +2499,8 @@ class ConversationOrchestrator:
             anchors.extend(
                 OBJECTION_SEMANTIC_ANCHORS.get(state.active_objections[0], (state.active_objections[0].replace("_", " "),))
             )
+        if analysis.pending_test_question and analysis.missed_pending_test:
+            anchors.append(analysis.pending_test_question.lower())
         if "?" in rep_text:
             anchors.append("direct reaction before any new objection")
         deduped: list[str] = []
@@ -2236,6 +2512,23 @@ class ConversationOrchestrator:
             seen.add(normalized)
             deduped.append(normalized)
         return deduped[:6]
+
+    def _first_turn_semantic_anchors(
+        self,
+        *,
+        analysis: TurnAnalysis,
+        rep_text: str,
+    ) -> list[str]:
+        anchors: list[str] = []
+        if analysis.direct_response_required:
+            anchors.append("answer the direct question")
+        if "mentions_social_proof" in analysis.behavioral_signals:
+            anchors.append("react to the neighbor or nearby-house mention")
+        if any(signal in analysis.behavioral_signals for signal in {"builds_rapport", "neutral_delivery"}):
+            anchors.append("give a natural first-door reaction")
+        if "?" in rep_text:
+            anchors.append("react directly before adding anything else")
+        return self._dedupe([anchor for anchor in anchors if anchor])[:4]
 
     def _wording_rotation_hint(self, *, state: ConversationState, primary_objection: str | None) -> str | None:
         if not primary_objection:
@@ -2264,6 +2557,117 @@ class ConversationOrchestrator:
         if analysis.direct_response_required:
             return "direct_but_guarded"
         return "guarded"
+
+    def _compute_booking_score(
+        self,
+        *,
+        state: ConversationState,
+        persona: HomeownerPersona | None,
+    ) -> int:
+        score = 0
+        score += min(3, state.rapport_score)
+        score += len(state.resolved_objections) * 2
+        score -= state.objection_pressure
+        score -= 1 if state.emotion in {"annoyed", "hostile"} else 0
+        score -= len(state.active_objections)
+        if persona is not None and persona.buy_likelihood in {"high", "medium-high"}:
+            score += 1
+        return score
+
+    def _is_first_meaningful_turn(self, state: ConversationState) -> bool:
+        return state.rep_turns <= 1
+
+    def _first_turn_reaction_goal(self, analysis: TurnAnalysis) -> str:
+        detail_clause = ""
+        if "mentions_social_proof" in analysis.behavioral_signals:
+            detail_clause = " If they mentioned a neighbor or nearby house, react to that specific detail first."
+        elif analysis.direct_response_required:
+            detail_clause = " If they asked you something directly, answer that first."
+        return (
+            "This is turn 1. React ONLY to what the rep just said — nothing else. "
+            "If they greeted you, greet them back naturally."
+            f"{detail_clause} "
+            "No objections. No interrogation. No imported sales resistance. Just be a person at the door."
+        )
+
+    def _validate_anchors(self, anchors: list[str], stance: str) -> list[str]:
+        blocked = STANCE_ANCHOR_BLOCKLIST.get(stance, set())
+        if not blocked:
+            return anchors
+        return [
+            anchor
+            for anchor in anchors
+            if not any(blocked_phrase in anchor.lower() for blocked_phrase in blocked)
+        ]
+
+    def _resolve_posture_friction_conflict(
+        self,
+        *,
+        posture: str,
+        friction_level: int,
+    ) -> int:
+        lo, hi = POSTURE_FRICTION_RANGES.get(posture, (0, 5))
+        return max(lo, min(hi, friction_level))
+
+    def _ignored_objection_reaction_goal(self, *, streak: int, objection: str | None) -> str:
+        topic = self._format_objection_label(objection)
+        if streak == 1:
+            return (
+                f"The rep did not address your last concern about {topic}. "
+                "Make a short, pointed re-raise before letting them continue."
+            )
+        if streak == 2:
+            return (
+                f"The rep has now ignored your concern about {topic} twice. "
+                f"Be more insistent and frame {topic} as the blocker that must be addressed before you go further."
+            )
+        return (
+            f"You are done waiting for an answer on {topic}. "
+            "Interrupt the rep and tell them you are ending the conversation unless they address it right now."
+        )
+
+    def _increment_objection_raise_count(self, state: ConversationState, objection: str) -> int:
+        next_count = int(state.objection_raise_count.get(objection, 0) or 0) + 1
+        state.objection_raise_count[objection] = next_count
+        return next_count
+
+    def _objection_fatigue_directive(
+        self,
+        *,
+        objection: str,
+        raise_count: int,
+        emotion: str,
+    ) -> str | None:
+        if raise_count < 3:
+            return None
+        objection_label = self._format_objection_label(objection)
+        if emotion in {"annoyed", "hostile"}:
+            return (
+                f"You have raised {objection_label} {raise_count} times. "
+                "You are done repeating yourself. Make clear this is now a dealbreaker."
+            )
+        return (
+            f"You have raised {objection_label} {raise_count} times and still do not have a satisfying answer. "
+            "Acknowledge that it remains a sticking point, but stop fighting as hard and see if something else changes your mind."
+        )
+
+    def _format_objection_label(self, objection: str | None) -> str:
+        return (objection or "that issue").replace("_", " ")
+
+    def _fatigue_modifier(self, *, rep_turns: int, rapport_score: int) -> str | None:
+        wrap_up_turn = 18 if rapport_score >= 5 else 15
+        mild_turn = wrap_up_turn - 5
+        if rep_turns < mild_turn:
+            return None
+        if rep_turns < wrap_up_turn:
+            return (
+                "You've been at the door for a while now. You're getting slightly fatigued. "
+                "Keep responses shorter, a little more clipped, and start glancing back inside."
+            )
+        return (
+            "This conversation has gone on too long. You are ready to wrap it up. "
+            "Tell the rep you need to get back inside, but if they have earned it you can leave the door open for a leave-behind or follow-up."
+        )
 
     def _selected_brief_keys_for_turn(
         self,
@@ -2316,6 +2720,10 @@ class ConversationOrchestrator:
         emotion_after: str,
         behavioral_signals: list[str],
         active_objections: list[str],
+        communication_style: str | None = None,
+        ignored_objection_streak: int = 0,
+        rep_turns: int = 0,
+        rapport_score: int = 0,
     ) -> BehaviorDirectives:
         del active_objections
 
@@ -2329,19 +2737,37 @@ class ConversationOrchestrator:
                 tone = DEFAULT_TONE_BY_EMOTION.get(emotion_after, "measured")
 
         sentence_length = SENTENCE_LENGTH_BY_EMOTION.get(emotion_after, "medium")
+        style_key = (communication_style or "").lower()
+        style_sentence_length = COMMUNICATION_STYLE_SENTENCE_LENGTH.get(style_key)
+        if style_sentence_length is not None:
+            sentence_length = style_sentence_length
         if "pushes_close" in behavioral_signals and emotion_after in {"annoyed", "hostile"}:
             sentence_length = "short"
-
-        interruption_mode = emotion_after in {"annoyed", "hostile"} and any(
-            signal in {"ignores_objection", "pushes_close", "dismisses_concern"}
-            for signal in behavioral_signals
+        sentence_length = self._apply_fatigue_sentence_length(
+            sentence_length=sentence_length,
+            rep_turns=rep_turns,
+            rapport_score=rapport_score,
         )
+
+        if ignored_objection_streak > 0:
+            interruption_mode = ignored_objection_streak >= 3
+        else:
+            interruption_mode = emotion_after in {"annoyed", "hostile"} and any(
+                signal in {"ignores_objection", "pushes_close", "dismisses_concern"}
+                for signal in behavioral_signals
+            )
 
         length_instruction = {
             "short": "One sentence only.",
             "medium": "Two sentences max.",
             "long": "Up to three sentences.",
         }.get(sentence_length, "Two sentences max.")
+        communication_instruction = ""
+        style_directive = COMMUNICATION_STYLE_DIRECTIVES.get(style_key)
+        if style_directive:
+            communication_instruction = (
+                f"\nCommunication style: {style_key}. {style_directive}"
+            )
         interruption_instruction = ""
         if interruption_mode:
             interruption_instruction = (
@@ -2352,6 +2778,7 @@ class ConversationOrchestrator:
             "LAYER 3C - BEHAVIORAL DIRECTIVES\n"
             f"Tone for this response: {tone}. Write in this register throughout.\n"
             f"Response length: {sentence_length}. {length_instruction}"
+            f"{communication_instruction}"
             f"{interruption_instruction}\n"
             "Do not exceed these constraints. The delivery will match exactly what you write."
         )
@@ -2362,6 +2789,24 @@ class ConversationOrchestrator:
             interruption_mode=interruption_mode,
             directive_text=directive_text,
         )
+
+    def _apply_fatigue_sentence_length(
+        self,
+        *,
+        sentence_length: str,
+        rep_turns: int,
+        rapport_score: int,
+    ) -> str:
+        fatigue_directive = self._fatigue_modifier(rep_turns=rep_turns, rapport_score=rapport_score)
+        if fatigue_directive is None:
+            return sentence_length
+        if "gone on too long" in fatigue_directive.lower():
+            return "short"
+        return {
+            "long": "medium",
+            "medium": "short",
+            "short": "short",
+        }.get(sentence_length, sentence_length)
 
     def _build_system_prompt(
         self,
@@ -2375,6 +2820,7 @@ class ConversationOrchestrator:
         homeowner_posture: str | None = None,
         recent_turns: list[ConversationTurnRecord] | None = None,
         response_plan: HomeownerResponsePlan | None = None,
+        fatigue_directive: str | None = None,
     ) -> str:
         context = self._contexts.get(session_id or "")
         state = self._states.get(session_id or "")
@@ -2407,6 +2853,7 @@ class ConversationOrchestrator:
                 reaction_intent=reaction_intent or (state.reaction_intent if state is not None else None),
                 homeowner_posture=homeowner_posture or (state.homeowner_posture if state is not None else None),
                 response_plan=response_plan,
+                fatigue_directive=fatigue_directive,
                 realism_pack=context.realism_pack,
                 static_layers=context.prompt_static_layers,
             )
@@ -2441,6 +2888,7 @@ class ConversationOrchestrator:
             reaction_intent=reaction_intent or (state.reaction_intent if state is not None else None),
             homeowner_posture=homeowner_posture or (state.homeowner_posture if state is not None else None),
             response_plan=response_plan,
+            fatigue_directive=fatigue_directive,
         )
         if state is not None:
             state.system_prompt_token_count = self._prompt_builder.last_token_count
@@ -2716,6 +3164,7 @@ class ConversationOrchestrator:
                 state.resolved_objections.append(tag)
             state.objection_resolution_progress.pop(tag, None)
             state.objection_status_map.pop(tag, None)
+            state.objection_raise_count.pop(tag, None)
             applied.append(tag)
         return applied
 

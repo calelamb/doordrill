@@ -76,6 +76,30 @@ def test_compute_behavior_directives_uses_signal_overrides():
     assert cutting.sentence_length == "short"
 
 
+def test_compute_behavior_directives_uses_communication_style_constraints():
+    orchestrator = ConversationOrchestrator()
+
+    terse = orchestrator.compute_behavior_directives(
+        emotion_before="neutral",
+        emotion_after="neutral",
+        behavioral_signals=[],
+        active_objections=[],
+        communication_style="terse",
+    )
+    chatty = orchestrator.compute_behavior_directives(
+        emotion_before="neutral",
+        emotion_after="neutral",
+        behavioral_signals=[],
+        active_objections=[],
+        communication_style="chatty",
+    )
+
+    assert terse.sentence_length == "short"
+    assert "Communication style: terse." in terse.directive_text
+    assert chatty.sentence_length == "long"
+    assert "Communication style: chatty." in chatty.directive_text
+
+
 def test_compute_behavior_directives_sets_interruption_mode_for_hostile_pushback():
     orchestrator = ConversationOrchestrator()
 
@@ -155,6 +179,25 @@ def test_prompt_builder_omits_new_blocks_when_behavior_context_is_missing():
 
     assert "LAYER 3B-CONT - PRIOR TURN REGISTER" not in prompt
     assert "LAYER 3C - BEHAVIORAL DIRECTIVES" not in prompt
+
+
+def test_prompt_builder_includes_persona_communication_style_guardrail():
+    prompt = PromptBuilder().build(
+        scenario=None,
+        persona=HomeownerPersona.from_payload(
+            {
+                "name": "Pat Homeowner",
+                "attitude": "skeptical",
+                "concerns": ["price"],
+                "communication_style": "analytical",
+            }
+        ),
+        stage="objection_handling",
+        prompt_version="conversation_v1",
+    )
+
+    assert "Permanent persona communication style constraint (analytical):" in prompt
+    assert "specific, probing follow-ups" in prompt
 
 
 def test_update_last_mb_plan_updates_session_context():

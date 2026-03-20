@@ -7,6 +7,8 @@ from typing import Any
 from app.models.session import SessionTurn
 from app.models.training import ConversationQualitySignal
 from app.models.types import TurnSpeaker
+from app.services.conversation_shared import OBJECTION_SEMANTIC_ANCHORS
+from app.services.homeowner_signal_detector import HomeownerSignalDetector
 
 
 _BOOKING_PHRASES = (
@@ -73,6 +75,9 @@ class ConversationRealismEvalResult:
 
 
 class ConversationRealismEvalService:
+    def __init__(self) -> None:
+        self._homeowner_signal_detector = HomeownerSignalDetector()
+
     def evaluate_session(
         self,
         *,
@@ -129,6 +134,11 @@ class ConversationRealismEvalService:
                 if rep_turn is not None and rep_turn.normalized_transcript_text
                 else (rep_turn.text if rep_turn is not None else "")
             )
+            previous_homeowner_signals = (
+                self._homeowner_signal_detector.detect(previous_ai_texts[-1]).signals
+                if previous_ai_texts
+                else []
+            )
 
             directness = self._directness_score(
                 rep_text=rep_text,
@@ -136,7 +146,7 @@ class ConversationRealismEvalService:
                 response_plan=response_plan,
                 turn_analysis=turn_analysis,
             )
-            carryover = self._carryover_score(
+            carryover, weak_carryover = self._carryover_score(
                 ai_text=ai_text,
                 response_plan=response_plan,
                 turn_analysis=turn_analysis,
@@ -145,6 +155,7 @@ class ConversationRealismEvalService:
                 ai_turn=ai_turn,
                 ai_text=ai_text,
                 response_plan=response_plan,
+                previous_homeowner_signals=previous_homeowner_signals,
             )
             close = self._closing_score(
                 ai_text=ai_text,
@@ -170,6 +181,8 @@ class ConversationRealismEvalService:
                 contradictory_turns += 1
                 failure_labels.append("over_softening")
                 notes.append(f"Turn {ai_turn.turn_index} softened more than the response plan allowed.")
+            if weak_carryover:
+                notes.append(f"Turn {ai_turn.turn_index} used only weak objection carryover.")
             if transcript <= 5.5:
                 failure_labels.append("transcript_corruption")
             if carryover <= 5.0:
@@ -243,18 +256,23 @@ class ConversationRealismEvalService:
         ai_text: str,
         response_plan: dict[str, Any],
         turn_analysis: dict[str, Any],
-    ) -> float:
+    ) -> tuple[float, bool]:
         ai_lower = _normalize_text(ai_text)
         objection = str(response_plan.get("allowed_new_objection") or turn_analysis.get("recommended_next_objection") or "").strip()
         semantic_anchors = [str(item).lower() for item in (response_plan.get("semantic_anchors") or [])]
         if not objection and not semantic_anchors:
-            return 8.0
-        anchor_hits = sum(1 for anchor in semantic_anchors if anchor and anchor in ai_lower)
-        if objection and objection.replace("_", " ") in ai_lower:
-            return 9.0
-        if anchor_hits >= 1:
-            return 8.0
-        return 4.5
+            return 8.0, False
+        objection_anchors = list(OBJECTION_SEMANTIC_ANCHORS.get(objection, ())) if objection else []
+        anchors = [*semantic_anchors, *[anchor.lower() for anchor in objection_anchors]]
+        anchor_hits = sum(1 for anchor in anchors if anchor and anchor in ai_lower)
+        word_count = len(ai_text.split())
+        objection_hit = bool(objection) and objection.replace("_", " ") in ai_lower
+        meaningful = word_count >= 12 and anchor_hits >= 1 and (objection_hit or bool(objection))
+        if meaningful:
+            return 9.0, False
+        if objection_hit or anchor_hits >= 1:
+            return 6.5, True
+        return 4.5, False
 
     def _emotion_score(
         self,
@@ -262,6 +280,7 @@ class ConversationRealismEvalService:
         ai_turn: SessionTurn,
         ai_text: str,
         response_plan: dict[str, Any],
+        previous_homeowner_signals: list[str],
     ) -> float:
         emotion = str(ai_turn.emotion_after or "").lower()
         text = _normalize_text(ai_text)
@@ -273,11 +292,22 @@ class ConversationRealismEvalService:
             return 6.0
         if emotion in {"curious", "interested"}:
             if "?" in ai_text or "next step" in text:
-                return 8.5
-            return 6.5
-        if stance == "firm_resistance" and word_count > 22:
-            return 5.0
-        return 7.5
+                score = 8.5
+            else:
+                score = 6.5
+        elif stance == "firm_resistance" and word_count > 22:
+            score = 5.0
+        else:
+            score = 7.5
+        if "warming" in previous_homeowner_signals and (emotion in {"curious", "interested"} or stance in {"cautiously_open", "low_friction_considering"}):
+            score = min(9.5, score + 0.5)
+        if "hardening" in previous_homeowner_signals and (emotion in {"annoyed", "hostile"} or stance == "firm_resistance"):
+            score = min(9.5, score + 0.5)
+        if "hardening" in previous_homeowner_signals and emotion in {"curious", "interested"}:
+            score = max(4.5, score - 1.0)
+        if "warming" in previous_homeowner_signals and stance == "firm_resistance":
+            score = max(4.5, score - 1.0)
+        return score
 
     def _closing_score(
         self,

@@ -107,3 +107,53 @@ def test_realism_eval_flags_over_softening_and_repetition():
     assert "over_softening" in result.failure_labels
     assert "repetition" in result.failure_labels
     assert result.repetition_rate > 0
+
+
+def test_carryover_score_distinguishes_meaningful_vs_weak_restatements():
+    service = ConversationRealismEvalService()
+
+    weak_score, weak_flag = service._carryover_score(
+        ai_text="Yeah, price.",
+        response_plan={"allowed_new_objection": "price", "semantic_anchors": ["budget", "value"]},
+        turn_analysis={},
+    )
+    strong_score, strong_flag = service._carryover_score(
+        ai_text="Price is still the sticking point for me because I need to know the monthly budget before I agree to anything.",
+        response_plan={"allowed_new_objection": "price", "semantic_anchors": ["budget", "value"]},
+        turn_analysis={},
+    )
+
+    assert weak_score < strong_score
+    assert weak_flag is True
+    assert strong_flag is False
+
+
+def test_emotion_score_uses_prior_homeowner_signals_to_validate_transition():
+    service = ConversationRealismEvalService()
+    ai_turn = SessionTurn(
+        id="ai-signal",
+        session_id="session-signal",
+        turn_index=2,
+        speaker=TurnSpeaker.AI,
+        stage="considering",
+        text="Okay, tell me more.",
+        emotion_before="skeptical",
+        emotion_after="curious",
+        started_at=datetime.now(timezone.utc),
+        ended_at=datetime.now(timezone.utc) + timedelta(seconds=2),
+    )
+
+    warmed = service._emotion_score(
+        ai_turn=ai_turn,
+        ai_text=ai_turn.text,
+        response_plan={"stance": "cautiously_open"},
+        previous_homeowner_signals=["warming"],
+    )
+    mismatched = service._emotion_score(
+        ai_turn=ai_turn,
+        ai_text=ai_turn.text,
+        response_plan={"stance": "cautiously_open"},
+        previous_homeowner_signals=["hardening"],
+    )
+
+    assert warmed > mismatched
