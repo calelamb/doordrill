@@ -1407,6 +1407,7 @@ class PromptBuilder:
         last_mb_context: dict[str, Any] | None = None,
         recent_turns: list[ConversationTurnRecord] | None = None,
         latest_rep_text: str | None = None,
+        transcript_quality: dict[str, Any] | None = None,
         reaction_intent: str | None = None,
         homeowner_posture: str | None = None,
         response_plan: HomeownerResponsePlan | None = None,
@@ -1441,7 +1442,7 @@ class PromptBuilder:
         sentence_rule = self._response_sentence_rule(behavior_directives)
         hard_rule_sentence = self._hard_rule_sentence(behavior_directives)
         response_plan_rule = (
-            "Answer the rep's latest point first, preserve any unresolved concern memory, and only introduce a new move if the response plan explicitly allows it."
+            "Answer the rep's latest point first, preserve any unresolved concern memory, ask one short clarification question if the transcript is ambiguous, and only introduce a new move if the response plan explicitly allows it."
         )
         hard_rule_parts = [f"RULE: {hard_rule_sentence}"]
         if response_cap:
@@ -1462,7 +1463,7 @@ class PromptBuilder:
         layer_one_lines.extend(
             [
                 "React only to what the rep ACTUALLY says — not what you expect them to say.",
-                "Your first sentence must directly answer or react to the rep's latest point.",
+                "Your first sentence must directly answer or react to the rep's latest point. If a key detail sounds clipped or unclear, ask one short, natural homeowner clarification question instead of guessing.",
                 "If the rep just greeted you and hasn't pitched yet, respond like a normal person answering "
                 "their door — brief and slightly guarded, not interrogating. Don't jump to 'what are you selling' "
                 "before they've had a chance to introduce themselves.",
@@ -1470,6 +1471,7 @@ class PromptBuilder:
                 "specific thing before adding any resistance. Real people notice and react to concrete details.",
                 "Do not volunteer extra information the rep has not earned.",
                 "Carry unresolved concerns forward naturally instead of forgetting them.",
+                "Do not introduce a new objection before you have acknowledged the rep's latest claim, question, or concrete detail.",
                 internal_rule,
             ]
         )
@@ -1496,6 +1498,35 @@ class PromptBuilder:
             if latest_rep_text:
                 history_lines.append(f"Latest rep utterance to answer first: {latest_rep_text.strip()}")
             layer_three_a = "\n".join(history_lines)
+        layer_three_a_quality = None
+        if transcript_quality:
+            quality_band = str(transcript_quality.get("quality_band") or "unknown").lower()
+            confidence = float(transcript_quality.get("confidence") or 0.0)
+            applied_terms = [
+                str(term).strip()
+                for term in (transcript_quality.get("applied_terms") or [])
+                if str(term).strip()
+            ]
+            quality_lines = [
+                "LAYER 3A-QUALITY - TRANSCRIPT QUALITY",
+                f"Transcript quality band: {quality_band or 'unknown'}.",
+                f"Transcript confidence: {confidence:.2f}.",
+            ]
+            if applied_terms:
+                quality_lines.append(f"Normalization anchors recovered from STT: {', '.join(applied_terms[:4])}.")
+            if quality_band == "low" or confidence < 0.6:
+                quality_lines.append(
+                    "This transcript may be imperfect. Stay literal to the words you do have. "
+                    "If a core noun, service detail, or ask is unclear, ask one short homeowner clarification question before escalating."
+                )
+                quality_lines.append(
+                    "Do not invent a competitor, promise, price, or service detail that is not clearly present in the rep's latest utterance."
+                )
+            elif quality_band == "medium" or confidence < 0.8:
+                quality_lines.append(
+                    "Treat this as borderline quality. React to the literal wording first and keep any clarification brief and natural if the rep's meaning is still underspecified."
+                )
+            layer_three_a_quality = "\n".join(quality_lines)
         layer_three_a_plan = None
         if response_plan is not None:
             plan_lines = [
@@ -1608,6 +1639,8 @@ class PromptBuilder:
             parts.append(layer_two_b)
         if layer_three_a:
             parts.append(layer_three_a)
+        if layer_three_a_quality:
+            parts.append(layer_three_a_quality)
         if layer_three_a_plan:
             parts.append(layer_three_a_plan)
         parts.append(layer_three_b)
@@ -1966,7 +1999,14 @@ class ConversationOrchestrator:
     def end_session(self, session_id: str) -> None:
         self.clear_session_context(session_id)
 
-    def prepare_rep_turn(self, session_id: str, rep_text: str, db: Session | None = None) -> RepTurnPlan:
+    def prepare_rep_turn(
+        self,
+        session_id: str,
+        rep_text: str,
+        *,
+        transcript_quality: dict[str, Any] | None = None,
+        db: Session | None = None,
+    ) -> RepTurnPlan:
         state = self.get_state(session_id)
         context = self._contexts.get(session_id)
 
@@ -2094,6 +2134,7 @@ class ConversationOrchestrator:
             behavior_directives=behavior_directives,
             last_mb_context=context.last_mb_plan if context is not None else None,
             latest_rep_text=rep_text,
+            transcript_quality=transcript_quality,
             reaction_intent=response_plan.reaction_goal,
             homeowner_posture=analysis.homeowner_posture,
             response_plan=response_plan,
@@ -2959,6 +3000,7 @@ class ConversationOrchestrator:
         behavior_directives: BehaviorDirectives | None = None,
         last_mb_context: dict[str, Any] | None = None,
         latest_rep_text: str | None = None,
+        transcript_quality: dict[str, Any] | None = None,
         reaction_intent: str | None = None,
         homeowner_posture: str | None = None,
         recent_turns: list[ConversationTurnRecord] | None = None,
@@ -2993,6 +3035,7 @@ class ConversationOrchestrator:
                 last_mb_context=resolved_last_mb_context,
                 recent_turns=recent_turns or list(context.turn_history),
                 latest_rep_text=latest_rep_text,
+                transcript_quality=transcript_quality,
                 reaction_intent=reaction_intent or (state.reaction_intent if state is not None else None),
                 homeowner_posture=homeowner_posture or (state.homeowner_posture if state is not None else None),
                 response_plan=response_plan,
@@ -3028,6 +3071,7 @@ class ConversationOrchestrator:
             last_mb_context=resolved_last_mb_context,
             recent_turns=recent_turns or [],
             latest_rep_text=latest_rep_text,
+            transcript_quality=transcript_quality,
             reaction_intent=reaction_intent or (state.reaction_intent if state is not None else None),
             homeowner_posture=homeowner_posture or (state.homeowner_posture if state is not None else None),
             response_plan=response_plan,

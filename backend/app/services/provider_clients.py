@@ -477,12 +477,21 @@ class MockLlmClient(BaseLlmClient):
 class OpenAiLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
     provider_name = "openai"
 
-    def __init__(self, api_key: str | None, model: str, base_url: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        model: str,
+        base_url: str,
+        timeout_seconds: float,
+        *,
+        temperature: float = 0.35,
+    ) -> None:
         super().__init__()
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.temperature = float(temperature)
         self._fallback = MockLlmClient()
 
     async def warm_session(self, session_id: str) -> None:
@@ -507,7 +516,7 @@ class OpenAiLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
         payload = {
             "model": self.model,
             "stream": True,
-            "temperature": 0.4,
+            "temperature": self.temperature,
             "max_tokens": max_tokens,
             "stream_options": {"include_usage": True},
             "messages": [{"role": "system", "content": system_prompt}, *self._history_for_current_task(), {"role": "user", "content": rep_text}],
@@ -556,12 +565,21 @@ class OpenAiLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
 class AnthropicLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
     provider_name = "anthropic"
 
-    def __init__(self, api_key: str | None, model: str, base_url: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        model: str,
+        base_url: str,
+        timeout_seconds: float,
+        *,
+        temperature: float = 0.35,
+    ) -> None:
         super().__init__()
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.temperature = float(temperature)
         self._fallback = MockLlmClient()
 
     async def warm_session(self, session_id: str) -> None:
@@ -588,7 +606,7 @@ class AnthropicLlmClient(_TaskConversationHistoryMixin, BaseLlmClient):
         payload = {
             "model": self.model,
             "max_tokens": max_tokens,
-            "temperature": 0.4,
+            "temperature": self.temperature,
             "stream": True,
             "system": system_prompt,
             "messages": [*self._history_for_current_task(), {"role": "user", "content": rep_text}],
@@ -658,12 +676,19 @@ class ElevenLabsTtsClient(BaseTtsClient):
         model_id: str,
         base_url: str,
         timeout_seconds: float,
+        *,
+        voice_stability: float = 0.42,
+        voice_similarity_boost: float = 0.82,
+        streaming_latency_mode: int = 3,
     ) -> None:
         self.api_key = api_key
         self.voice_id = voice_id
         self.model_id = model_id
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.voice_stability = float(voice_stability)
+        self.voice_similarity_boost = float(voice_similarity_boost)
+        self.streaming_latency_mode = int(streaming_latency_mode)
         self._fallback = MockTtsClient()
 
     async def stream_audio(self, text: str) -> AsyncIterator[dict]:
@@ -689,8 +714,11 @@ class ElevenLabsTtsClient(BaseTtsClient):
         payload = {
             "text": cleaned_text,
             "model_id": self.model_id,
-            "optimize_streaming_latency": 3,
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+            "optimize_streaming_latency": self.streaming_latency_mode,
+            "voice_settings": {
+                "stability": self.voice_stability,
+                "similarity_boost": self.voice_similarity_boost,
+            },
         }
 
         emitted = False
@@ -757,6 +785,7 @@ class ProviderSuite:
                 model=settings.anthropic_model,
                 base_url=settings.anthropic_base_url,
                 timeout_seconds=settings.provider_timeout_seconds,
+                temperature=settings.homeowner_llm_temperature,
             )
             if llm_provider == "anthropic"
             else (
@@ -765,6 +794,7 @@ class ProviderSuite:
                     model=settings.openai_model,
                     base_url=settings.openai_base_url,
                     timeout_seconds=settings.provider_timeout_seconds,
+                    temperature=settings.homeowner_llm_temperature,
                 )
                 if llm_provider == "openai"
                 else MockLlmClient()
@@ -778,6 +808,9 @@ class ProviderSuite:
                 model_id=settings.elevenlabs_model_id,
                 base_url=settings.elevenlabs_base_url,
                 timeout_seconds=settings.provider_timeout_seconds,
+                voice_stability=settings.elevenlabs_voice_stability,
+                voice_similarity_boost=settings.elevenlabs_voice_similarity_boost,
+                streaming_latency_mode=settings.elevenlabs_streaming_latency_mode,
             )
             if tts_provider == "elevenlabs"
             else MockTtsClient()

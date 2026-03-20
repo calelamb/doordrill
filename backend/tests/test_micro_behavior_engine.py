@@ -98,3 +98,57 @@ def test_recent_variants_are_not_reused_immediately():
     )
 
     assert first.transformed_text != second.transformed_text
+
+
+def test_curious_turns_do_not_use_hesitation_openers():
+    engine = ConversationalMicroBehaviorEngine()
+    engine.initialize_session("session-curious", persona={"attitude": "curious"})
+
+    plan = engine.apply_to_response(
+        session_id="session-curious",
+        raw_text="What would the process look like if we actually switched over next month?",
+        emotion_before="neutral",
+        emotion_after="curious",
+        behavioral_signals=["neutral_delivery", "acknowledges_concern"],
+        active_objections=["timing"],
+    )
+
+    assert not any(plan.transformed_text.startswith(variant) for variant in HESITATION_VARIANTS["curious"])
+
+
+def test_trailing_off_is_blocked_when_filler_or_interruption_is_present():
+    engine = ConversationalMicroBehaviorEngine()
+
+    assert engine._should_trail_off(
+        session_id="session-trailing",
+        emotion_after="skeptical",
+        sentence_length="medium",
+        turn_count=1,
+        interruption_type=None,
+        filler_used=True,
+    ) is False
+    assert engine._should_trail_off(
+        session_id="session-trailing",
+        emotion_after="skeptical",
+        sentence_length="medium",
+        turn_count=1,
+        interruption_type="homeowner_cuts_off_rep",
+        filler_used=False,
+    ) is False
+
+
+def test_short_turns_stay_single_segment_even_with_hesitation():
+    engine = ConversationalMicroBehaviorEngine()
+    engine.initialize_session("session-short", persona={"attitude": "skeptical"})
+
+    plan = engine.apply_to_response(
+        session_id="session-short",
+        raw_text="I need to think about that first.",
+        emotion_before="neutral",
+        emotion_after="skeptical",
+        behavioral_signals=["neutral_delivery"],
+        active_objections=["price"],
+    )
+
+    assert plan.sentence_length == "short"
+    assert len(plan.segments) == 1

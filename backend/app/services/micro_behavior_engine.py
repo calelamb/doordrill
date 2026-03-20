@@ -252,6 +252,7 @@ class ConversationalMicroBehaviorEngine:
             trimmed_text = f"{hesitation} {trimmed_text}".strip()
             self._remember(state.recent_hesitations, hesitation)
 
+        filler_used = False
         if self._should_use_filler(emotion_after, behavioral_signals, trimmed_text):
             filler = self._pick_variant(
                 session_id,
@@ -261,8 +262,16 @@ class ConversationalMicroBehaviorEngine:
             )
             trimmed_text = self._insert_filler(trimmed_text, filler)
             self._remember(state.recent_fillers, filler)
+            filler_used = True
 
-        if self._should_trail_off(session_id=session_id, emotion_after=emotion_after, sentence_length=sentence_length, turn_count=state.turn_count):
+        if self._should_trail_off(
+            session_id=session_id,
+            emotion_after=emotion_after,
+            sentence_length=sentence_length,
+            turn_count=state.turn_count,
+            interruption_type=interruption_type,
+            filler_used=filler_used,
+        ):
             trailing_variant = self._pick_variant(
                 session_id,
                 f"trailing:{emotion_after}:{state.turn_count}",
@@ -405,11 +414,11 @@ class ConversationalMicroBehaviorEngine:
         return any(signal in {"ignores_objection", "pushes_close", "dismisses_concern"} for signal in behavioral_signals)
 
     def _should_hesitate(self, emotion_after: str, behavioral_signals: list[str], text: str) -> bool:
-        if emotion_after in {"hostile", "annoyed"}:
+        if emotion_after in {"hostile", "annoyed", "curious"}:
             return False
         if "neutral_delivery" in behavioral_signals:
-            return True
-        return len(text.split()) > 6 and emotion_after in {"neutral", "skeptical", "curious"}
+            return emotion_after in {"neutral", "skeptical", "considering"}
+        return len(text.split()) > 6 and emotion_after in {"neutral", "skeptical", "considering"}
 
     def _should_use_filler(self, emotion_after: str, behavioral_signals: list[str], text: str) -> bool:
         if emotion_after in {"hostile", "annoyed"}:
@@ -425,8 +434,15 @@ class ConversationalMicroBehaviorEngine:
         emotion_after: str,
         sentence_length: str,
         turn_count: int,
+        interruption_type: str | None,
+        filler_used: bool,
     ) -> bool:
-        if sentence_length != "medium" or emotion_after not in TRAILING_OFF_VARIANTS:
+        if (
+            sentence_length != "medium"
+            or emotion_after not in TRAILING_OFF_VARIANTS
+            or interruption_type is not None
+            or filler_used
+        ):
             return False
         digest = hashlib.sha256(f"{session_id}:trailing:{emotion_after}:{turn_count}".encode("utf-8")).hexdigest()
         return (int(digest[:8], 16) % 10) < 3
@@ -498,6 +514,8 @@ class ConversationalMicroBehaviorEngine:
         sentences = self._split_sentences(text)
         if not sentences:
             sentences = [text]
+        if sentence_length == "short":
+            sentences = [" ".join(sentences).strip()]
         segments: list[MicroBehaviorSegment] = []
         count = len(sentences)
         for index, sentence in enumerate(sentences):

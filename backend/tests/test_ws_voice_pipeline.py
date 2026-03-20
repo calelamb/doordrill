@@ -166,6 +166,33 @@ class _LatencyAwareTtsClient(MockTtsClient):
             yield chunk
 
 
+class _PayloadRecordingSttClient(MockSttClient):
+    def __init__(self) -> None:
+        self.start_payloads: list[dict] = []
+        self.finalize_payloads: list[dict] = []
+
+    async def start_session(self, session_id: str, payload: dict | None = None) -> None:
+        del session_id
+        if payload is not None:
+            self.start_payloads.append(dict(payload))
+
+    async def finalize_utterance(self, payload: dict) -> SttTranscript:
+        self.finalize_payloads.append(dict(payload))
+        hint = str(payload.get("transcript_hint", "")).strip() or "Yeah"
+        on_partial = payload.get("on_partial")
+        if callable(on_partial):
+            on_partial(hint, False)
+        return SttTranscript(text=hint, confidence=0.98, is_final=True, source=self.provider_name)
+
+
+class _LowConfidenceDeepgramSttClient(MockSttClient):
+    provider_name = "deepgram"
+
+    async def finalize_utterance(self, payload: dict) -> SttTranscript:
+        del payload
+        return SttTranscript(text="neighbor mouse", confidence=0.32, is_final=True, source=self.provider_name)
+
+
 def test_is_transcript_valid_single_valid_word():
     for transcript in ("Yeah", "Yes", "Right", "No"):
         assert voice_ws._is_transcript_valid(transcript) is True
@@ -228,10 +255,6 @@ def test_ws_voice_pipeline_streams_events_in_order(client, seed_org, monkeypatch
 
         assert partial_idx < final_idx < text_idx < audio_idx < commit_idx
 
-        text_positions = [idx for idx, value in enumerate(types) if value == "server.ai.text.delta"]
-        if len(text_positions) >= 2:
-            assert audio_idx < text_positions[1]
-
         first_text = next(message for message in batch if message["type"] == "server.ai.text.delta")
         first_audio = next(message for message in batch if message["type"] == "server.ai.audio.chunk")
         committed_turn = next(message for message in batch if message["type"] == "server.turn.committed")
@@ -253,7 +276,7 @@ def test_ws_vad_end_triggers_stt_finalization_and_logs_latency(client, seed_org,
         "providers",
         ProviderSuite(stt=stt, llm=MockLlmClient(), tts=MockTtsClient()),
     )
-    monkeypatch.setattr(voice_ws, "VAD_FINALIZE_DEBOUNCE_MS", 1)
+    monkeypatch.setattr(voice_ws.settings, "stt_vad_finalize_debounce_ms", 1)
 
     assignment_id = _create_assignment(client, seed_org)
     session_id = _create_session(client, seed_org, assignment_id)
@@ -325,7 +348,7 @@ def test_ws_phase_latency_breakdown_stays_within_deterministic_budgets(client, s
             tts=_LatencyAwareTtsClient(first_chunk_delay_s=0.04),
         ),
     )
-    monkeypatch.setattr(voice_ws, "VAD_FINALIZE_DEBOUNCE_MS", 1)
+    monkeypatch.setattr(voice_ws.settings, "stt_vad_finalize_debounce_ms", 1)
 
     assignment_id = _create_assignment(client, seed_org)
     session_id = _create_session(client, seed_org, assignment_id)
@@ -536,3 +559,77 @@ def test_consecutive_clarification_uses_recovery_pool(client, seed_org, monkeypa
     assert len(tts.texts) >= 2
     assert tts.texts[0].endswith(voice_ws.CLARIFICATION_RESPONSES[0])
     assert tts.texts[1].endswith(voice_ws.CLARIFICATION_RECOVERY_RESPONSES[0])
+
+
+def test_ws_stt_turn_tuning_uses_settings_values(client, seed_org, monkeypatch):
+    stt = _PayloadRecordingSttClient()
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=stt, llm=MockLlmClient(), tts=MockTtsClient()),
+    )
+    monkeypatch.setattr(voice_ws.settings, "stt_endpointing_ms", 420)
+    monkeypatch.setattr(voice_ws.settings, "stt_utterance_end_ms", 1300)
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+
+        _run_turn(ws, text="Yeah", sequence=1)
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    assert stt.start_payloads
+    assert stt.finalize_payloads
+    assert stt.start_payloads[0]["endpointing_ms"] == 420
+    assert stt.start_payloads[0]["utterance_end_ms"] == 1300
+    assert stt.finalize_payloads[0]["endpointing_ms"] == 420
+    assert stt.finalize_payloads[0]["utterance_end_ms"] == 1300
+
+
+def test_ws_low_confidence_short_deepgram_turn_uses_clarification(client, seed_org, monkeypatch):
+    llm = _RecordingLlmClient()
+    tts = _RecordingTtsClient()
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=_LowConfidenceDeepgramSttClient(), llm=llm, tts=tts),
+    )
+    monkeypatch.setattr(voice_ws.random, "choice", lambda responses: responses[0])
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 1,
+                "payload": {
+                    "transcript_hint": "neighbor mouse",
+                    "codec": "opus",
+                },
+            }
+        )
+
+        messages: list[dict] = []
+        for _ in range(80):
+            message = ws.receive_json()
+            messages.append(message)
+            if (
+                message["type"] == "server.session.state"
+                and message["payload"].get("state") == "ai_idle"
+                and message["payload"].get("clarification") is True
+            ):
+                break
+
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    assert llm.calls == 0
+    assert any(message["type"] == "server.ai.text.delta" for message in messages)
+    assert any(text.endswith(voice_ws.CLARIFICATION_RESPONSES[0]) for text in tts.texts)

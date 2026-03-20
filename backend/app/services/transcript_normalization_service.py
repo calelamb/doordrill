@@ -6,6 +6,8 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
+from app.services.conversation_shared import OBJECTION_SEMANTIC_ANCHORS
+
 if TYPE_CHECKING:
     from app.models.org_prompt_config import OrgPromptConfig
     from app.models.scenario import Scenario
@@ -107,13 +109,58 @@ class TranscriptNormalizationService:
         queued_objections: list[str] | None = None,
         max_terms: int = 100,
     ) -> list[str]:
-        terms = self._canonical_terms(
-            scenario=scenario,
-            org_config=org_config,
-            active_objections=active_objections,
-            queued_objections=queued_objections,
-        )
-        return terms[:max_terms]
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def add_hint(value: Any, *, max_words: int = 2) -> None:
+            normalized = self._normalize_hint_term(value)
+            if not normalized:
+                return
+            if max_words > 0 and len(normalized.split()) > max_words:
+                return
+            lowered = normalized.lower()
+            if lowered in seen:
+                return
+            seen.add(lowered)
+            ordered.append(normalized)
+
+        if org_config is not None:
+            add_hint(org_config.company_name, max_words=4)
+            add_hint(org_config.product_category, max_words=3)
+
+        for objection in active_objections or []:
+            objection_key = str(objection or "").strip()
+            add_hint(objection_key.replace("_", " "), max_words=2)
+            for anchor in OBJECTION_SEMANTIC_ANCHORS.get(objection_key, ()):
+                add_hint(anchor, max_words=2)
+
+        if org_config is not None:
+            for competitor in org_config.competitors or []:
+                if isinstance(competitor, dict):
+                    add_hint(competitor.get("name"), max_words=4)
+
+        if scenario is not None:
+            add_hint(getattr(scenario, "name", None), max_words=4)
+            persona = dict(getattr(scenario, "persona", {}) or {})
+            add_hint(persona.get("name"), max_words=3)
+            for key in ("concerns", "objection_queue", "objections", "pest_history", "city", "neighborhood", "area"):
+                value = persona.get(key)
+                if isinstance(value, list):
+                    for item in value:
+                        add_hint(item, max_words=3)
+                else:
+                    add_hint(value, max_words=3)
+
+        for term in [*DEFAULT_PRICING_TERMS, *DEFAULT_DOMAIN_TERMS]:
+            add_hint(term, max_words=2)
+
+        for objection in queued_objections or []:
+            objection_key = str(objection or "").strip()
+            add_hint(objection_key.replace("_", " "), max_words=2)
+            for anchor in OBJECTION_SEMANTIC_ANCHORS.get(objection_key, ()):
+                add_hint(anchor, max_words=2)
+
+        return ordered[:max_terms]
 
     def normalize(
         self,
@@ -230,6 +277,14 @@ class TranscriptNormalizationService:
                 add_term(competitor.get("key_differentiator"))
 
         return terms
+
+    def _normalize_hint_term(self, value: Any) -> str:
+        normalized = " ".join(str(value or "").split()).strip()
+        if len(normalized) < 3:
+            return ""
+        if not TOKEN_RE.search(normalized):
+            return ""
+        return normalized
 
     def _apply_phonetic_corrections(self, text: str) -> tuple[str, list[str]]:
         rewritten = text

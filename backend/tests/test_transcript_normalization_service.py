@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from app.models.org_prompt_config import OrgPromptConfig
@@ -188,6 +190,49 @@ def test_keyword_hints_prioritize_org_and_objection_terms():
     assert "Acme Pest Control" in hints
     assert "monthly payment" in hints
     assert any(term.lower() == "terminix" for term in hints)
+
+
+def test_keyword_hints_rank_relevant_stt_terms_and_exclude_freeform_guidance():
+    service = TranscriptNormalizationService()
+    org_config = OrgPromptConfig(
+        org_id="org-5",
+        company_name="Acme Pest Control",
+        product_category="Pest Control",
+        competitors=[{"name": "Terminix", "key_differentiator": "fast follow-up"}],
+        known_objections=[{"objection": "monthly payment"}],
+        pitch_stages=[],
+        unique_selling_points=[],
+        target_demographics={},
+        pricing_framing=None,
+        close_style="consultative warm close",
+        rep_tone_guidance="friendly and conversational with long explanations",
+        grading_priorities=[],
+        published=True,
+    )
+    scenario = SimpleNamespace(
+        name="Maple Ridge",
+        persona={
+            "name": "Pat Homeowner",
+            "pest_history": ["box elder bugs"],
+            "concerns": ["timing"],
+        },
+    )
+
+    hints = service.keyword_hints(
+        scenario=scenario,
+        org_config=org_config,
+        active_objections=["price"],
+        queued_objections=["incumbent_provider"],
+    )
+
+    assert hints[0] == "Acme Pest Control"
+    assert hints[1] == "Pest Control"
+    assert hints.index("budget") < hints.index("Terminix")
+    assert hints.index("Terminix") < hints.index("monthly payment")
+    assert "consultative warm close" not in hints
+    assert "friendly and conversational with long explanations" not in hints
+    assert "box elder bugs" in hints
+    assert len(hints) == len(set(term.lower() for term in hints))
 
 
 def test_fuzzy_match_does_not_corrupt_common_words():

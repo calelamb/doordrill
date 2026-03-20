@@ -75,5 +75,5 @@ def test_locked_in_contract_resolves_with_correct_signals():
 
 
 def test_stage_aware_token_budget():
-    assert homeowner_token_budget("door_knock") == 15
-    assert homeowner_token_budget("considering") == 45
+    assert homeowner_token_budget("door_knock") == 30
+    assert homeowner_token_budget("considering") == 75

@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     elevenlabs_model_id: str = Field(default="eleven_flash_v2_5", alias="ELEVENLABS_MODEL_ID")
     elevenlabs_base_url: str = Field(default="https://api.elevenlabs.io", alias="ELEVENLABS_BASE_URL")
     deepgram_model: str = Field(default="nova-3", alias="DEEPGRAM_MODEL")
+    stt_endpointing_ms: int = Field(default=360, alias="STT_ENDPOINTING_MS")
+    stt_utterance_end_ms: int = Field(default=1100, alias="STT_UTTERANCE_END_MS")
+    stt_vad_finalize_debounce_ms: int = Field(default=90, alias="STT_VAD_FINALIZE_DEBOUNCE_MS")
+    homeowner_llm_temperature: float = Field(default=0.35, alias="HOMEOWNER_LLM_TEMPERATURE")
+    elevenlabs_voice_stability: float = Field(default=0.42, alias="ELEVENLABS_VOICE_STABILITY")
+    elevenlabs_voice_similarity_boost: float = Field(default=0.82, alias="ELEVENLABS_VOICE_SIMILARITY_BOOST")
+    elevenlabs_streaming_latency_mode: int = Field(default=3, alias="ELEVENLABS_STREAMING_LATENCY_MODE")
     provider_timeout_seconds: float = Field(default=10.0, alias="PROVIDER_TIMEOUT_SECONDS")
     grading_timeout_seconds: float = Field(default=20.0, alias="GRADING_TIMEOUT_SECONDS")
 

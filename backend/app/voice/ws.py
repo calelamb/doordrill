@@ -63,7 +63,7 @@ storage_service = StorageService()
 transcript_normalizer = TranscriptNormalizationService()
 
 SILENCE_FILLER_SECONDS = 9.0  # Reps need time to think — 4s was cutting them off mid-thought
-VAD_FINALIZE_DEBOUNCE_MS = 80
+VAD_FINALIZE_DEBOUNCE_MS = settings.stt_vad_finalize_debounce_ms
 FLUSH_INTERVAL_ACTIVE_MS = 200
 FLUSH_INTERVAL_IDLE_MS = 400
 MAX_RUNTIME_PAUSE_MS = 60
@@ -114,14 +114,14 @@ class SessionRuntimeState:
 
 def homeowner_token_budget(stage: str) -> int:
     stage_budgets = {
-        "door_knock": 40,
-        "initial_pitch": 70,
-        "objection_handling": 80,
-        "considering": 90,
-        "close_attempt": 80,
-        "ended": 30,
+        "door_knock": 30,
+        "initial_pitch": 55,
+        "objection_handling": 65,
+        "considering": 75,
+        "close_attempt": 60,
+        "ended": 24,
     }
-    return stage_budgets.get(stage, 70)
+    return stage_budgets.get(stage, 65)
 
 
 def _dedupe_retrieved_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
@@ -394,7 +394,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         )
 
     def _stt_turn_tuning() -> dict[str, int]:
-        return {"endpointing_ms": 300, "utterance_end_ms": 1200}
+        return {
+            "endpointing_ms": int(settings.stt_endpointing_ms),
+            "utterance_end_ms": int(settings.stt_utterance_end_ms),
+        }
 
     # Keep provider sessions warm to avoid first-turn cold starts.
     await providers.stt.start_session(
@@ -455,7 +458,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
     async def _run_vad_finalize_debounce() -> None:
         try:
-            await asyncio.sleep(VAD_FINALIZE_DEBOUNCE_MS / 1000)
+            debounce_ms = int(getattr(settings, "stt_vad_finalize_debounce_ms", VAD_FINALIZE_DEBOUNCE_MS) or VAD_FINALIZE_DEBOUNCE_MS)
+            await asyncio.sleep(debounce_ms / 1000)
             if not runtime_state._vad_end_pending:
                 return
             runtime_state._vad_end_pending = False
@@ -965,9 +969,6 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "lock_locked": tts_emit_lock.locked(),
                 },
             )
-            if len(tts_tasks) == 1 and not first_tts_audio_started.is_set():
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(first_tts_audio_started.wait(), timeout=0.2)
 
         sentence_buffer = ""
         try:
@@ -988,11 +989,18 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 sentence_buffer += str(chunk)
                 while True:
                     match = re.search(r"[.?!](?:\s|$)", sentence_buffer)
-                    if match is None:
-                        break
-                    sentence = sentence_buffer[:match.end()].strip()
-                    sentence_buffer = sentence_buffer[match.end():].lstrip()
-                    await process_sentence(sentence)
+                    if match is not None:
+                        sentence = sentence_buffer[:match.end()].strip()
+                        sentence_buffer = sentence_buffer[match.end():].lstrip()
+                        await process_sentence(sentence)
+                        continue
+                    comma_match = re.search(r",\s+", sentence_buffer)
+                    if comma_match is not None and len(sentence_buffer[:comma_match.start()].split()) >= 7:
+                        sentence = sentence_buffer[:comma_match.end()].strip().rstrip(",")
+                        sentence_buffer = sentence_buffer[comma_match.end():].lstrip()
+                        await process_sentence(sentence)
+                        continue
+                    break
         except Exception as exc:
             await emit_error("llm_error", str(exc), retryable=True)
             await maybe_flush()
@@ -1556,6 +1564,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 queued_objections=list(state_before_turn.queued_objections),
             )
             rep_text = transcript_result.normalized_text
+            transcript_quality = _serialize_transcript_quality(transcript_result)
             rep_word_count = len(TRANSCRIPT_WORD_RE.findall(rep_text))
             if not _is_transcript_valid(rep_text):
                 if runtime_state.turn_latency is not None and runtime_state.turn_latency.stt_final_ts is None:
@@ -1593,7 +1602,12 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 continue
 
             consecutive_clarification_count = 0
-            plan = orchestrator.prepare_rep_turn(session_id=session_id, rep_text=rep_text, db=db)
+            plan = orchestrator.prepare_rep_turn(
+                session_id=session_id,
+                rep_text=rep_text,
+                transcript_quality=transcript_quality,
+                db=db,
+            )
             if plan.active_edge_cases:
                 await emit_server_event("server.edge_case.triggered", {"tags": plan.active_edge_cases})
                 await maybe_flush()
@@ -1606,7 +1620,6 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             analysis_phase_latency_breakdown = _serialize_phase_latency(turn_latency)
             rep_started_at, rep_ended_at = _derive_rep_turn_window(msg)
             context_after_plan = orchestrator.get_context(session_id)
-            transcript_quality = _serialize_transcript_quality(transcript_result)
 
             rep_turn = ledger.commit_turn(
                 db,

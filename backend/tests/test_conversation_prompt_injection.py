@@ -165,3 +165,51 @@ def test_prepare_rep_turn_updates_system_prompt_token_count_on_session_state():
 
     payload = orchestrator.get_state_payload("session-token-count")
     assert payload["system_prompt_token_count"] > 0
+
+
+def test_prompt_builder_includes_transcript_quality_guardrails():
+    prompt = PromptBuilder().build(
+        scenario=None,
+        persona=_persona(),
+        stage="objection_handling",
+        prompt_version="conversation_v1",
+        latest_rep_text="So are you saying the monthly plan starts today?",
+        transcript_quality={
+            "quality_band": "low",
+            "confidence": 0.58,
+            "applied_terms": ["monthly plan"],
+        },
+        active_objections=["price"],
+        response_plan=None,
+    )
+
+    assert "LAYER 3A-QUALITY - TRANSCRIPT QUALITY" in prompt
+    assert "Latest rep utterance to answer first: So are you saying the monthly plan starts today?" in prompt
+    assert "ask one short homeowner clarification question" in prompt
+    assert "Do not invent a competitor, promise, price, or service detail" in prompt
+
+
+def test_prepare_rep_turn_threads_transcript_quality_into_system_prompt():
+    orchestrator = ConversationOrchestrator()
+    orchestrator.initialize_session(
+        "session-transcript-quality",
+        scenario_name="Guarded Homeowner",
+        scenario_description="Rep is explaining a monthly pest control plan.",
+        difficulty=3,
+        persona={"attitude": "skeptical", "concerns": ["price", "timing"]},
+        stages=["door_knock", "initial_pitch", "objection_handling", "considering", "close_attempt"],
+    )
+
+    plan = orchestrator.prepare_rep_turn(
+        "session-transcript-quality",
+        "So the monthly plan would cover the outside first.",
+        transcript_quality={
+            "quality_band": "medium",
+            "confidence": 0.74,
+            "applied_terms": ["monthly plan"],
+        },
+    )
+
+    assert "LAYER 3A-QUALITY - TRANSCRIPT QUALITY" in plan.system_prompt
+    assert "Latest rep utterance to answer first: So the monthly plan would cover the outside first." in plan.system_prompt
+    assert "Semantic anchors to preserve" in plan.system_prompt

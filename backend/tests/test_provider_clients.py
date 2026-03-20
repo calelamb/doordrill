@@ -1,11 +1,12 @@
 import asyncio
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 import websockets
 from websockets.frames import Close
 
-from app.services.provider_clients import AnthropicLlmClient, DeepgramSttClient, ElevenLabsTtsClient, OpenAiLlmClient, _DeepgramSessionState
+from app.services.provider_clients import AnthropicLlmClient, DeepgramSttClient, ElevenLabsTtsClient, OpenAiLlmClient, ProviderSuite, _DeepgramSessionState
 
 
 @pytest.mark.asyncio
@@ -326,3 +327,39 @@ async def test_anthropic_client_falls_back_to_mock_without_key():
     chunks = [chunk async for chunk in client.stream_reply(rep_text="We can cut your price", stage="objection_handling", system_prompt="x")]
     combined = "".join(chunks)
     assert "expensive" in combined.lower()
+
+
+def test_provider_suite_wires_reality_tuning_settings():
+    settings = SimpleNamespace(
+        stt_provider="deepgram",
+        llm_provider="openai",
+        tts_provider="elevenlabs",
+        deepgram_api_key="dg-key",
+        deepgram_base_url="https://api.deepgram.com",
+        deepgram_model="nova-3",
+        provider_timeout_seconds=9.0,
+        anthropic_api_key=None,
+        anthropic_model="claude-3-5-sonnet-latest",
+        anthropic_base_url="https://api.anthropic.com",
+        openai_api_key="oa-key",
+        openai_model="gpt-4o-mini",
+        openai_base_url="https://api.openai.com/v1",
+        homeowner_llm_temperature=0.35,
+        elevenlabs_api_key="el-key",
+        elevenlabs_voice_id="voice-1",
+        elevenlabs_model_id="eleven_flash_v2_5",
+        elevenlabs_base_url="https://api.elevenlabs.io",
+        elevenlabs_voice_stability=0.42,
+        elevenlabs_voice_similarity_boost=0.82,
+        elevenlabs_streaming_latency_mode=3,
+    )
+
+    suite = ProviderSuite.from_settings(settings)
+
+    assert isinstance(suite.stt, DeepgramSttClient)
+    assert isinstance(suite.llm, OpenAiLlmClient)
+    assert isinstance(suite.tts, ElevenLabsTtsClient)
+    assert suite.llm.temperature == pytest.approx(0.35)
+    assert suite.tts.voice_stability == pytest.approx(0.42)
+    assert suite.tts.voice_similarity_boost == pytest.approx(0.82)
+    assert suite.tts.streaming_latency_mode == 3
