@@ -209,6 +209,13 @@ HARMFUL_SIGNALS = {
     "ignores_objection",
     "high_difficulty_backfire",
 }
+REP_MONOLOGUE_REACTION_INTENT = (
+    "The rep has been talking for several turns without asking you anything. "
+    "Real homeowners tune out when they're being lectured. "
+    "Show disengagement: glance back inside, give a one-word response, "
+    "or ask bluntly 'Is there a point to this?' "
+    "Do not stay engaged as if the monologue is fine."
+)
 COMMUNICATION_STYLE_DIRECTIVES = {
     "terse": (
         "You speak in short bursts. Keep responses to one or two quick sentences and do not volunteer extra detail."
@@ -435,6 +442,17 @@ def _coerce_stage_sequence(stages: list[str] | None) -> list[str]:
     return normalized or list(DEFAULT_STAGE_SEQUENCE)
 
 
+def _next_rep_monologue_streak(
+    *,
+    current_streak: int,
+    behavioral_signals: list[str],
+    rep_text: str,
+) -> int:
+    if "invites_dialogue" in behavioral_signals or "?" in rep_text:
+        return 0
+    return min(5, current_streak + 1)
+
+
 @dataclass
 class ScenarioSnapshot:
     name: str = "Generic Homeowner"
@@ -473,8 +491,10 @@ class ConversationState:
     active_edge_cases: list[str] = field(default_factory=list)
     objection_pressure: int = 0
     ignored_objection_streak: int = 0
+    rep_monologue_streak: int = 0
     interruption_count: int = 0
     objection_raise_count: dict[str, int] = field(default_factory=dict)
+    visited_stages: set[str] = field(default_factory=set)
     pending_test_question: str | None = None
     last_behavior_signals: list[str] = field(default_factory=list)
     reaction_intent: str = "React briefly and keep the homeowner grounded."
@@ -832,6 +852,11 @@ class ConversationTurnAnalyzer:
             objection_status = "ignored"
         helpful_count = sum(1 for signal in behavioral_signals if signal in HELPFUL_SIGNALS)
         harmful_count = sum(1 for signal in behavioral_signals if signal in HARMFUL_SIGNALS)
+        rep_monologue_streak = _next_rep_monologue_streak(
+            current_streak=state.rep_monologue_streak,
+            behavioral_signals=behavioral_signals,
+            rep_text=rep_text,
+        )
         rapport_delta = (
             (1 if "builds_rapport" in behavioral_signals else 0)
             + (1 if "personalizes_pitch" in behavioral_signals else 0)
@@ -865,9 +890,11 @@ class ConversationTurnAnalyzer:
             harmful_count=harmful_count,
             objection_status=objection_status,
             pressure_delta=pressure_delta,
+            rep_monologue_streak=rep_monologue_streak,
         )
         reaction_intent = self._reaction_intent(
             direct_response_required=direct_response_required,
+            rep_monologue_streak=rep_monologue_streak,
             stage_intent=stage_intent,
             objection_status=objection_status,
             resolved_objections=resolved,
@@ -1110,7 +1137,10 @@ class ConversationTurnAnalyzer:
         harmful_count: int,
         objection_status: str,
         pressure_delta: int,
+        rep_monologue_streak: int = 0,
     ) -> str:
+        if rep_monologue_streak >= 5:
+            return "defensive"
         if harmful_count >= 2 or objection_status == "ignored" or pressure_delta >= 2:
             return "pushing_back"
         if helpful_count >= 2 and objection_status in {"partial", "resolved"}:
@@ -1129,6 +1159,7 @@ class ConversationTurnAnalyzer:
         self,
         *,
         direct_response_required: bool,
+        rep_monologue_streak: int,
         stage_intent: str,
         objection_status: str,
         resolved_objections: list[str],
@@ -1139,6 +1170,8 @@ class ConversationTurnAnalyzer:
         missed_pending_test: bool,
     ) -> str:
         del homeowner_signals
+        if rep_monologue_streak >= 3:
+            return REP_MONOLOGUE_REACTION_INTENT
         if stage_intent == "attempt_close" and objection_status != "resolved":
             return "Push back on the closing pressure before discussing next steps."
         if missed_pending_test and pending_test_question:
@@ -1410,30 +1443,37 @@ class PromptBuilder:
         response_plan_rule = (
             "Answer the rep's latest point first, preserve any unresolved concern memory, and only introduce a new move if the response plan explicitly allows it."
         )
-        hard_rule = (
-            f"RULE: {hard_rule_sentence} {response_cap} "
-            "You are a busy homeowner at your front door. Be blunt and brief. "
-            f"{response_plan_rule}"
-        )
+        hard_rule_parts = [f"RULE: {hard_rule_sentence}"]
+        if response_cap:
+            hard_rule_parts.append(response_cap)
+        hard_rule_parts.append("You are a busy homeowner at your front door. Be blunt and brief.")
+        hard_rule_parts.append(response_plan_rule)
+        hard_rule = " ".join(hard_rule_parts)
         layer_zero = resolved_static_layers.get("layer_zero")
 
-        layer_one = (
-            "LAYER 1 - IMMERSION CONTRACT\n"
-            "You are a real homeowner in a live door-to-door roleplay.\n"
-            "Never break character.\n"
-            f"{sentence_rule}\n"
-            f"{response_cap}\n"
-            "React only to what the rep ACTUALLY says — not what you expect them to say.\n"
-            "Your first sentence must directly answer or react to the rep's latest point.\n"
-            "If the rep just greeted you and hasn't pitched yet, respond like a normal person answering "
-            "their door — brief and slightly guarded, not interrogating. Don't jump to 'what are you selling' "
-            "before they've had a chance to introduce themselves.\n"
-            "If the rep mentions something specific (a neighbor, a house nearby, a name), acknowledge that "
-            "specific thing before adding any resistance. Real people notice and react to concrete details.\n"
-            "Do not volunteer extra information the rep has not earned.\n"
-            "Carry unresolved concerns forward naturally instead of forgetting them.\n"
-            f"{internal_rule}"
+        layer_one_lines = [
+            "LAYER 1 - IMMERSION CONTRACT",
+            "You are a real homeowner in a live door-to-door roleplay.",
+            "Never break character.",
+            sentence_rule,
+        ]
+        if response_cap:
+            layer_one_lines.append(response_cap)
+        layer_one_lines.extend(
+            [
+                "React only to what the rep ACTUALLY says — not what you expect them to say.",
+                "Your first sentence must directly answer or react to the rep's latest point.",
+                "If the rep just greeted you and hasn't pitched yet, respond like a normal person answering "
+                "their door — brief and slightly guarded, not interrogating. Don't jump to 'what are you selling' "
+                "before they've had a chance to introduce themselves.",
+                "If the rep mentions something specific (a neighbor, a house nearby, a name), acknowledge that "
+                "specific thing before adding any resistance. Real people notice and react to concrete details.",
+                "Do not volunteer extra information the rep has not earned.",
+                "Carry unresolved concerns forward naturally instead of forgetting them.",
+                internal_rule,
+            ]
         )
+        layer_one = "\n".join(layer_one_lines)
         layer_two = resolved_static_layers.get("layer_two") or ""
         layer_two_b = resolved_static_layers.get("layer_two_b") or None
         layer_three = (
@@ -1644,28 +1684,28 @@ class PromptBuilder:
 
     def _response_cap_rule(self, canonical_stage: str) -> str:
         if canonical_stage in {"DOOR_OPEN", "ENDED"}:
-            return "Maximum 10 words."
+            return "Speak briefly - one short phrase, the way you'd actually answer your door."
         if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW", "RECOVERY"}:
-            return "Maximum 30 words. You may think out loud briefly."
-        return "Maximum 20 words."
+            return "You may think out loud briefly before answering."
+        return ""
 
     def _response_sentence_rule(self, behavior_directives: BehaviorDirectives | None) -> str:
         if behavior_directives is None:
-            return "Respond in one sentence only."
+            return "Respond in one sentence only. Keep it natural and spoken, not formal."
         if behavior_directives.sentence_length == "short":
-            return "Respond in one sentence only."
+            return "Respond in one sentence only. Keep it natural and spoken, not formal."
         if behavior_directives.sentence_length == "medium":
-            return "Respond in no more than two sentences."
-        return "Respond in no more than three sentences."
+            return "Respond in one or two spoken sentences. No more."
+        return "Respond in two to three spoken sentences. No more."
 
     def _hard_rule_sentence(self, behavior_directives: BehaviorDirectives | None) -> str:
         if behavior_directives is None:
-            return "Respond in ONE sentence only."
+            return "Respond in ONE sentence only. Keep it natural and spoken, not formal."
         if behavior_directives.sentence_length == "short":
-            return "Respond in ONE sentence only."
+            return "Respond in ONE sentence only. Keep it natural and spoken, not formal."
         if behavior_directives.sentence_length == "medium":
-            return "Respond in no more than two sentences."
-        return "Respond in no more than three sentences."
+            return "Respond in one or two spoken sentences. No more."
+        return "Respond in two to three spoken sentences. No more."
 
     def _internal_thought_rule(self, canonical_stage: str) -> str:
         if canonical_stage in {"CONSIDERING", "CLOSE_WINDOW", "RECOVERY"}:
@@ -1756,6 +1796,8 @@ class ConversationOrchestrator:
             "emotion": state.emotion,
             "resistance_level": state.resistance_level,
             "objection_pressure": state.objection_pressure,
+            "rep_monologue_streak": state.rep_monologue_streak,
+            "visited_stages": sorted(state.visited_stages),
             "active_objections": list(state.active_objections),
             "queued_objections": list(state.queued_objections),
             "resolved_objections": list(state.resolved_objections),
@@ -1944,6 +1986,11 @@ class ConversationOrchestrator:
             signal in {"pushes_close", "dismisses_concern"} for signal in analysis.behavioral_signals
         ):
             analysis.behavioral_signals = self._dedupe([*analysis.behavioral_signals, "high_difficulty_backfire"])
+        state.rep_monologue_streak = _next_rep_monologue_streak(
+            current_streak=state.rep_monologue_streak,
+            behavioral_signals=analysis.behavioral_signals,
+            rep_text=rep_text,
+        )
         stage_after = self._stage_from_analysis(
             analysis=analysis,
             rep_text=rep_text,
@@ -1993,6 +2040,8 @@ class ConversationOrchestrator:
         ):
             stage_after = "recovery"
             state.stage = stage_after
+        if stage_after != "recovery":
+            state.visited_stages.add(stage_after)
         state.resistance_level = self._emotion_to_resistance(state.emotion)
         state.last_behavior_signals = list(analysis.behavioral_signals)
         state.homeowner_posture = analysis.homeowner_posture
@@ -2097,21 +2146,57 @@ class ConversationOrchestrator:
         considering_stage = self._find_stage(stages, ("consider",), fallback="considering")
         close_stage = self._find_stage(stages, ("close",), fallback="close_attempt")
         ended_stage = self._find_stage(stages, ("end",), fallback="ended")
+        requested_stage = state.stage
         if analysis.stage_intent == "end_conversation":
-            return ended_stage
-        if analysis.stage_intent == "attempt_close":
-            return close_stage
-        if analysis.stage_intent == "advance_considering":
-            return considering_stage
-        if analysis.stage_intent == "advance_pitch":
-            return pitch_stage
-        if analysis.stage_intent == "handle_objection":
-            return objection_stage
-        if analysis.confidence < 0.6:
-            return self._detect_stage(rep_text, state, context, objection_tags=objection_tags)
+            requested_stage = ended_stage
+        elif analysis.stage_intent == "attempt_close":
+            requested_stage = close_stage
+        elif analysis.stage_intent == "advance_considering":
+            requested_stage = considering_stage
+        elif analysis.stage_intent == "advance_pitch":
+            requested_stage = pitch_stage
+        elif analysis.stage_intent == "handle_objection":
+            requested_stage = objection_stage
+        elif analysis.confidence < 0.6:
+            requested_stage = self._detect_stage(rep_text, state, context, objection_tags=objection_tags)
         if state.stage == "recovery":
             return considering_stage if state.objection_pressure <= 2 else objection_stage
-        return state.stage
+        return self._guard_stage_transition(
+            requested_stage=requested_stage,
+            current_stage=state.stage,
+            visited_stages=state.visited_stages,
+            stages=stages,
+        )
+
+    def _guard_stage_transition(
+        self,
+        *,
+        requested_stage: str,
+        current_stage: str,
+        visited_stages: set[str],
+        stages: list[str],
+    ) -> str:
+        if requested_stage == "recovery" or current_stage == "recovery":
+            return requested_stage
+
+        pitch_stage = self._find_stage(stages, ("pitch", "listen"), fallback="initial_pitch")
+        objection_stage = self._find_stage(stages, ("objection",), fallback="objection_handling")
+        considering_stage = self._find_stage(stages, ("consider",), fallback="considering")
+        close_stage = self._find_stage(stages, ("close",), fallback="close_attempt")
+        minimum_predecessors = {
+            objection_stage: {pitch_stage},
+            considering_stage: {objection_stage},
+            close_stage: {objection_stage, considering_stage},
+        }
+        required = minimum_predecessors.get(requested_stage, set())
+        effective_visited = {stage for stage in visited_stages if stage != "recovery"}
+        if current_stage != "recovery":
+            effective_visited.add(current_stage)
+        if not required or required.intersection(effective_visited):
+            return requested_stage
+
+        current_index = next((index for index, stage in enumerate(stages) if stage == current_stage), 0)
+        return stages[min(current_index + 1, len(stages) - 1)]
 
     def _next_ignored_objection_streak_from_analysis(
         self,
@@ -2268,6 +2353,7 @@ class ConversationOrchestrator:
             queued_objections=queued_objections,
             resolved_objections=[],
             objection_pressure=self._initial_objection_pressure(starting_emotion, active_count),
+            visited_stages={stage},
             reaction_intent="React briefly and make the rep earn momentum.",
             homeowner_posture=self._posture_from_emotion(starting_emotion),
         )

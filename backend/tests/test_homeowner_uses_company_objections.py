@@ -35,7 +35,7 @@ def test_homeowner_prompt_does_not_use_company_objections(seed_org, monkeypatch)
     finally:
         db.close()
 
-    assert "Respond in ONE sentence only." in prompt
-    assert "Maximum 10 words." in prompt
+    assert "Respond in ONE sentence only. Keep it natural and spoken, not formal." in prompt
+    assert "Speak briefly - one short phrase" in prompt
     assert "=== Company Training Material ===" not in prompt
     assert "Territory & Objection Context" not in prompt

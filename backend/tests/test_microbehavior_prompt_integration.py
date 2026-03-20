@@ -160,7 +160,7 @@ def test_prompt_builder_includes_behavior_directives_block():
     )
 
     assert "LAYER 3C - BEHAVIORAL DIRECTIVES" in prompt
-    assert "Respond in no more than two sentences." in prompt
+    assert "Respond in one or two spoken sentences. No more." in prompt
     assert "RULE: Respond in one sentence only." not in prompt
 
 

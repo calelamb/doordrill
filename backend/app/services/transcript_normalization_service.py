@@ -32,6 +32,31 @@ DEFAULT_DOMAIN_TERMS = (
     "interior treatment",
     "yard treatment",
 )
+PHONETIC_CORRECTION_TABLE: dict[str, str] = {
+    "or kin": "Orkin",
+    "orkin's": "Orkin",
+    "pick control": "pest control",
+    "pick controlled": "pest control",
+    "arrow sol": "aerosol",
+    "arrow sols": "aerosols",
+    "ante": "ant",
+    "aunty": "ant",
+    "the ante": "the ant",
+    "termite inspection": "termite inspection",
+    "road ant": "rodent",
+    "road ants": "rodents",
+    "the road": "the rodent",
+    "home warning": "home warranty",
+    "free in spec shin": "free inspection",
+    "free inspect shin": "free inspection",
+    "in spec shun": "inspection",
+    "ex terminator": "exterminator",
+    "ex terminate": "exterminate",
+    "service agreement": "service agreement",
+    "serve is": "service",
+}
+DEFAULT_FUZZY_MATCH_THRESHOLD = 0.8
+ORG_SPECIFIC_FUZZY_MATCH_THRESHOLD = 0.75
 
 
 @dataclass
@@ -89,11 +114,15 @@ class TranscriptNormalizationService:
             active_objections=active_objections,
             queued_objections=queued_objections,
         )
+        org_specific_terms = self._org_specific_terms(org_config)
         if normalized_text and canonical_terms:
+            normalized_text, phonetic_terms = self._apply_phonetic_corrections(normalized_text)
             normalized_text, applied_terms = self._apply_fuzzy_term_corrections(
                 normalized_text,
                 canonical_terms,
+                org_specific_terms=org_specific_terms,
             )
+            applied_terms = list(dict.fromkeys([*phonetic_terms, *applied_terms]))
 
         normalized_text = normalized_text.strip()
         return TranscriptNormalizationResult(
@@ -156,10 +185,50 @@ class TranscriptNormalizationService:
 
         return ordered
 
+    def _org_specific_terms(self, org_config: "OrgPromptConfig | None") -> set[str]:
+        if org_config is None:
+            return set()
+
+        terms: set[str] = set()
+
+        def add_term(value: Any) -> None:
+            normalized = " ".join(str(value or "").split()).strip()
+            if len(normalized) >= 3:
+                terms.add(normalized.lower())
+
+        add_term(org_config.company_name)
+        add_term(org_config.product_category)
+        for competitor in org_config.competitors or []:
+            if isinstance(competitor, dict):
+                add_term(competitor.get("name"))
+                add_term(competitor.get("key_differentiator"))
+
+        return terms
+
+    def _apply_phonetic_corrections(self, text: str) -> tuple[str, list[str]]:
+        rewritten = text
+        applied_terms: list[str] = []
+
+        for wrong, correct in sorted(
+            PHONETIC_CORRECTION_TABLE.items(),
+            key=lambda item: (-len(item[0].split()), -len(item[0])),
+        ):
+            if wrong.lower() == correct.lower():
+                continue
+            pattern = re.compile(r"\b" + re.escape(wrong) + r"\b", re.IGNORECASE)
+            if not pattern.search(rewritten):
+                continue
+            rewritten = pattern.sub(correct, rewritten)
+            applied_terms.append(correct)
+
+        return rewritten, list(dict.fromkeys(applied_terms))
+
     def _apply_fuzzy_term_corrections(
         self,
         text: str,
         canonical_terms: list[str],
+        *,
+        org_specific_terms: set[str] | None = None,
     ) -> tuple[str, list[str]]:
         tokens = list(TOKEN_RE.finditer(text))
         if not tokens:
@@ -193,7 +262,11 @@ class TranscriptNormalizationService:
         for match in TOKEN_RE.finditer(rewritten):
             updated_parts.append(rewritten[last_end:match.start()])
             token = match.group(0)
-            replacement = self._closest_token_match(token, single_token_terms)
+            replacement = self._closest_token_match(
+                token,
+                single_token_terms,
+                org_specific_terms=org_specific_terms or set(),
+            )
             updated_parts.append(replacement or token)
             if replacement and replacement != token:
                 applied_terms.append(replacement)
@@ -204,7 +277,13 @@ class TranscriptNormalizationService:
         deduped_applied_terms = list(dict.fromkeys(applied_terms))
         return normalized, deduped_applied_terms
 
-    def _closest_token_match(self, token: str, single_token_terms: dict[str, str]) -> str | None:
+    def _closest_token_match(
+        self,
+        token: str,
+        single_token_terms: dict[str, str],
+        *,
+        org_specific_terms: set[str],
+    ) -> str | None:
         lowered = token.lower()
         if lowered in single_token_terms:
             return single_token_terms[lowered]
@@ -214,7 +293,12 @@ class TranscriptNormalizationService:
         best: tuple[float, str] | None = None
         for normalized, canonical in single_token_terms.items():
             ratio = SequenceMatcher(None, lowered, normalized).ratio()
-            if ratio < 0.8:
+            threshold = (
+                ORG_SPECIFIC_FUZZY_MATCH_THRESHOLD
+                if normalized in org_specific_terms
+                else DEFAULT_FUZZY_MATCH_THRESHOLD
+            )
+            if ratio < threshold:
                 continue
             if best is None or ratio > best[0]:
                 best = (ratio, canonical)

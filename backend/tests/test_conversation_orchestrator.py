@@ -66,7 +66,7 @@ def test_acknowledgement_and_value_reduce_pressure_and_resolve_objection():
         "Hi, I understand price matters and I appreciate your time. We can save you money and protect the home.",
     )
 
-    assert plan.stage_after == "objection_handling"
+    assert plan.stage_after == "initial_pitch"
     assert plan.emotion_before == "skeptical"
     assert plan.emotion_after == "curious"
     assert "acknowledges_concern" in plan.behavioral_signals
@@ -96,7 +96,7 @@ def test_ignoring_objections_escalates_to_hostile_and_surfaces_next_concern():
 
     plan = orchestrator.prepare_rep_turn("session-c", "Sign today right now. Let's close this.")
 
-    assert plan.stage_after == "close_attempt"
+    assert plan.stage_after == "initial_pitch"
     assert plan.emotion_after == "hostile"
     assert "pushes_close" in plan.behavioral_signals
     assert "ignores_objection" not in plan.behavioral_signals
@@ -209,6 +209,120 @@ def test_first_turn_neighbor_mention_stays_on_the_specific_claim():
 
     assert "neighbor" in plan.reaction_intent.lower()
     assert plan.response_plan.allowed_new_objection is None
+
+
+def test_three_non_question_rep_turns_trigger_monologue_disengagement():
+    orchestrator = ConversationOrchestrator()
+    orchestrator.initialize_session(
+        "session-monologue",
+        scenario_name="Quiet Listener",
+        scenario_description="A neutral homeowner answers the door.",
+        difficulty=2,
+        persona={"attitude": "neutral", "concerns": []},
+        stages=["door_knock", "initial_pitch", "objection_handling", "close_attempt"],
+    )
+
+    orchestrator.prepare_rep_turn("session-monologue", "Hi, we're with Acme Pest Control.")
+    orchestrator.prepare_rep_turn("session-monologue", "We help a lot of homes around here with regular service.")
+    plan = orchestrator.prepare_rep_turn("session-monologue", "It keeps bugs down and makes things easier on the home.")
+
+    assert "being lectured" in plan.reaction_intent.lower()
+    assert orchestrator.get_state("session-monologue").rep_monologue_streak == 3
+
+
+def test_question_resets_monologue_streak():
+    orchestrator = ConversationOrchestrator()
+    orchestrator.initialize_session(
+        "session-monologue-reset",
+        scenario_name="Question Reset",
+        scenario_description="A neutral homeowner answers the door.",
+        difficulty=2,
+        persona={"attitude": "neutral", "concerns": []},
+        stages=["door_knock", "initial_pitch", "objection_handling", "close_attempt"],
+    )
+
+    orchestrator.prepare_rep_turn("session-monologue-reset", "Hi, we're with Acme Pest Control.")
+    orchestrator.prepare_rep_turn("session-monologue-reset", "We cover the whole neighborhood on a regular route.")
+
+    state = orchestrator.get_state("session-monologue-reset")
+    assert state.rep_monologue_streak == 2
+
+    orchestrator.prepare_rep_turn("session-monologue-reset", "What would make you feel comfortable hearing more?")
+
+    assert orchestrator.get_state("session-monologue-reset").rep_monologue_streak == 0
+
+
+def test_five_non_question_rep_turns_force_defensive_posture():
+    orchestrator = ConversationOrchestrator()
+    orchestrator.initialize_session(
+        "session-monologue-defensive",
+        scenario_name="Friendly Start",
+        scenario_description="A friendly homeowner answers the door.",
+        difficulty=1,
+        persona={"attitude": "friendly", "concerns": []},
+        stages=["door_knock", "initial_pitch", "objection_handling", "close_attempt"],
+    )
+
+    lines = [
+        "Hi, we're with Acme Pest Control.",
+        "We help a lot of homes around here with regular service.",
+        "It keeps bugs down and makes things easier on the home.",
+        "The coverage runs year round with seasonal treatments.",
+        "Everything is designed to keep the property protected.",
+    ]
+    for line in lines[:-1]:
+        orchestrator.prepare_rep_turn("session-monologue-defensive", line)
+
+    plan = orchestrator.prepare_rep_turn("session-monologue-defensive", lines[-1])
+
+    assert plan.homeowner_posture == "defensive"
+    assert orchestrator.get_state("session-monologue-defensive").homeowner_posture == "defensive"
+
+
+def test_close_pressure_cannot_skip_straight_to_close_attempt_from_door_knock():
+    orchestrator = ConversationOrchestrator()
+    orchestrator.initialize_session(
+        "session-stage-guard-close",
+        scenario_name="Jumped Close",
+        scenario_description="A skeptical homeowner answers the door.",
+        difficulty=3,
+        persona={"attitude": "skeptical", "concerns": ["price"]},
+        stages=["door_knock", "initial_pitch", "objection_handling", "considering", "close_attempt"],
+    )
+
+    plan = orchestrator.prepare_rep_turn(
+        "session-stage-guard-close",
+        "Sign today and let's get the next step locked in right now.",
+    )
+
+    assert plan.stage_after == "initial_pitch"
+    assert plan.stage_after != "close_attempt"
+
+
+def test_stage_guard_allows_objection_stage_after_pitch_and_tracks_visited_stages():
+    orchestrator = ConversationOrchestrator()
+    orchestrator.initialize_session(
+        "session-stage-guard-progression",
+        scenario_name="Sequenced Progression",
+        scenario_description="A skeptical homeowner wants to hear the pitch before handling objections.",
+        difficulty=2,
+        persona={"attitude": "skeptical", "concerns": ["price"]},
+        stages=["door_knock", "initial_pitch", "objection_handling", "considering", "close_attempt"],
+    )
+
+    first = orchestrator.prepare_rep_turn(
+        "session-stage-guard-progression",
+        "Hi, we're with Acme Pest Control.",
+    )
+    second = orchestrator.prepare_rep_turn(
+        "session-stage-guard-progression",
+        "I understand price matters and we can save you money over time.",
+    )
+    state = orchestrator.get_state("session-stage-guard-progression")
+
+    assert first.stage_after == "initial_pitch"
+    assert second.stage_after == "objection_handling"
+    assert state.visited_stages == {"door_knock", "initial_pitch", "objection_handling"}
 
 
 def test_ignored_objection_escalation_progresses_through_three_stages():

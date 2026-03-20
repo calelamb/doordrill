@@ -67,6 +67,18 @@ def test_prompt_builder_omits_layer_five_override_when_content_is_none():
     assert "LAYER 5 - PROMPT OVERRIDE DIRECTIVES" not in prompt
 
 
+def test_prompt_builder_uses_sentence_rule_without_word_count_cap():
+    prompt = PromptBuilder().build(
+        scenario=None,
+        persona=_persona(),
+        stage="objection_handling",
+        prompt_version="conversation_v1",
+    )
+
+    assert "natural and spoken, not formal" in prompt
+    assert "Maximum" not in prompt
+
+
 def test_prompt_builder_includes_layer_zero_when_org_config_is_published():
     prompt = PromptBuilder().build(
         scenario=None,

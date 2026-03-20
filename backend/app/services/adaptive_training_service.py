@@ -15,6 +15,13 @@ from app.models.user import User
 from app.services.predictive_modeling_service import PredictiveModelingService
 
 SKILL_ORDER = ["opening", "rapport", "pitch_clarity", "objection_handling", "closing"]
+GRADING_KEY_TO_SKILL = {
+    "opening": "opening",
+    "pitch_delivery": "pitch_clarity",
+    "objection_handling": "objection_handling",
+    "closing_technique": "closing",
+    "professionalism": "rapport",
+}
 SKILL_GRAPH_EDGES = [
     {
         "from_skill": "opening",
@@ -279,11 +286,11 @@ class AdaptiveTrainingService:
             return {}
 
         category_scores = scorecard.category_scores or {}
-        opening = self._bounded_score(category_scores.get("opening"), fallback=5.0)
-        professionalism = self._bounded_score(category_scores.get("professionalism"), fallback=6.0)
-        pitch = self._bounded_score(category_scores.get("pitch_delivery"), fallback=5.0)
-        objections = self._bounded_score(category_scores.get("objection_handling"), fallback=5.0)
-        closing = self._bounded_score(category_scores.get("closing_technique"), fallback=5.0)
+        opening = self._bounded_category_score(category_scores, "opening", fallback=5.0)
+        professionalism = self._bounded_category_score(category_scores, "professionalism", fallback=6.0)
+        pitch = self._bounded_category_score(category_scores, "pitch_delivery", fallback=5.0)
+        objections = self._bounded_category_score(category_scores, "objection_handling", fallback=5.0)
+        closing = self._bounded_category_score(category_scores, "closing_technique", fallback=5.0)
 
         emotion_start, emotion_end = self._extract_emotions(session)
         emotion_recovery = self._emotion_recovery_score(emotion_start, emotion_end)
@@ -684,6 +691,19 @@ class AdaptiveTrainingService:
             return self._clamp_10(float(value))
         except (TypeError, ValueError):
             return fallback
+
+    def _bounded_category_score(
+        self,
+        category_scores: dict[str, Any],
+        grading_key: str,
+        *,
+        fallback: float,
+    ) -> float:
+        skill_key = GRADING_KEY_TO_SKILL.get(grading_key, grading_key)
+        raw = category_scores.get(grading_key)
+        if raw is None:
+            raw = category_scores.get(skill_key)
+        return self._bounded_score(raw, fallback=fallback)
 
     def _clamp_10(self, value: float) -> float:
         return max(0.0, min(10.0, value))

@@ -7,6 +7,8 @@ from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, EventDirection, SessionStatus, TurnSpeaker
+from app.services.adaptive_training_service import AdaptiveTrainingService, GRADING_KEY_TO_SKILL
+from app.services.grading_service import CATEGORY_KEYS
 
 
 def _seed_adaptive_history(seed_org: dict[str, str]) -> dict[str, str]:
@@ -221,3 +223,32 @@ def test_manager_can_force_specific_adaptive_scenario(client, seed_org):
 
     assert body["selected_scenario"]["scenario_id"] == scenario_ids["closing_scenario_id"]
     assert body["assignment"]["scenario_id"] == scenario_ids["closing_scenario_id"]
+
+
+def test_grading_key_to_skill_covers_all_grading_categories():
+    assert set(GRADING_KEY_TO_SKILL.keys()) == set(CATEGORY_KEYS)
+
+
+def test_build_session_snapshot_accepts_skill_name_fallbacks():
+    service = AdaptiveTrainingService()
+    session = DrillSession(
+        scenario_id="scenario-1",
+        turns=[],
+        scorecard=Scorecard(
+            category_scores={
+                "opening": 8.0,
+                "pitch_clarity": 7.0,
+                "objection_handling": 6.0,
+                "closing": 5.0,
+                "rapport": 9.0,
+            },
+            overall_score=7.0,
+        ),
+    )
+
+    snapshot = service._build_session_snapshot(session=session, scenario=None)
+
+    assert snapshot["skills"]["opening"] == 8.0
+    assert snapshot["skills"]["pitch_clarity"] > 0
+    assert snapshot["skills"]["closing"] > 0
+    assert snapshot["professionalism"] == 9.0
