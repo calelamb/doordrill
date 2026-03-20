@@ -51,7 +51,11 @@ let refreshInFlight: Promise<boolean> | null = null;
 const API_TIMEOUT_MS = 10_000;
 
 async function buildHeaders(headers: HeaderMap | undefined, auth: boolean): Promise<HeaderMap> {
-  const mergedHeaders = { ...(headers ?? {}) };
+  const mergedHeaders = {
+    // Bypass the localtunnel browser-warning page for dev tunnels.
+    "bypass-tunnel-reminder": "true",
+    ...(headers ?? {})
+  };
   if (!auth) {
     return mergedHeaders;
   }
