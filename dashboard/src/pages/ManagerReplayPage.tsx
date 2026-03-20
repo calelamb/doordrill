@@ -7,7 +7,7 @@ import { ReplayPanel } from "../components/ReplayPanel";
 import { EmptyState } from "../components/shared/EmptyState";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchReplay, fetchSessionAnnotations } from "../lib/api";
-import type { ReplayResponse, SessionAnnotation } from "../lib/types";
+import type { AiMeta, ReplayResponse, SessionAnnotation } from "../lib/types";
 
 export function ManagerReplayPage() {
   const navigate = useNavigate();
@@ -20,6 +20,7 @@ export function ManagerReplayPage() {
 
   const [replay, setReplay] = useState<ReplayResponse | null>(null);
   const [annotations, setAnnotations] = useState<SessionAnnotation[]>([]);
+  const [annotationsAiMeta, setAnnotationsAiMeta] = useState<AiMeta | null>(null);
   const [annotationsLoading, setAnnotationsLoading] = useState(true);
   const [annotationsError, setAnnotationsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -41,6 +42,7 @@ export function ManagerReplayPage() {
       }
       if (result.status === "fulfilled") {
         setAnnotations(result.value.annotations);
+        setAnnotationsAiMeta(result.value.ai_meta ?? null);
         return;
       }
       if (isAuthError(result.reason)) {
@@ -49,6 +51,7 @@ export function ManagerReplayPage() {
         return;
       }
       setAnnotations([]);
+      setAnnotationsAiMeta(null);
       setAnnotationsError(result.reason instanceof Error ? result.reason.message : "Could not generate coaching notes.");
     } catch (err) {
       if (isAuthError(err)) {
@@ -57,6 +60,7 @@ export function ManagerReplayPage() {
         return;
       }
       setAnnotations([]);
+      setAnnotationsAiMeta(null);
       setAnnotationsError(err instanceof Error ? err.message : "Could not generate coaching notes.");
     } finally {
       if (annotationsRequestRef.current === requestId) {
@@ -147,6 +151,7 @@ export function ManagerReplayPage() {
           focusTurnId={focusTurnId}
           focusCategory={focusCategory}
           annotations={annotations}
+          annotationsAiMeta={annotationsAiMeta}
           annotationsLoading={annotationsLoading}
           annotationsError={annotationsError}
         />

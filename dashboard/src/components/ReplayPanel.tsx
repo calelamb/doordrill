@@ -17,7 +17,8 @@ import {
 } from "lucide-react";
 
 import { createCoachingNote, createFollowup, submitOverride } from "../lib/api";
-import type { CategoryScoreValue, ReplayResponse, SessionAnnotation, TranscriptTurn } from "../lib/types";
+import type { AiMeta, CategoryScoreValue, ReplayResponse, SessionAnnotation, TranscriptTurn } from "../lib/types";
+import { AiMetaStrip } from "./shared/AiMetaStrip";
 import { EmptyState } from "./shared/EmptyState";
 import { ScoreChip } from "./shared/ScoreChip";
 
@@ -28,6 +29,7 @@ type Props = {
   focusTurnId?: string | null;
   focusCategory?: string | null;
   annotations?: SessionAnnotation[];
+  annotationsAiMeta?: AiMeta | null;
   annotationsLoading?: boolean;
   annotationsError?: string | null;
 };
@@ -130,6 +132,7 @@ export function ReplayPanel({
   focusTurnId,
   focusCategory,
   annotations = [],
+  annotationsAiMeta = null,
   annotationsLoading = false,
   annotationsError = null,
 }: Props) {
@@ -1049,6 +1052,7 @@ export function ReplayPanel({
                         ? "Could not generate coaching notes."
                         : "No coaching moments were identified for this transcript."}
                 </div>
+                <AiMetaStrip meta={annotationsAiMeta} />
               </div>
             </div>
             {annotationsExpanded ? <ChevronDown className="h-4 w-4 text-muted" /> : <ChevronRight className="h-4 w-4 text-muted" />}

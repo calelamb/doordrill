@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 
 import { ChartSkeleton } from "./shared/ChartSkeleton";
 import { EmptyState } from "./shared/EmptyState";
+import { AiMetaStrip } from "./shared/AiMetaStrip";
 import { clearStoredAuth, isAuthError } from "../lib/auth";
 import { fetchOneOnOnePrep } from "../lib/api";
 import type { OneOnOnePrepResponse } from "../lib/types";
@@ -74,7 +75,6 @@ export function OneOnOnePrepCard({
       if (requestRef.current !== requestId) {
         return;
       }
-      setData(null);
       setError(loadError instanceof Error ? loadError.message : "Failed to load 1:1 prep.");
     } finally {
       if (requestRef.current === requestId) {
@@ -196,23 +196,36 @@ export function OneOnOnePrepCard({
             </div>
 
             <div className="thin-scrollbar mt-6 flex-1 overflow-y-auto pr-1">
-              {loading ? <OneOnOnePrepSkeleton /> : null}
+              {loading && !data ? <OneOnOnePrepSkeleton /> : null}
 
-              {!loading && error && isEmptyDataError(error) ? (
+              {!loading && !data && error && isEmptyDataError(error) ? (
                 <EmptyState variant="empty" message="No 1:1 prep is available yet for this rep." />
               ) : null}
 
-              {!loading && error && !isEmptyDataError(error) ? (
+              {!loading && !data && error && !isEmptyDataError(error) ? (
                 <div className="rounded-[28px] border border-red-200 bg-red-50/80 p-5 text-sm text-red-700">{error}</div>
               ) : null}
 
-              {!loading && !error && data ? (
+              {data ? (
                 <div className="space-y-5">
+                  {loading ? (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-900">
+                      Refreshing prep...
+                    </div>
+                  ) : null}
+
+                  {!loading && error ? (
+                    <div className="rounded-2xl border border-red-200 bg-red-50/80 px-4 py-3 text-sm text-red-700">
+                      {error}
+                    </div>
+                  ) : null}
+
                   <div className="rounded-[30px] border border-white/35 bg-white/60 p-5 backdrop-blur-2xl">
                     <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                       <div>
                         <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Readiness Summary</div>
                         <p className="mt-3 text-lg font-semibold leading-7 text-ink">{data.readiness_summary}</p>
+                        <AiMetaStrip meta={data.ai_meta} />
                       </div>
                       <button
                         type="button"

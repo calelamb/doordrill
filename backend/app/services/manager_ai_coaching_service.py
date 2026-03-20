@@ -7,7 +7,6 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session, object_session, selectinload
 
@@ -19,6 +18,7 @@ from app.models.session import SessionTurn
 from app.models.training import AdaptiveRecommendationOutcome, OverrideLabel
 from app.models.user import User
 from app.models.warehouse import FactRepDaily
+from app.schemas.ai_meta import AiAttemptMeta, AiMeta
 from app.schemas.manager_ai import (
     ManagerChatAnswerContent,
     ManagerChatClassification,
@@ -30,6 +30,7 @@ from app.schemas.manager_ai import (
     SessionAnnotationsResponse,
     TeamCoachingSummaryContent,
     TeamCoachingSummaryResponse,
+    WeeklyTeamBriefingContent,
     WeeklyTeamBriefingResponse,
 )
 from app.schemas.knowledge import RetrievedChunk
@@ -38,6 +39,7 @@ from app.services.document_retrieval_service import DocumentRetrievalService
 from app.services.management_cache_service import ManagementCacheService
 from app.services.predictive_modeling_service import PredictiveModelingService
 from app.services.prompt_version_resolver import prompt_version_resolver
+from app.services.provider_clients import JsonLlmResult, JsonLlmRouter, JsonLlmRouterError
 
 READINESS_THRESHOLD = 7.0
 DEFAULT_COACHING_SYSTEM_PREFIX = (
@@ -57,11 +59,35 @@ RUBRIC_CATEGORY_KEYS = {
 
 
 class AiCoachingUnavailableError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "ai_provider_unavailable",
+        attempts: list[AiAttemptMeta] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.attempts = list(attempts or [])
+
+    def detail(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "attempts": [attempt.model_dump(mode="json") for attempt in self.attempts],
+        }
 
 
 class AiCoachingDataUnavailableError(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str = "ai_no_data") -> None:
+        super().__init__(message)
+        self.code = code
+
+    def detail(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": str(self),
+        }
 
 
 def _score_value(value: Any) -> float | None:
@@ -86,46 +112,6 @@ def _linear_regression_slope(values: Sequence[float]) -> float:
     return numerator / denominator
 
 
-def _extract_json_block(raw_text: str) -> Any:
-    text = raw_text.strip()
-    if not text:
-        raise AiCoachingUnavailableError("Claude returned an empty response")
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    for opening, closing in (("{", "}"), ("[", "]")):
-        start = text.find(opening)
-        end = text.rfind(closing)
-        if start == -1 or end == -1 or end <= start:
-            continue
-        candidate = text[start : end + 1]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-
-    raise AiCoachingUnavailableError("Claude returned invalid JSON")
-
-
-def _extract_text_content(payload: dict[str, Any]) -> str:
-    content = payload.get("content", [])
-    if not isinstance(content, list):
-        return ""
-
-    parts: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        if item.get("type") == "text":
-            text = item.get("text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "".join(parts).strip()
-
-
 def _sentence_count(text: str) -> int:
     return len(re.findall(r"[^.!?]+[.!?]", text.strip()))
 
@@ -140,6 +126,7 @@ def _trim_to_three_sentences(text: str) -> str:
 class ManagerAiCoachingService:
     def __init__(self) -> None:
         self.settings = get_settings()
+        self.json_router = JsonLlmRouter(self.settings)
         self.adaptive_training_service = AdaptiveTrainingService()
         self.predictive_modeling_service = PredictiveModelingService()
         self.document_retrieval_service = DocumentRetrievalService(settings=self.settings)
@@ -181,7 +168,245 @@ class ManagerAiCoachingService:
             return row.content.strip()
         return DEFAULT_COACHING_SYSTEM_PREFIX
 
+    def _manager_ai_cache_signature(self) -> dict[str, Any]:
+        primary_provider = (self.settings.llm_provider or "").strip().lower()
+        fallback_provider = self.json_router._resolve_fallback_provider(primary_provider)
+        primary_model = self.json_router._resolve_model(primary_provider or "mock", fast=False, is_fallback=False)
+        primary_fast_model = self.json_router._resolve_model(primary_provider or "mock", fast=True, is_fallback=False)
+        fallback_model = (
+            self.json_router._resolve_model(fallback_provider, fast=False, is_fallback=True)
+            if fallback_provider
+            else None
+        )
+        fallback_fast_model = (
+            self.json_router._resolve_model(fallback_provider, fast=True, is_fallback=True)
+            if fallback_provider
+            else None
+        )
+        return {
+            "primary_provider": primary_provider,
+            "primary_model": primary_model,
+            "primary_fast_model": primary_fast_model,
+            "fallback_provider": fallback_provider,
+            "fallback_model": fallback_model,
+            "fallback_fast_model": fallback_fast_model,
+        }
+
+    def _call_manager_ai_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        task: str,
+        fast: bool = False,
+        validator: Any | None = None,
+    ) -> JsonLlmResult:
+        legacy_override = self.__dict__.get("_call_claude_json")
+        if callable(legacy_override):
+            try:
+                payload = legacy_override(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=max_tokens,
+                )
+                validated = validator(payload) if validator else payload
+                return JsonLlmResult(
+                    payload=validated,
+                    provider="legacy_override",
+                    model="legacy_override",
+                    real_call=False,
+                    latency_ms=0,
+                    fallback_used=False,
+                    attempts=[],
+                    status="live",
+                )
+            except AiCoachingUnavailableError:
+                raise
+            except Exception as exc:
+                raise AiCoachingUnavailableError(
+                    "Legacy manager AI override failed.",
+                    code="ai_invalid_response",
+                ) from exc
+        try:
+            return self.json_router.generate_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+                fast=fast,
+                task=task,
+                validator=validator,
+            )
+        except JsonLlmRouterError as exc:
+            attempts = [
+                AiAttemptMeta(
+                    provider=attempt.provider,
+                    model=attempt.model,
+                    outcome=attempt.outcome,
+                    latency_ms=attempt.latency_ms,
+                    real_call=attempt.real_call,
+                    task=attempt.task,
+                    error=attempt.error,
+                )
+                for attempt in exc.attempts
+            ]
+            raise AiCoachingUnavailableError(str(exc), code=exc.code, attempts=attempts) from exc
+
+    def _ai_meta_from_result(
+        self,
+        result: JsonLlmResult,
+        *,
+        generated_at: str,
+        status: str | None = None,
+        cached: bool = False,
+    ) -> AiMeta:
+        return AiMeta(
+            provider=result.provider,
+            model=result.model,
+            real_call=result.real_call,
+            cached=cached,
+            status=status or result.status,
+            latency_ms=result.latency_ms,
+            fallback_used=result.fallback_used,
+            attempts=[
+                AiAttemptMeta(
+                    provider=attempt.provider,
+                    model=attempt.model,
+                    outcome=attempt.outcome,
+                    latency_ms=attempt.latency_ms,
+                    real_call=attempt.real_call,
+                    task=attempt.task,
+                    error=attempt.error,
+                )
+                for attempt in result.attempts
+            ],
+            generated_at=generated_at,
+        )
+
+    def _combine_ai_meta(
+        self,
+        *items: tuple[str, JsonLlmResult],
+        generated_at: str,
+    ) -> AiMeta:
+        if not items:
+            return AiMeta(
+                provider="unknown",
+                model="unknown",
+                real_call=False,
+                cached=False,
+                status="unavailable",
+                latency_ms=0,
+                fallback_used=False,
+                attempts=[],
+                generated_at=generated_at,
+            )
+        final_result = items[-1][1]
+        attempts: list[AiAttemptMeta] = []
+        total_latency = 0
+        fallback_used = False
+        real_call = False
+        for task, result in items:
+            total_latency += result.latency_ms
+            fallback_used = fallback_used or result.fallback_used
+            real_call = real_call or result.real_call
+            for attempt in result.attempts:
+                attempts.append(
+                    AiAttemptMeta(
+                        provider=attempt.provider,
+                        model=attempt.model,
+                        outcome=attempt.outcome,
+                        latency_ms=attempt.latency_ms,
+                        real_call=attempt.real_call,
+                        task=task,
+                        error=attempt.error,
+                    )
+                )
+        return AiMeta(
+            provider=final_result.provider,
+            model=final_result.model,
+            real_call=real_call,
+            cached=False,
+            status=final_result.status,
+            latency_ms=total_latency,
+            fallback_used=fallback_used,
+            attempts=attempts,
+            generated_at=generated_at,
+        )
+
+    def _merge_ai_meta_records(
+        self,
+        *items: tuple[str, AiMeta],
+        generated_at: str,
+    ) -> AiMeta:
+        if not items:
+            return AiMeta(
+                provider="unknown",
+                model="unknown",
+                real_call=False,
+                cached=False,
+                status="unavailable",
+                latency_ms=0,
+                fallback_used=False,
+                attempts=[],
+                generated_at=generated_at,
+            )
+
+        final_meta = items[-1][1]
+        attempts: list[AiAttemptMeta] = []
+        total_latency = 0
+        fallback_used = False
+        real_call = False
+        cached = False
+        for task, meta in items:
+            total_latency += meta.latency_ms
+            fallback_used = fallback_used or meta.fallback_used
+            real_call = real_call or meta.real_call
+            cached = cached or meta.cached
+            for attempt in meta.attempts:
+                attempts.append(
+                    attempt.model_copy(
+                        update={
+                            "task": attempt.task or task,
+                        }
+                    )
+                )
+
+        return AiMeta(
+            provider=final_meta.provider,
+            model=final_meta.model,
+            real_call=real_call,
+            cached=cached,
+            status=final_meta.status,
+            latency_ms=total_latency,
+            fallback_used=fallback_used,
+            attempts=attempts,
+            generated_at=generated_at,
+        )
+
+    def _with_cached_ai_meta(self, response: Any) -> Any:
+        ai_meta = getattr(response, "ai_meta", None)
+        if ai_meta is None:
+            return response
+        return response.model_copy(
+            update={
+                "ai_meta": ai_meta.model_copy(
+                    update={
+                        "cached": True,
+                        "status": "cached",
+                    }
+                )
+            }
+        )
+
     def classify_manager_chat_intent(self, *, message: str) -> ManagerChatClassification:
+        classification, _ = self.classify_manager_chat_intent_with_meta(message=message)
+        return classification
+
+    def classify_manager_chat_intent_with_meta(
+        self,
+        *,
+        message: str,
+    ) -> tuple[ManagerChatClassification, AiMeta]:
         prompt = f"""
 You are classifying a manager's question about DoorDrill sales training data.
 Question: "{message}"
@@ -195,14 +420,17 @@ Respond with JSON only:
 }}
 """.strip()
 
-        return ManagerChatClassification.model_validate(
-            self._call_claude_json(
-                system_prompt="You classify manager analytics questions. Return only valid JSON.",
-                user_prompt=prompt,
-                max_tokens=180,
-                model=self.settings.anthropic_chat_classification_model,
-            )
+        generated_at = datetime.now(timezone.utc).isoformat()
+        result = self._call_manager_ai_json(
+            system_prompt="You classify manager analytics questions. Return only valid JSON.",
+            user_prompt=prompt,
+            max_tokens=180,
+            task="manager_chat_classification",
+            fast=True,
+            validator=ManagerChatClassification.model_validate,
         )
+        classification = result.payload
+        return classification, self._ai_meta_from_result(result, generated_at=generated_at)
 
     def answer_manager_chat(
         self,
@@ -212,6 +440,22 @@ Respond with JSON only:
         conversation_history: list[dict[str, str]],
         relevant_data: dict[str, Any],
     ) -> ManagerChatAnswerContent:
+        content, _ = self.answer_manager_chat_with_meta(
+            period_days=period_days,
+            message=message,
+            conversation_history=conversation_history,
+            relevant_data=relevant_data,
+        )
+        return content
+
+    def answer_manager_chat_with_meta(
+        self,
+        *,
+        period_days: int,
+        message: str,
+        conversation_history: list[dict[str, str]],
+        relevant_data: dict[str, Any],
+    ) -> tuple[ManagerChatAnswerContent, AiMeta]:
         serialized_data = json.dumps(relevant_data, default=str, ensure_ascii=True)
         serialized_history = json.dumps(conversation_history[-12:], ensure_ascii=True)
         prompt = f"""
@@ -237,16 +481,17 @@ Respond with JSON:
 }}
 """.strip()
 
-        content = ManagerChatAnswerContent.model_validate(
-            self._call_claude_json(
-                system_prompt="You are a precise manager analytics copilot. Return only valid JSON.",
-                user_prompt=prompt,
-                max_tokens=700,
-                model=self.settings.anthropic_chat_answer_model,
-            )
+        generated_at = datetime.now(timezone.utc).isoformat()
+        result = self._call_manager_ai_json(
+            system_prompt="You are a precise manager analytics copilot. Return only valid JSON.",
+            user_prompt=prompt,
+            max_tokens=700,
+            task="manager_chat_answer",
+            validator=ManagerChatAnswerContent.model_validate,
         )
+        content = result.payload
 
-        return ManagerChatAnswerContent(
+        answer = ManagerChatAnswerContent(
             answer=content.answer,
             key_metric=content.key_metric,
             key_metric_label=content.key_metric_label,
@@ -254,15 +499,30 @@ Respond with JSON:
             action_suggestion=content.action_suggestion,
             data_points=content.data_points[:4],
         )
+        return answer, self._ai_meta_from_result(result, generated_at=generated_at)
 
     def answer_company_material_question(
         self,
         *,
         question: str,
         sources: list[RetrievedChunk],
-    ) -> str:
+    ) -> tuple[str, AiMeta]:
         if not sources:
-            return "The uploaded company training material does not address that question."
+            generated_at = datetime.now(timezone.utc).isoformat()
+            return (
+                "The uploaded company training material does not address that question.",
+                AiMeta(
+                    provider="retrieval_only",
+                    model="none",
+                    real_call=False,
+                    cached=False,
+                    status="no_data",
+                    latency_ms=0,
+                    fallback_used=False,
+                    attempts=[],
+                    generated_at=generated_at,
+                ),
+            )
 
         formatted_sources = self.document_retrieval_service.format_for_prompt(sources, max_tokens=1400)
         prompt = f"""
@@ -281,19 +541,20 @@ Respond with JSON only:
 }}
 """.strip()
 
-        content = self._call_claude_json(
+        generated_at = datetime.now(timezone.utc).isoformat()
+        result = self._call_manager_ai_json(
             system_prompt="You answer questions strictly from provided company training material. Return only valid JSON.",
             user_prompt=prompt,
             max_tokens=320,
-            model=self.settings.anthropic_chat_answer_model,
+            task="knowledge_answer",
+            validator=lambda payload: payload
+            if isinstance(payload, dict) and isinstance(payload.get("answer"), str) and payload.get("answer", "").strip()
+            else (_ for _ in ()).throw(ValueError("answer_missing")),
         )
 
-        if isinstance(content, dict):
-            answer = content.get("answer")
-            if isinstance(answer, str) and answer.strip():
-                return answer.strip()
-
-        raise AiCoachingUnavailableError("Claude returned an invalid company material answer payload")
+        content = result.payload
+        answer = str(content["answer"]).strip()
+        return answer, self._ai_meta_from_result(result, generated_at=generated_at)
 
     def _get_company_training_context(
         self,
@@ -340,10 +601,17 @@ Respond with JSON only:
         return result
 
     def generate_rep_insight(self, db: Session, *, rep: User, period_days: int) -> RepInsightResponse:
-        cache_key = f"rep_insight:{rep.id}:{period_days}"
+        cache_key = self.rep_insight_cache.make_key(
+            "rep-insight",
+            {
+                "rep_id": rep.id,
+                "period_days": period_days,
+                **self._manager_ai_cache_signature(),
+            },
+        )
         cached = self.rep_insight_cache.get_json(cache_key)
         if cached is not None:
-            return RepInsightResponse.model_validate(cached)
+            return self._with_cached_ai_meta(RepInsightResponse.model_validate(cached))
         coaching_system_prefix = self._get_coaching_system_prefix(db, rep.org_id)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
@@ -548,26 +816,17 @@ Provide a coaching analysis in this exact JSON format:
 }}
 """.strip()
 
-        content_payload = self._call_claude_json(
+        result = self._call_manager_ai_json(
             system_prompt=(
                 f"{coaching_system_prefix}\n\n"
                 "You are a precise sales coaching analyst. Return only valid JSON."
             ),
             user_prompt=prompt,
             max_tokens=700,
+            task="rep_insight",
+            validator=RepInsightContent.model_validate,
         )
-        if not isinstance(content_payload, dict):
-            raise AiCoachingUnavailableError("Claude returned an invalid rep insight payload")
-        content = RepInsightContent.model_validate(
-            {
-                **content_payload,
-                "readiness_trajectory": readiness_trajectory,
-                "override_signal": override_signal,
-                "adaptive_skill_profile": adaptive_skill_profile,
-                "risk_level": (rep_risk or {}).get("risk_level"),
-                "triggered_alerts": list((rep_risk or {}).get("triggered_alerts") or []),
-            }
-        )
+        content = result.payload
 
         data_summary = {
             "period_days": period_days,
@@ -598,12 +857,22 @@ Provide a coaching analysis in this exact JSON format:
                 "triggered_alerts": [],
             },
         }
+        generated_at = datetime.now(timezone.utc).isoformat()
         response = RepInsightResponse(
             rep_id=rep.id,
             rep_name=rep.name,
-            generated_at=datetime.now(timezone.utc).isoformat(),
+            generated_at=generated_at,
             data_summary=data_summary,
-            **content.model_dump(),
+            ai_meta=self._ai_meta_from_result(result, generated_at=generated_at),
+            **content.model_copy(
+                update={
+                    "readiness_trajectory": readiness_trajectory,
+                    "override_signal": override_signal,
+                    "adaptive_skill_profile": adaptive_skill_profile,
+                    "risk_level": (rep_risk or {}).get("risk_level"),
+                    "triggered_alerts": list((rep_risk or {}).get("triggered_alerts") or []),
+                }
+            ).model_dump(),
         )
         self.rep_insight_cache.set_json(cache_key, response.model_dump(mode="json"))
         return response
@@ -616,10 +885,18 @@ Provide a coaching analysis in this exact JSON format:
         manager: User,
         period_days: int,
     ) -> OneOnOnePrepResponse:
-        cache_key = f"one_on_one_prep:{manager.id}:{rep.id}:{period_days}"
+        cache_key = self.one_on_one_prep_cache.make_key(
+            "one-on-one-prep",
+            {
+                "manager_id": manager.id,
+                "rep_id": rep.id,
+                "period_days": period_days,
+                **self._manager_ai_cache_signature(),
+            },
+        )
         cached = self.one_on_one_prep_cache.get_json(cache_key)
         if cached is not None:
-            return OneOnOnePrepResponse.model_validate(cached)
+            return self._with_cached_ai_meta(OneOnOnePrepResponse.model_validate(cached))
         coaching_system_prefix = self._get_coaching_system_prefix(db, rep.org_id)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=period_days)
@@ -812,20 +1089,24 @@ Requirements:
 - Avoid generic coaching language. Make each opener feel like something a manager would actually say in a 1:1.
 """.strip()
 
-        content_payload = self._call_claude_json(
+        result = self._call_manager_ai_json(
             system_prompt=(
                 f"{coaching_system_prefix}\n\n"
                 "You are a precise manager prep copilot. Return only valid JSON."
             ),
             user_prompt=prompt,
             max_tokens=900,
+            task="one_on_one_prep",
+            validator=lambda payload: OneOnOnePrepContent.model_validate(
+                {
+                    **payload,
+                    "discussion_topics": list((payload or {}).get("discussion_topics") or [])[:3]
+                    if isinstance(payload, dict)
+                    else payload,
+                }
+            ),
         )
-        if not isinstance(content_payload, dict):
-            raise AiCoachingUnavailableError("Claude returned an invalid one-on-one prep payload")
-        if isinstance(content_payload.get("discussion_topics"), list):
-            content_payload["discussion_topics"] = content_payload["discussion_topics"][:3]
-
-        content = OneOnOnePrepContent.model_validate(content_payload)
+        content = result.payload
         data_summary = {
             "period_days": period_days,
             "adaptive_plan": {
@@ -842,13 +1123,15 @@ Requirements:
             "recent_sessions": recent_sessions_payload,
             "adaptive_outcomes": recent_outcomes_payload,
         }
+        generated_at = datetime.now(timezone.utc).isoformat()
         response = OneOnOnePrepResponse(
             manager_id=manager.id,
             rep_id=rep.id,
             rep_name=rep.name,
             period_days=period_days,
-            generated_at=datetime.now(timezone.utc).isoformat(),
+            generated_at=generated_at,
             data_summary=data_summary,
+            ai_meta=self._ai_meta_from_result(result, generated_at=generated_at),
             **content.model_dump(),
         )
         self.one_on_one_prep_cache.set_json(cache_key, response.model_dump(mode="json"))
@@ -861,10 +1144,16 @@ Requirements:
         manager: User,
         reps: list[User],
     ) -> WeeklyTeamBriefingResponse:
-        cache_key = f"weekly_team_briefing:{manager.id}"
+        cache_key = self.weekly_team_briefing_cache.make_key(
+            "weekly-team-briefing",
+            {
+                "manager_id": manager.id,
+                **self._manager_ai_cache_signature(),
+            },
+        )
         cached = self.weekly_team_briefing_cache.get_json(cache_key)
         if cached is not None:
-            return WeeklyTeamBriefingResponse.model_validate(cached)
+            return self._with_cached_ai_meta(WeeklyTeamBriefingResponse.model_validate(cached))
         coaching_system_prefix = self._get_coaching_system_prefix(db, manager.org_id)
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=7)
@@ -1058,16 +1347,17 @@ Requirements:
 - Every claim should be grounded in the supplied stats.
 """.strip()
 
-        content_payload = self._call_claude_json(
+        result = self._call_manager_ai_json(
             system_prompt=(
                 f"{coaching_system_prefix}\n\n"
                 "You are a precise weekly team briefing copilot. Return only valid JSON."
             ),
             user_prompt=prompt,
             max_tokens=900,
+            task="weekly_team_briefing",
+            validator=WeeklyTeamBriefingContent.model_validate,
         )
-        if not isinstance(content_payload, dict):
-            raise AiCoachingUnavailableError("Claude returned an invalid weekly team briefing payload")
+        content_payload = result.payload.model_dump()
         content_payload["needs_attention"] = [
             {
                 "name": next(
@@ -1083,10 +1373,11 @@ Requirements:
             for risk in at_risk_reps[:2]
         ]
 
+        generated_at = datetime.now(timezone.utc).isoformat()
         response = WeeklyTeamBriefingResponse.model_validate(
             {
                 "manager_id": manager.id,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": generated_at,
                 "data_summary": {
                     "period_days": 7,
                     "rep_count_considered": len(capped_reps),
@@ -1099,6 +1390,7 @@ Requirements:
                     },
                     "rep_summaries": rep_briefs,
                 },
+                "ai_meta": self._ai_meta_from_result(result, generated_at=generated_at),
                 **content_payload,
             }
         )
@@ -1266,10 +1558,16 @@ Requirements:
         return normalized
 
     def generate_session_annotations(self, db: Session, *, session_id: str) -> SessionAnnotationsResponse:
-        cache_key = f"session_annotations:{session_id}"
+        cache_key = self.session_annotations_cache.make_key(
+            "session-annotations",
+            {
+                "session_id": session_id,
+                **self._manager_ai_cache_signature(),
+            },
+        )
         cached = self.session_annotations_cache.get_json(cache_key)
         if cached is not None:
-            return SessionAnnotationsResponse.model_validate(cached)
+            return self._with_cached_ai_meta(SessionAnnotationsResponse.model_validate(cached))
         session = db.scalar(select(DrillSession).where(DrillSession.id == session_id))
         org_id = session.rep.org_id if session is not None and session.rep is not None else None
         coaching_system_prefix = self._get_coaching_system_prefix(db, org_id)
@@ -1320,16 +1618,22 @@ Return JSON array:
 ]
 """.strip()
 
-        raw_items = self._call_claude_json(
+        result = self._call_manager_ai_json(
             system_prompt=(
                 f"{coaching_system_prefix}\n\n"
                 "You are a precise transcript coach. Return only valid JSON."
             ),
             user_prompt=prompt,
             max_tokens=1000,
+            task="session_annotations",
+            validator=lambda payload: [
+                SessionAnnotation.model_validate(item).model_dump(mode="json")
+                for item in payload
+            ]
+            if isinstance(payload, list)
+            else (_ for _ in ()).throw(ValueError("annotations_payload_invalid")),
         )
-        if not isinstance(raw_items, list):
-            raise AiCoachingUnavailableError("Claude returned an invalid annotations payload")
+        raw_items = result.payload
 
         turn_index_by_id = {turn.id: turn.turn_index for turn in turns}
         seen_turn_ids: set[str] = set()
@@ -1342,10 +1646,12 @@ Return JSON array:
             annotations.append(annotation)
 
         annotations.sort(key=lambda item: turn_index_by_id[item.turn_id])
+        generated_at = datetime.now(timezone.utc).isoformat()
         response = SessionAnnotationsResponse(
             session_id=session_id,
-            generated_at=datetime.now(timezone.utc).isoformat(),
+            generated_at=generated_at,
             annotations=annotations,
+            ai_meta=self._ai_meta_from_result(result, generated_at=generated_at),
         )
         self.session_annotations_cache.set_json(cache_key, response.model_dump(mode="json"))
         return response
@@ -1439,16 +1745,17 @@ Return JSON:
 }}
 """.strip()
 
-        content = TeamCoachingSummaryContent.model_validate(
-            self._call_claude_json(
-                system_prompt=(
-                    f"{coaching_system_prefix}\n\n"
-                    "You are a precise coaching strategist. Return only valid JSON."
-                ),
-                user_prompt=prompt,
-                max_tokens=320,
-            )
+        result = self._call_manager_ai_json(
+            system_prompt=(
+                f"{coaching_system_prefix}\n\n"
+                "You are a precise coaching strategist. Return only valid JSON."
+            ),
+            user_prompt=prompt,
+            max_tokens=320,
+            task="team_coaching_summary",
+            validator=TeamCoachingSummaryContent.model_validate,
         )
+        content = result.payload
         summary_text = _trim_to_three_sentences(content.summary)
         if _sentence_count(summary_text) > 3:
             summary_text = _trim_to_three_sentences(summary_text)
@@ -1461,12 +1768,14 @@ Return JSON:
             "highest_calibration_drift": highest_drift,
             "recent_note_previews": recent_note_previews,
         }
+        generated_at = datetime.now(timezone.utc).isoformat()
         return TeamCoachingSummaryResponse(
             manager_id=manager.id,
             period_days=period_days,
-            generated_at=datetime.now(timezone.utc).isoformat(),
+            generated_at=generated_at,
             summary=summary_text,
             data_summary=data_summary,
+            ai_meta=self._ai_meta_from_result(result, generated_at=generated_at),
         )
 
     def _call_claude_json(
@@ -1477,29 +1786,10 @@ Return JSON:
         max_tokens: int,
         model: str | None = None,
     ) -> Any:
-        if not self.settings.anthropic_api_key:
-            raise AiCoachingUnavailableError("Claude analysis is unavailable because Anthropic is not configured")
-
-        try:
-            with httpx.Client(timeout=self.settings.provider_timeout_seconds) as client:
-                response = client.post(
-                    f"{self.settings.anthropic_base_url.rstrip('/')}/v1/messages",
-                    headers={
-                        "x-api-key": self.settings.anthropic_api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": model or self.settings.anthropic_model,
-                        "max_tokens": max_tokens,
-                        "temperature": 0.2,
-                        "system": system_prompt,
-                        "messages": [{"role": "user", "content": user_prompt}],
-                    },
-                )
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise AiCoachingUnavailableError("Claude analysis is temporarily unavailable") from exc
-
-        content = _extract_text_content(response.json())
-        return _extract_json_block(content)
+        del model
+        return self._call_manager_ai_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            task="legacy_manager_ai",
+        ).payload

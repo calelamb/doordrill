@@ -68,6 +68,11 @@ class Settings(BaseSettings):
         alias="ANTHROPIC_CHAT_ANSWER_MODEL",
     )
     anthropic_base_url: str = Field(default="https://api.anthropic.com", alias="ANTHROPIC_BASE_URL")
+    manager_ai_model: str | None = Field(default=None, alias="MANAGER_AI_MODEL")
+    manager_ai_fast_model: str | None = Field(default=None, alias="MANAGER_AI_FAST_MODEL")
+    manager_ai_fallback_provider: str | None = Field(default=None, alias="MANAGER_AI_FALLBACK_PROVIDER")
+    manager_ai_fallback_model: str | None = Field(default=None, alias="MANAGER_AI_FALLBACK_MODEL")
+    manager_ai_fallback_fast_model: str | None = Field(default=None, alias="MANAGER_AI_FALLBACK_FAST_MODEL")
     elevenlabs_api_key: str | None = Field(default=None, alias="ELEVENLABS_API_KEY")
     elevenlabs_voice_id: str | None = Field(default=None, alias="ELEVENLABS_VOICE_ID")
     elevenlabs_model_id: str = Field(default="eleven_flash_v2_5", alias="ELEVENLABS_MODEL_ID")

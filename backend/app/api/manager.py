@@ -1157,21 +1157,24 @@ def ask_manager_documents(
         query=payload.question,
         k=5,
     )
-    if not sources:
-        return DocumentAskResponse(
-            answer="The uploaded company training material does not address that question.",
-            sources=[],
-        )
-
     try:
-        answer = manager_ai_service.answer_company_material_question(
+        answer, ai_meta = manager_ai_service.answer_company_material_question(
             question=payload.question,
             sources=sources,
         )
     except AiCoachingUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
-    return DocumentAskResponse(answer=answer, sources=sources)
+    return DocumentAskResponse(answer=answer, sources=sources, chunks_used=len(sources), ai_meta=ai_meta)
+
+
+@router.post("/ai/knowledge-answer", response_model=DocumentAskResponse)
+def answer_manager_knowledge_question(
+    payload: DocumentAskRequest,
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> DocumentAskResponse:
+    return ask_manager_documents(payload=payload, actor=actor, db=db)
 
 
 @router.get("/team")
@@ -1912,9 +1915,9 @@ def get_ai_rep_insight(
             period_days=payload.period_days,
         )
     except AiCoachingDataUnavailableError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=exc.detail()) from exc
     except AiCoachingUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
 
 @router.post("/reps/{rep_id}/one-on-one-prep", response_model=OneOnOnePrepResponse)
@@ -1940,9 +1943,9 @@ def get_one_on_one_prep(
             period_days=payload.period_days,
         )
     except AiCoachingDataUnavailableError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=exc.detail()) from exc
     except AiCoachingUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
 
 @router.post("/team/weekly-briefing", response_model=WeeklyTeamBriefingResponse)
@@ -1966,9 +1969,9 @@ def get_weekly_team_briefing(
             reps=reps,
         )
     except AiCoachingDataUnavailableError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=exc.detail()) from exc
     except AiCoachingUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
 
 @router.post("/ai/session-annotations", response_model=SessionAnnotationsResponse)
@@ -1992,9 +1995,9 @@ def get_ai_session_annotations(
     try:
         return manager_ai_service.generate_session_annotations(db, session_id=payload.session_id)
     except AiCoachingDataUnavailableError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=exc.detail()) from exc
     except AiCoachingUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
 
 @router.post("/ai/team-coaching-summary", response_model=TeamCoachingSummaryResponse)
@@ -2025,7 +2028,7 @@ def get_ai_team_coaching_summary(
             coaching_analytics=coaching_analytics,
         )
     except AiCoachingUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
 
 @router.post("/ai/chat", response_model=ManagerChatResponse)
@@ -2040,9 +2043,9 @@ def chat_with_manager_ai(
     _ensure_same_org(actor, manager.org_id)
 
     try:
-        classification = manager_ai_service.classify_manager_chat_intent(message=payload.message)
+        classification, classification_meta = manager_ai_service.classify_manager_chat_intent_with_meta(message=payload.message)
     except AiCoachingUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
     current_end = datetime.now(timezone.utc).replace(microsecond=0)
     current_start = (current_end - timedelta(days=payload.period_days)).replace(microsecond=0)
@@ -2195,19 +2198,24 @@ def chat_with_manager_ai(
         relevant_data["company_training_context"] = company_training_context
 
     try:
-        answer = manager_ai_service.answer_manager_chat(
+        answer, answer_meta = manager_ai_service.answer_manager_chat_with_meta(
             period_days=payload.period_days,
             message=payload.message,
             conversation_history=[item.model_dump(mode="json") for item in payload.conversation_history],
             relevant_data=relevant_data,
         )
     except AiCoachingUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
     return ManagerChatResponse(
         **answer.model_dump(),
         intent_detected=classification.intent,
         sources_used=sources_used,
+        ai_meta=manager_ai_service._merge_ai_meta_records(
+            ("classification", classification_meta),
+            ("answer", answer_meta),
+            generated_at=answer_meta.generated_at,
+        ),
     )
 
 

@@ -3,9 +3,10 @@ import { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { BookOpenText, ChevronDown, ChevronUp, Loader2, Search } from "lucide-react";
 
+import { AiMetaStrip } from "./shared/AiMetaStrip";
 import { EmptyState } from "./shared/EmptyState";
-import { queryDocuments } from "../lib/knowledge";
-import type { KnowledgeQueryChunk } from "../lib/types";
+import { askDocuments } from "../lib/knowledge";
+import type { KnowledgeAnswerResponse, KnowledgeQueryChunk } from "../lib/types";
 
 type KnowledgeBaseQueryPanelProps = {
   managerId: string;
@@ -19,7 +20,7 @@ function formatSimilarity(score: number) {
 export function KnowledgeBaseQueryPanel({ managerId, hasReadyDocuments }: KnowledgeBaseQueryPanelProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<KnowledgeQueryChunk[]>([]);
+  const [answer, setAnswer] = useState<KnowledgeAnswerResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
@@ -28,7 +29,7 @@ export function KnowledgeBaseQueryPanel({ managerId, hasReadyDocuments }: Knowle
     if (!hasReadyDocuments) {
       return "Upload and process at least one document before searching the knowledge base.";
     }
-    return "Search raw passages only. These are the exact chunks the AI retrieval layer can see.";
+    return "Ask a question and review both the grounded AI answer and the exact source passages it used.";
   }, [hasReadyDocuments]);
 
   async function runQuery() {
@@ -42,10 +43,10 @@ export function KnowledgeBaseQueryPanel({ managerId, hasReadyDocuments }: Knowle
     setHasSearched(true);
 
     try {
-      const response = await queryDocuments(managerId, trimmedQuery, 5);
-      setResults(response.chunks);
+      const response = await askDocuments(managerId, trimmedQuery);
+      setAnswer(response);
     } catch (queryError) {
-      setResults([]);
+      setAnswer(null);
       setError(queryError instanceof Error ? queryError.message : "Search failed.");
     } finally {
       setLoading(false);
@@ -98,7 +99,7 @@ export function KnowledgeBaseQueryPanel({ managerId, hasReadyDocuments }: Knowle
                     <input
                       value={query}
                       onChange={(event) => setQuery(event.target.value)}
-                      placeholder="Ex. What does our script say about the already-have-service objection?"
+                      placeholder="Ex. How should we handle the already-have-service objection?"
                       className="w-full bg-transparent text-sm text-ink outline-none placeholder:text-muted"
                     />
                   </div>
@@ -111,17 +112,17 @@ export function KnowledgeBaseQueryPanel({ managerId, hasReadyDocuments }: Knowle
                   {loading ? (
                     <span className="inline-flex items-center gap-2">
                       <Loader2 className="h-4 w-4 animate-spin" />
-                      Searching...
+                      Asking...
                     </span>
                   ) : (
-                    "Search Material"
+                    "Ask Material"
                   )}
                 </button>
               </div>
             </form>
 
             {loading ? (
-              <EmptyState variant="loading" message="Searching uploaded material..." />
+              <EmptyState variant="loading" message="Generating an answer from your uploaded material..." />
             ) : error ? (
               <EmptyState
                 variant="error"
@@ -139,15 +140,29 @@ export function KnowledgeBaseQueryPanel({ managerId, hasReadyDocuments }: Knowle
                 icon={BookOpenText}
                 message="No searchable material is ready yet. Upload a document and wait for processing to finish."
               />
-            ) : hasSearched && results.length === 0 ? (
+            ) : hasSearched && !answer ? (
               <EmptyState
                 variant="empty"
                 icon={BookOpenText}
                 message="No relevant sections found. Try rephrasing or uploading more material."
               />
-            ) : results.length > 0 ? (
+            ) : answer ? (
               <div className="mt-6 space-y-4">
-                {results.map((chunk) => (
+                <article className="rounded-[28px] border border-border/70 bg-[linear-gradient(135deg,rgba(255,255,255,0.96),rgba(236,247,238,0.92))] p-5">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent/70">Grounded Answer</p>
+                      <h3 className="mt-2 text-lg font-semibold text-ink">AI answer from your training material</h3>
+                    </div>
+                    <div className="rounded-full bg-accent-soft/80 px-3 py-1.5 text-xs font-semibold text-accent">
+                      {answer.chunks_used} source {answer.chunks_used === 1 ? "chunk" : "chunks"}
+                    </div>
+                  </div>
+                  <p className="mt-4 text-sm leading-7 text-ink/90">{answer.answer}</p>
+                  <AiMetaStrip meta={answer.ai_meta} />
+                </article>
+
+                {answer.sources.map((chunk) => (
                   <article
                     key={chunk.chunk_id}
                     className="rounded-[28px] border border-border/70 bg-[linear-gradient(135deg,rgba(255,255,255,0.92),rgba(244,248,242,0.86))] p-5"
@@ -155,7 +170,9 @@ export function KnowledgeBaseQueryPanel({ managerId, hasReadyDocuments }: Knowle
                     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">Source document</p>
-                        <h3 className="mt-2 text-lg font-semibold text-ink">{chunk.document_name}</h3>
+                        <h3 className="mt-2 text-lg font-semibold text-ink">
+                          {chunk.is_universal ? `${chunk.document_name} · Universal` : chunk.document_name}
+                        </h3>
                       </div>
                       <div className="inline-flex items-center rounded-full bg-accent-soft/80 px-3 py-1.5 text-xs font-semibold text-accent">
                         {formatSimilarity(chunk.similarity_score)}
@@ -169,7 +186,7 @@ export function KnowledgeBaseQueryPanel({ managerId, hasReadyDocuments }: Knowle
               <EmptyState
                 variant="empty"
                 icon={BookOpenText}
-                message="Search for a script, objection playbook, or methodology phrase to inspect raw passages."
+                message="Ask about a script, objection playbook, or methodology phrase to get a grounded answer plus the raw passages used."
               />
             )}
           </motion.div>

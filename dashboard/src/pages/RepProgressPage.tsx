@@ -16,6 +16,7 @@ import { OneOnOnePrepCard } from "../components/OneOnOnePrepCard";
 import { RepRadarChart } from "../components/RepRadarChart";
 import { ChartSkeleton } from "../components/shared/ChartSkeleton";
 import { EmptyState } from "../components/shared/EmptyState";
+import { AiMetaStrip } from "../components/shared/AiMetaStrip";
 import { ScoreTrajectoryBar } from "../components/shared/ScoreTrajectoryBar";
 import { ScoreChip } from "../components/shared/ScoreChip";
 import { SkillChip } from "../components/shared/SkillChip";
@@ -216,7 +217,6 @@ export function RepProgressPage() {
         navigate("/login", { replace: true });
         return;
       }
-      setInsight(null);
       setInsightError(result.reason instanceof Error ? result.reason.message : "Could not generate analysis. Try refreshing.");
     } finally {
       if (insightRequestRef.current === requestId) {
@@ -957,9 +957,9 @@ export function RepProgressPage() {
         </div>
 
         <div className="mt-6">
-          {insightLoading ? <InsightSkeleton /> : null}
+          {insightLoading && !insight ? <InsightSkeleton /> : null}
 
-          {!insightLoading && insightError ? (
+          {!insightLoading && !insight && insightError ? (
             <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-5 py-6">
               <p className="text-sm font-medium text-error">Could not generate analysis. Try refreshing.</p>
               <button
@@ -974,11 +974,24 @@ export function RepProgressPage() {
             </div>
           ) : null}
 
-          {!insightLoading && !insightError && insight ? (
+          {insight ? (
             <div className="space-y-6">
+              {insightLoading ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-900">
+                  Refreshing AI coach analysis...
+                </div>
+              ) : null}
+
+              {!insightLoading && insightError ? (
+                <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-5 py-4 text-sm text-error">
+                  {insightError}
+                </div>
+              ) : null}
+
               <div>
                 <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Diagnosis</div>
                 <p className="mt-3 text-2xl font-black tracking-tight text-ink">{insight.headline}</p>
+                <AiMetaStrip meta={insight.ai_meta} />
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">

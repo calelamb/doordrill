@@ -288,5 +288,7 @@ def test_one_on_one_prep_structure(client, seed_org, monkeypatch):
         json={"manager_id": seed_org["manager_id"], "period_days": 14},
     )
     assert cached.status_code == 200
-    assert cached.json() == body
+    assert cached.json()["discussion_topics"] == body["discussion_topics"]
+    assert cached.json()["ai_meta"]["cached"] is True
+    assert cached.json()["ai_meta"]["status"] == "cached"
     assert call_count["value"] == 1
