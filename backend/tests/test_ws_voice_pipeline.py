@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from sqlalchemy import select
 
 from app.db.session import SessionLocal
@@ -97,6 +98,45 @@ class _RecordingTtsClient(MockTtsClient):
 
     async def stream_audio(self, text: str):
         self.texts.append(text)
+        async for chunk in super().stream_audio(text):
+            yield chunk
+
+
+class _LatencyAwareSttClient(MockSttClient):
+    def __init__(self, *, final_delay_s: float) -> None:
+        self.final_delay_s = final_delay_s
+        self._finalized = asyncio.Event()
+
+    async def finalize_utterance(self, payload: dict) -> SttTranscript:
+        hint = str(payload.get("transcript_hint", "")).strip()
+        on_partial = payload.get("on_partial")
+        if callable(on_partial) and hint:
+            on_partial(hint, False)
+        await asyncio.wait_for(self._finalized.wait(), timeout=1)
+        await asyncio.sleep(self.final_delay_s)
+        return SttTranscript(text=hint, confidence=0.98 if hint else 0.0, is_final=bool(hint), source=self.provider_name)
+
+    async def trigger_finalization(self) -> None:
+        self._finalized.set()
+
+
+class _LatencyAwareLlmClient(MockLlmClient):
+    def __init__(self, *, first_token_delay_s: float, reply: str) -> None:
+        self.first_token_delay_s = first_token_delay_s
+        self.reply = reply
+
+    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80):
+        del rep_text, stage, system_prompt, max_tokens
+        await asyncio.sleep(self.first_token_delay_s)
+        yield self.reply
+
+
+class _LatencyAwareTtsClient(MockTtsClient):
+    def __init__(self, *, first_chunk_delay_s: float) -> None:
+        self.first_chunk_delay_s = first_chunk_delay_s
+
+    async def stream_audio(self, text: str):
+        await asyncio.sleep(self.first_chunk_delay_s)
         async for chunk in super().stream_audio(text):
             yield chunk
 
@@ -235,6 +275,64 @@ def test_ws_session_state_includes_system_prompt_token_count(client, seed_org, m
 
     state_payloads = [message["payload"] for message in turn_messages if message["type"] == "server.session.state"]
     assert any(payload.get("system_prompt_token_count", 0) > 0 for payload in state_payloads)
+
+
+def test_ws_phase_latency_breakdown_stays_within_deterministic_budgets(client, seed_org, monkeypatch):
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(
+            stt=_LatencyAwareSttClient(final_delay_s=0.03),
+            llm=_LatencyAwareLlmClient(
+                first_token_delay_s=0.05,
+                reply="Before I agree to anything, I need to know the monthly budget and what is included.",
+            ),
+            tts=_LatencyAwareTtsClient(first_chunk_delay_s=0.04),
+        ),
+    )
+    monkeypatch.setattr(voice_ws, "VAD_FINALIZE_DEBOUNCE_MS", 1)
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+
+        ws.send_json({"type": "client.vad.state", "sequence": 1, "payload": {"speaking": True}})
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 2,
+                "payload": {
+                    "transcript_hint": "Hi, I can lower your monthly service cost today.",
+                    "codec": "opus",
+                },
+            }
+        )
+        ws.send_json({"type": "client.vad.state", "sequence": 3, "payload": {"speaking": False}})
+
+        committed = None
+        for _ in range(200):
+            message = ws.receive_json()
+            if message["type"] == "server.turn.committed":
+                committed = message
+                break
+
+        assert committed is not None
+        ws.send_json({"type": "client.session.end", "sequence": 4, "payload": {}})
+
+    phase_latency = committed["payload"]["phase_latency_breakdown"]
+    assert phase_latency["stt_ms"] is not None
+    assert phase_latency["analysis_ms"] is not None
+    assert phase_latency["llm_first_token_ms"] is not None
+    assert phase_latency["tts_first_audio_ms"] is not None
+    assert phase_latency["total_turn_ms"] is not None
+    assert phase_latency["stt_ms"] <= 150
+    assert phase_latency["analysis_ms"] <= 75
+    assert phase_latency["llm_first_token_ms"] <= 180
+    assert phase_latency["tts_first_audio_ms"] <= 150
+    assert phase_latency["total_turn_ms"] <= 450
 
 
 def test_ws_barge_in_emits_audio_interrupt(client, seed_org, monkeypatch):

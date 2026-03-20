@@ -65,6 +65,9 @@ python scripts/load_test_ws.py \
   --min-success-rate 0.99 \
   --verify-replay \
   --trigger-barge-in \
+  --min-realism-score 7.0 \
+  --min-transcript-confidence 0.85 \
+  --max-forbidden-phrase-hits 0 \
   --report-json ./load-reports/ws-ramp.json
 ```
 

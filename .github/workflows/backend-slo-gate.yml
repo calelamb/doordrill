@@ -9,9 +9,87 @@ on:
     paths:
       - backend/**
       - .github/workflows/backend-slo-gate.yml
+  workflow_dispatch:
+    inputs:
+      api_base:
+        description: HTTP base URL for the live backend
+        required: true
+        type: string
+      ws_base:
+        description: WebSocket base URL for the live backend
+        required: true
+        type: string
+      manager_id:
+        description: Manager user ID for assignment creation
+        required: true
+        type: string
+      rep_id:
+        description: Rep user ID for session creation
+        required: true
+        type: string
+      scenario_id:
+        description: Scenario ID to exercise
+        required: true
+        type: string
+      load_ramp:
+        description: Comma-separated concurrency ramp for the live harness
+        required: false
+        default: "5,10,20"
+        type: string
+      slo_p50_ms:
+        description: First-audio p50 latency budget
+        required: false
+        default: "900"
+        type: string
+      slo_p95_ms:
+        description: First-audio p95 latency budget
+        required: false
+        default: "1400"
+        type: string
+      barge_slo_ms:
+        description: Barge-in p95 latency budget
+        required: false
+        default: "150"
+        type: string
+      min_success_rate:
+        description: Minimum per-stage success rate
+        required: false
+        default: "0.99"
+        type: string
+      min_realism_score:
+        description: Minimum average replay realism score
+        required: false
+        default: "7.0"
+        type: string
+      min_transcript_confidence:
+        description: Minimum average replay transcript confidence
+        required: false
+        default: "0.85"
+        type: string
+      max_forbidden_phrase_hits:
+        description: Maximum banned fallback phrase hits across AI turns
+        required: false
+        default: "0"
+        type: string
+      auth_required:
+        description: Use JWT auth for the live harness run
+        required: false
+        default: false
+        type: boolean
+      manager_email:
+        description: Manager login email when auth is required
+        required: false
+        default: ""
+        type: string
+      rep_email:
+        description: Rep login email when auth is required
+        required: false
+        default: ""
+        type: string
 
 jobs:
   backend-slo-gate:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     defaults:
@@ -135,3 +213,93 @@ jobs:
           if [ -f /tmp/doordrill-api.pid ]; then
             kill "$(cat /tmp/doordrill-api.pid)" || true
           fi
+
+  backend-live-slo-gate:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      PYTHONUNBUFFERED: "1"
+      LIVE_LOAD_REPORT_PATH: "./load-reports/ws-live-ramp.json"
+      LIVE_MANAGER_PASSWORD: ${{ secrets.LIVE_MANAGER_PASSWORD }}
+      LIVE_REP_PASSWORD: ${{ secrets.LIVE_REP_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Run Live WS Quality Gate
+        env:
+          API_BASE: ${{ inputs.api_base }}
+          WS_BASE: ${{ inputs.ws_base }}
+          MANAGER_ID: ${{ inputs.manager_id }}
+          REP_ID: ${{ inputs.rep_id }}
+          SCENARIO_ID: ${{ inputs.scenario_id }}
+          LOAD_RAMP: ${{ inputs.load_ramp }}
+          SLO_P50_MS: ${{ inputs.slo_p50_ms }}
+          SLO_P95_MS: ${{ inputs.slo_p95_ms }}
+          BARGE_SLO_MS: ${{ inputs.barge_slo_ms }}
+          MIN_SUCCESS_RATE: ${{ inputs.min_success_rate }}
+          MIN_REALISM_SCORE: ${{ inputs.min_realism_score }}
+          MIN_TRANSCRIPT_CONFIDENCE: ${{ inputs.min_transcript_confidence }}
+          MAX_FORBIDDEN_PHRASE_HITS: ${{ inputs.max_forbidden_phrase_hits }}
+          AUTH_REQUIRED: ${{ inputs.auth_required }}
+          MANAGER_EMAIL: ${{ inputs.manager_email }}
+          REP_EMAIL: ${{ inputs.rep_email }}
+        run: |
+          cmd=(
+            python scripts/load_test_ws.py
+            --api-base "$API_BASE"
+            --ws-base "$WS_BASE"
+            --manager-id "$MANAGER_ID"
+            --rep-id "$REP_ID"
+            --scenario-id "$SCENARIO_ID"
+            --ramp "$LOAD_RAMP"
+            --slo-p50-ms "$SLO_P50_MS"
+            --slo-p95-ms "$SLO_P95_MS"
+            --barge-slo-ms "$BARGE_SLO_MS"
+            --min-success-rate "$MIN_SUCCESS_RATE"
+            --verify-replay
+            --trigger-barge-in
+            --min-realism-score "$MIN_REALISM_SCORE"
+            --min-transcript-confidence "$MIN_TRANSCRIPT_CONFIDENCE"
+            --max-forbidden-phrase-hits "$MAX_FORBIDDEN_PHRASE_HITS"
+            --report-json "$LIVE_LOAD_REPORT_PATH"
+          )
+
+          if [ "$AUTH_REQUIRED" = "true" ]; then
+            if [ -z "$LIVE_MANAGER_PASSWORD" ] || [ -z "$LIVE_REP_PASSWORD" ]; then
+              echo "LIVE_MANAGER_PASSWORD and LIVE_REP_PASSWORD secrets are required when auth_required=true"
+              exit 1
+            fi
+            cmd+=(
+              --auth-required
+              --manager-email "$MANAGER_EMAIL"
+              --manager-password "$LIVE_MANAGER_PASSWORD"
+              --rep-email "$REP_EMAIL"
+              --rep-password "$LIVE_REP_PASSWORD"
+            )
+          fi
+
+          "${cmd[@]}"
+
+      - name: Upload Live WS Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ws-live-slo-report
+          path: backend/load-reports/ws-live-ramp.json
+          if-no-files-found: warn

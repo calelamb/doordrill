@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import statistics
 import time
 
@@ -20,11 +21,55 @@ class WorkerResult:
     first_audio_ms: float | None
     barge_ack_ms: float | None
     barge_server_latency_ms: float | None
+    realism_score: float | None
+    transcript_confidence: float | None
+    forbidden_phrase_hits: int
     turn_committed: bool
     replay_ok: bool
     link_ok: bool
     ok: bool
     error: str | None = None
+
+
+FORBIDDEN_HOMEOWNER_PHRASES = (
+    "i'm not sure what else to say",
+    "i don't know how to respond",
+    "could you clarify what you mean",
+)
+
+
+def _normalize_text(text: str | None) -> str:
+    normalized = " ".join(str(text or "").lower().replace("’", "'").split()).strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def count_forbidden_phrase_hits(transcript_turns: list[dict] | None) -> int:
+    hits = 0
+    for turn in transcript_turns or []:
+        if str(turn.get("speaker") or "").lower() != "ai":
+            continue
+        text = _normalize_text(turn.get("text"))
+        if not text:
+            continue
+        hits += sum(1 for phrase in FORBIDDEN_HOMEOWNER_PHRASES if phrase in text)
+    return hits
+
+
+def _coerce_float(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _quality_thresholds_requested(args: argparse.Namespace) -> bool:
+    return any(
+        value is not None
+        for value in (
+            args.min_realism_score,
+            args.min_transcript_confidence,
+            args.max_forbidden_phrase_hits,
+        )
+    )
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -170,6 +215,9 @@ async def run_worker(
 
         replay_ok = True
         link_ok = True
+        realism_score: float | None = None
+        transcript_confidence: float | None = None
+        forbidden_phrase_hits = 0
         if verify_replay:
             async with httpx.AsyncClient(base_url=api_base, timeout=15.0) as client:
                 replay_resp = await client.get(
@@ -191,6 +239,10 @@ async def run_worker(
                 interruptions = replay.get("interruption_timeline") or []
                 link_ok = link_ok and len(interruptions) > 0
 
+            realism_score = _coerce_float((replay.get("conversational_realism") or {}).get("average_score"))
+            transcript_confidence = _coerce_float((replay.get("transport_metrics") or {}).get("average_transcript_confidence"))
+            forbidden_phrase_hits = count_forbidden_phrase_hits(replay.get("transcript_turns") or [])
+
         ok = (
             first_audio_ms is not None
             and turn_committed
@@ -203,6 +255,9 @@ async def run_worker(
             first_audio_ms=first_audio_ms,
             barge_ack_ms=barge_ack_ms,
             barge_server_latency_ms=barge_server_latency_ms,
+            realism_score=realism_score,
+            transcript_confidence=transcript_confidence,
+            forbidden_phrase_hits=forbidden_phrase_hits,
             turn_committed=turn_committed,
             replay_ok=replay_ok,
             link_ok=link_ok,
@@ -215,6 +270,9 @@ async def run_worker(
             first_audio_ms=None,
             barge_ack_ms=None,
             barge_server_latency_ms=None,
+            realism_score=None,
+            transcript_confidence=None,
+            forbidden_phrase_hits=0,
             turn_committed=False,
             replay_ok=False,
             link_ok=False,
@@ -289,13 +347,36 @@ async def run_stage(args: argparse.Namespace, concurrency: int) -> dict:
     barge_p95 = percentile(barge_ack, 0.95) if barge_ack else 0.0
     barge_server_p95 = percentile(barge_server, 0.95) if barge_server else 0.0
 
+    quality_results = [r for r in results if r.replay_ok]
+    realism_scores = [r.realism_score for r in quality_results if r.realism_score is not None]
+    transcript_confidences = [r.transcript_confidence for r in quality_results if r.transcript_confidence is not None]
+    forbidden_phrase_hits_total = sum(r.forbidden_phrase_hits for r in quality_results)
+    realism_avg = statistics.mean(realism_scores) if realism_scores else 0.0
+    transcript_confidence_avg = statistics.mean(transcript_confidences) if transcript_confidences else 0.0
+
     success_rate = (len(ok_results) / len(results)) if results else 0.0
     latency_slo_pass = (not latencies) or (p50 <= args.slo_p50_ms and p95 <= args.slo_p95_ms)
     barge_slo_pass = True
     if args.trigger_barge_in:
         barge_slo_pass = bool(barge_ack) and barge_p95 <= args.barge_slo_ms
 
-    slo_pass = success_rate >= args.min_success_rate and latency_slo_pass and barge_slo_pass
+    realism_slo_pass = True
+    if args.min_realism_score is not None:
+        realism_slo_pass = bool(realism_scores) and realism_avg >= args.min_realism_score
+
+    transcript_confidence_slo_pass = True
+    if args.min_transcript_confidence is not None:
+        transcript_confidence_slo_pass = (
+            bool(transcript_confidences) and transcript_confidence_avg >= args.min_transcript_confidence
+        )
+
+    forbidden_phrase_slo_pass = True
+    if args.max_forbidden_phrase_hits is not None:
+        forbidden_phrase_slo_pass = forbidden_phrase_hits_total <= args.max_forbidden_phrase_hits
+
+    quality_slo_pass = realism_slo_pass and transcript_confidence_slo_pass and forbidden_phrase_slo_pass
+
+    slo_pass = success_rate >= args.min_success_rate and latency_slo_pass and barge_slo_pass and quality_slo_pass
 
     print(f"workers={concurrency}")
     print(f"success={len(ok_results)} errors={len(errors)}")
@@ -315,6 +396,12 @@ async def run_stage(args: argparse.Namespace, concurrency: int) -> dict:
     if args.trigger_barge_in:
         print(f"barge_ack_p95_ms={barge_p95:.1f} target={args.barge_slo_ms:.1f}")
         print(f"barge_server_latency_p95_ms={barge_server_p95:.1f}")
+    if realism_scores:
+        print(f"realism_score_avg={realism_avg:.2f}")
+    if transcript_confidences:
+        print(f"transcript_confidence_avg={transcript_confidence_avg:.3f}")
+    if quality_results:
+        print(f"forbidden_phrase_hits_total={forbidden_phrase_hits_total}")
     print(f"success_rate={success_rate:.3f} slo_pass={slo_pass}")
 
     if errors:
@@ -341,12 +428,30 @@ async def run_stage(args: argparse.Namespace, concurrency: int) -> dict:
         "barge_slo_ms": args.barge_slo_ms,
         "slo_target_p50_ms": args.slo_p50_ms,
         "slo_target_p95_ms": args.slo_p95_ms,
+        "quality_sample_count": len(quality_results),
+        "realism_score_avg": round(realism_avg, 3) if realism_scores else None,
+        "realism_score_min": round(min(realism_scores), 3) if realism_scores else None,
+        "realism_score_max": round(max(realism_scores), 3) if realism_scores else None,
+        "transcript_confidence_avg": round(transcript_confidence_avg, 4) if transcript_confidences else None,
+        "transcript_confidence_min": round(min(transcript_confidences), 4) if transcript_confidences else None,
+        "transcript_confidence_max": round(max(transcript_confidences), 4) if transcript_confidences else None,
+        "forbidden_phrase_hits_total": forbidden_phrase_hits_total,
+        "min_realism_score": args.min_realism_score,
+        "min_transcript_confidence": args.min_transcript_confidence,
+        "max_forbidden_phrase_hits": args.max_forbidden_phrase_hits,
+        "realism_slo_pass": realism_slo_pass,
+        "transcript_confidence_slo_pass": transcript_confidence_slo_pass,
+        "forbidden_phrase_slo_pass": forbidden_phrase_slo_pass,
+        "quality_slo_pass": quality_slo_pass,
         "slo_pass": slo_pass,
         "errors": [e.error for e in errors[:10]],
     }
 
 
 async def run_load(args: argparse.Namespace) -> int:
+    if _quality_thresholds_requested(args) and not args.verify_replay:
+        raise ValueError("--verify-replay is required when quality thresholds are enabled")
+
     stages = parse_ramp(args.ramp, args.concurrency)
     summary = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -359,7 +464,11 @@ async def run_load(args: argparse.Namespace) -> int:
             "p95_ms": args.slo_p95_ms,
             "barge_p95_ms": args.barge_slo_ms,
             "min_success_rate": args.min_success_rate,
+            "min_realism_score": args.min_realism_score,
+            "min_transcript_confidence": args.min_transcript_confidence,
+            "max_forbidden_phrase_hits": args.max_forbidden_phrase_hits,
         },
+        "forbidden_homeowner_phrases": list(FORBIDDEN_HOMEOWNER_PHRASES),
         "stages": [],
     }
     overall_pass = True
@@ -399,6 +508,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-success-rate", type=float, default=0.99, help="Minimum acceptable success rate per stage")
     parser.add_argument("--verify-replay", action="store_true", help="Verify replay turn capture after each worker run")
     parser.add_argument("--trigger-barge-in", action="store_true", help="Send a VAD barge-in during AI audio")
+    parser.add_argument("--min-realism-score", type=float, default=None, help="Minimum average replay realism score")
+    parser.add_argument(
+        "--min-transcript-confidence",
+        type=float,
+        default=None,
+        help="Minimum average replay transcript confidence",
+    )
+    parser.add_argument(
+        "--max-forbidden-phrase-hits",
+        type=int,
+        default=None,
+        help="Maximum banned homeowner fallback phrase hits across replayed AI turns",
+    )
     parser.add_argument("--report-json", default="", help="Write stage results to JSON report path")
     parser.add_argument("--auth-required", action="store_true", help="Authenticate REST and WS traffic with JWTs")
     parser.add_argument("--manager-email", default="", help="Manager login email for JWT-enabled runs")

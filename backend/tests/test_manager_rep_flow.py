@@ -1,9 +1,30 @@
+import asyncio
 import time
 
 from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.models.session import SessionEvent
+from app.services.provider_clients import MockLlmClient, MockSttClient, MockTtsClient, ProviderSuite
+from app.voice import ws as voice_ws
+
+
+FORBIDDEN_HOMEOWNER_PHRASES = (
+    "i'm not sure what else to say",
+    "i don't know how to respond",
+    "could you clarify what you mean",
+)
+
+
+class _HighQualityHomeownerLlmClient(MockLlmClient):
+    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80):
+        del rep_text, stage, system_prompt, max_tokens
+        for token in [
+            "Before I agree to anything, I need to know the monthly budget and what exactly is included. ",
+            "I'm not ready to schedule anything yet.",
+        ]:
+            await asyncio.sleep(0.01)
+            yield token
 
 
 def _create_assignment(client, seed_org: dict[str, str]) -> dict:
@@ -27,7 +48,14 @@ def _await_session_ended(ws) -> None:
     raise AssertionError("session did not emit ended state")
 
 
-def _run_session(client, seed_org: dict[str, str], assignment_id: str, *, trigger_barge_in: bool = False) -> str:
+def _run_session(
+    client,
+    seed_org: dict[str, str],
+    assignment_id: str,
+    *,
+    trigger_barge_in: bool = False,
+    transcript_hint: str = "Hi, I'm with Acme Pest Control. We can lower your service price today.",
+) -> str:
     session_resp = client.post(
         "/rep/sessions",
         json={
@@ -46,7 +74,7 @@ def _run_session(client, seed_org: dict[str, str], assignment_id: str, *, trigge
                 "type": "client.audio.chunk",
                 "sequence": 1,
                 "payload": {
-                    "transcript_hint": "Hi, I'm with Acme Pest Control. We can lower your service price today.",
+                    "transcript_hint": transcript_hint,
                     "codec": "opus",
                 },
             }
@@ -123,6 +151,44 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     )
     assert filtered.status_code == 200
     assert any(item["session_id"] == session_id for item in filtered.json()["items"])
+
+
+def test_replay_exposes_quality_signals_without_manual_drill(client, seed_org, monkeypatch):
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(
+            stt=MockSttClient(),
+            llm=_HighQualityHomeownerLlmClient(),
+            tts=MockTtsClient(),
+        ),
+    )
+
+    assignment = _create_assignment(client, seed_org)
+    session_id = _run_session(
+        client,
+        seed_org,
+        assignment["id"],
+        transcript_hint="Hi, I can lower your monthly cost, but can we get you on the schedule today?",
+    )
+
+    replay_resp = client.get(f"/manager/sessions/{session_id}/replay")
+    assert replay_resp.status_code == 200
+    replay = replay_resp.json()
+
+    assert replay["conversational_realism"]["average_score"] >= 7.5
+    assert replay["transport_metrics"]["average_transcript_confidence"] >= 0.95
+    assert "phase_latency_summary" in replay["transport_metrics"]
+    assert replay["turn_diagnostics"]
+    assert replay["turn_diagnostics"][0]["response_plan"]
+
+    ai_turn_text = " ".join(
+        turn["text"]
+        for turn in replay["transcript_turns"]
+        if str(turn.get("speaker")) == "ai" and isinstance(turn.get("text"), str)
+    ).lower()
+    for phrase in FORBIDDEN_HOMEOWNER_PHRASES:
+        assert phrase not in ai_turn_text
 
 
 def test_live_session_endpoints(client, seed_org):
