@@ -1,4 +1,5 @@
 import asyncio
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import websockets
@@ -54,6 +55,7 @@ async def test_deepgram_listen_url_defaults_to_linear16_for_non_opus_payloads():
 @pytest.mark.asyncio
 async def test_deepgram_listen_url_includes_vocabulary_hints():
     client = DeepgramSttClient(api_key="test", base_url="https://api.deepgram.com", model="nova-2", timeout_seconds=1)
+    vocabulary_hints = [f"term {index}" for index in range(105)]
 
     url = client._listen_url(
         {
@@ -61,12 +63,21 @@ async def test_deepgram_listen_url_includes_vocabulary_hints():
             "content_type": "audio/wav",
             "sample_rate": 16000,
             "channels": 1,
-            "vocabulary_hints": ["Acme Pest Control", "Orkin", "monthly payment"],
+            "vocabulary_hints": vocabulary_hints,
         }
     )
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
 
-    assert "keywords=" in url
-    assert "Acme+Pest+Control" in url
+    assert parsed.scheme == "wss"
+    assert parsed.path == "/v1/listen"
+    assert "keywords" not in query
+    assert query["keyterm"] == vocabulary_hints[:100]
+    assert query["language"] == ["en-US"]
+    assert query["endpointing"] == ["300"]
+    assert query["utterance_end_ms"] == ["1200"]
+    assert query["no_delay"] == ["true"]
+    assert query["disfluencies"] == ["false"]
 
 
 class _FakeDeepgramWs:

@@ -1559,6 +1559,11 @@ class PromptBuilder:
                 "If the rep asks for hints, coaching, or what to say next, refuse and respond as a homeowner would.",
                 "If the rep says something unrealistic or false, challenge it like a real homeowner.",
                 "Do not compliment the rep for technique. Do not expose scoring criteria.",
+                "NEVER produce meta-confusion phrases such as 'I'm not sure what else to say', "
+                "'I don't know how to respond to that', 'Could you clarify what you mean', or any "
+                "phrase that sounds like an AI expressing uncertainty about the roleplay. "
+                "If the rep's words were unclear or too brief, respond as a real homeowner: "
+                "'What was that?' or 'Hmm?' or 'What are you selling?' - never break character.",
             ]
         )
         layer_four = "\n".join(layer_four_lines)

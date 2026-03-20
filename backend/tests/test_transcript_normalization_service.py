@@ -82,6 +82,45 @@ def test_transcript_normalization_corrects_common_phonetic_stt_errors(raw_text, 
     assert expected in result.normalized_text
 
 
+@pytest.mark.parametrize(
+    ("raw_text", "expected"),
+    [
+        ("We switched from apt of last year.", "Aptive"),
+        ("I think apt iv used to service this place.", "Aptive"),
+        ("Was that aptiv or someone else?", "Aptive"),
+        ("It sounded like app tive on the phone.", "Aptive"),
+        ("We already use terminus right now.", "Terminix"),
+        ("I think it was termini x before.", "Terminix"),
+        ("Maybe termini handles that already.", "Terminix"),
+        ("Do you work like eco shield does?", "EcoShield"),
+        ("I meant echo shield, not your company.", "EcoShield"),
+        ("Was it echo shelled or something like that?", "EcoShield"),
+        ("We had echo shields before.", "EcoShield"),
+        ("Is that billed bi monthly?", "bimonthly"),
+        ("Do you come by monthly?", "bimonthly"),
+        ("I thought it was buy monthly service.", "bimonthly"),
+        ("Do you include de webbing outside?", "dewebbing"),
+        ("I need the webbing done around the eaves.", "dewebbing"),
+        ("Is that per imeter spray included?", "perimeter"),
+        ("Do you do a peer imeter check too?", "perimeter"),
+        ("Is there a start up fee for this?", "startup fee"),
+        ("I heard there is a start-up fee.", "startup fee"),
+        ("Do you offer a per imeter treatment option?", "perimeter treatment"),
+        ("Can you knock down cob webs too?", "cobwebs"),
+    ],
+)
+def test_transcript_normalization_corrects_prd_phonetic_entries(raw_text, expected):
+    service = TranscriptNormalizationService()
+
+    result = service.normalize(
+        text=raw_text,
+        provider="deepgram",
+        confidence=0.9,
+    )
+
+    assert expected in result.normalized_text
+
+
 def test_transcript_normalization_phonetic_corrections_are_case_insensitive():
     service = TranscriptNormalizationService()
 

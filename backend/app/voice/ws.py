@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import random
 import re
 import time
 import uuid
@@ -69,6 +70,15 @@ MAX_RUNTIME_PAUSE_MS = 60
 TTS_STREAM_TIMEOUT_SECONDS = 6
 WS_KEEPALIVE_TIMEOUT_SECONDS = 120
 WS_KEEPALIVE_INTERVAL_SECONDS = 30
+MIN_TRANSCRIPT_WORD_COUNT = 2
+CLARIFICATION_RESPONSES = [
+    "Sorry, what was that?",
+    "What?",
+    "I didn't catch that.",
+    "Hmm?",
+    "Come again?",
+]
+TRANSCRIPT_WORD_RE = re.compile(r"\b[a-z0-9']+\b", re.IGNORECASE)
 
 
 @dataclass
@@ -215,6 +225,13 @@ def _serialize_response_plan(plan: Any) -> dict[str, Any]:
     return {}
 
 
+def _is_transcript_valid(transcript: str) -> bool:
+    """Return True when the transcript has enough content for an LLM response."""
+    if not transcript or not transcript.strip():
+        return False
+    return len(TRANSCRIPT_WORD_RE.findall(transcript)) >= MIN_TRANSCRIPT_WORD_COUNT
+
+
 @router.websocket("/ws/sessions/{session_id}")
 @router.websocket("/ws/session/{session_id}")
 async def session_ws(websocket: WebSocket, session_id: str) -> None:
@@ -349,13 +366,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         )
 
     def _stt_turn_tuning() -> dict[str, int]:
-        _, state = _context_and_state()
-        stage = state.stage
-        if stage in {"door_knock", "initial_pitch"}:
-            return {"endpointing_ms": 90, "utterance_end_ms": 425}
-        if stage in {"close_attempt", "ended"}:
-            return {"endpointing_ms": 55, "utterance_end_ms": 280}
-        return {"endpointing_ms": 65, "utterance_end_ms": 325}
+        return {"endpointing_ms": 300, "utterance_end_ms": 1200}
 
     # Keep provider sessions warm to avoid first-turn cold starts.
     await providers.stt.start_session(
@@ -539,6 +550,13 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     def _next_turn_index() -> int:
         return (db.scalar(select(func.count(SessionTurn.id)).where(SessionTurn.session_id == session_id)) or 0) + 1
 
+    def _persona_voice_id() -> str | None:
+        if scenario is not None and isinstance(scenario.persona, dict):
+            raw_voice_id = scenario.persona.get("voice_id")
+            if raw_voice_id:
+                return str(raw_voice_id)
+        return None
+
     async def run_stt(msg: WsEvent):
         partials: asyncio.Queue[str] = asyncio.Queue()
         payload = dict(msg.payload)
@@ -635,11 +653,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         tts_tasks: list[asyncio.Task[None]] = []
         tts_emit_lock = asyncio.Lock()
         first_tts_audio_started = asyncio.Event()
-        persona_voice_id = None
-        if scenario is not None and isinstance(scenario.persona, dict):
-            raw_voice_id = scenario.persona.get("voice_id")
-            if raw_voice_id:
-                persona_voice_id = str(raw_voice_id)
+        persona_voice_id = _persona_voice_id()
 
         async def maybe_apply_pause(pause_ms: int) -> None:
             if pause_ms <= 0 or interrupt_signal_at is not None:
@@ -998,6 +1012,124 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             "micro_behavior": _serialize_micro_behavior(last_behavior_plan) if last_behavior_plan is not None else None,
         }
 
+    async def _emit_clarification_response(*, stage: str) -> dict[str, Any]:
+        clarification_text = random.choice(CLARIFICATION_RESPONSES)
+        persona_voice_id = _persona_voice_id()
+        started_at = datetime.now(timezone.utc)
+        interrupted = False
+        first_audio_started = asyncio.Event()
+
+        await emit_server_event(
+            "server.ai.text.delta",
+            {
+                "token": clarification_text,
+                "provider": "clarification_passthrough",
+                "stage": stage,
+                "trace_id": ws_trace_id,
+                "clarification": True,
+            },
+        )
+        await maybe_flush()
+        await emit_server_event(
+            "server.ai.text.done",
+            {
+                "provider": "clarification_passthrough",
+                "stage": stage,
+                "trace_id": ws_trace_id,
+                "clarification": True,
+            },
+        )
+        await maybe_flush()
+
+        async def stream_clarification_audio() -> None:
+            nonlocal audio_frame_count, total_audio_duration_ms, interrupted
+            tts_text = clarification_text
+            if persona_voice_id and tts_text and not tts_text.startswith("[[voice:"):
+                tts_text = f"[[voice:{persona_voice_id}]] {tts_text}"
+
+            try:
+                async with asyncio.timeout(TTS_STREAM_TIMEOUT_SECONDS):
+                    import base64 as _b64
+
+                    accum_bytes: list[bytes] = []
+                    accum_codec = "mp3"
+                    accum_provider = providers.tts.provider_name
+                    accum_duration_ms = 0
+
+                    async for audio_chunk in providers.tts.stream_audio(tts_text):
+                        if interrupt_signal_at is not None:
+                            interrupted = True
+                            return
+                        raw = audio_chunk.get("payload", "")
+                        if raw:
+                            accum_bytes.append(_b64.b64decode(raw))
+                        accum_codec = audio_chunk.get("codec", "mp3")
+                        accum_provider = audio_chunk.get("provider", providers.tts.provider_name)
+                        accum_duration_ms += int(audio_chunk.get("duration_ms", 0) or 0)
+                        audio_frame_count += 1
+                        await asyncio.sleep(0)
+
+                    if not accum_bytes or interrupt_signal_at is not None:
+                        interrupted = interrupt_signal_at is not None
+                        return
+
+                    combined_payload = _b64.b64encode(b"".join(accum_bytes)).decode("utf-8")
+                    total_audio_duration_ms += accum_duration_ms
+                    await emit_server_event(
+                        "server.ai.audio.chunk",
+                        {
+                            "codec": accum_codec,
+                            "payload": combined_payload,
+                            "provider": accum_provider,
+                            "duration_ms": accum_duration_ms,
+                            "trace_id": ws_trace_id,
+                            "clarification": True,
+                        },
+                    )
+                    record = runtime_state.turn_latency
+                    if record is not None and record.first_audio_byte_ts is None:
+                        record.first_audio_byte_ts = _monotonic_ts()
+                    first_audio_started.set()
+                    await maybe_flush()
+            except TimeoutError:
+                logger.warning(
+                    "Clarification TTS stream exceeded timeout",
+                    extra={
+                        "session_id": session_id,
+                        "trace_id": ws_trace_id,
+                        "timeout_seconds": TTS_STREAM_TIMEOUT_SECONDS,
+                    },
+                )
+            except asyncio.CancelledError:
+                interrupted = True
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "Clarification TTS failed",
+                    extra={"session_id": session_id, "trace_id": ws_trace_id, "error": str(exc)},
+                )
+                await emit_error("tts_error", str(exc), retryable=True)
+                await maybe_flush()
+
+        task = _track_tts_task(asyncio.create_task(stream_clarification_audio()))
+        record = runtime_state.turn_latency
+        if record is not None and record.tts_task_created_ts is None:
+            record.tts_task_created_ts = _monotonic_ts()
+        if not first_audio_started.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(first_audio_started.wait(), timeout=0.2)
+        try:
+            await task
+        except asyncio.CancelledError:
+            interrupted = True
+
+        return {
+            "text": clarification_text,
+            "started_at": started_at,
+            "duration_ms": max(120, int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)),
+            "interrupted": interrupted or interrupt_signal_at is not None,
+        }
+
     async def maybe_emit_silence_filler() -> bool:
         nonlocal ai_speaking, ai_speaking_started_at, barge_in_count, filler_emitted_for_silence
         if disconnected.is_set() or ai_speaking or not has_rep_audio or filler_emitted_for_silence:
@@ -1330,24 +1462,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 runtime_state.barge_in_started_at = None
                 continue
             runtime_state.barge_in_started_at = None
-            raw_rep_text = stt_result.text
-            if not raw_rep_text:
-                await emit_server_event(
-                    "server.stt.partial",
-                    {
-                        "text": "",
-                        "confidence": 0.0,
-                        "message": "awaiting transcript",
-                        "provider": providers.stt.provider_name,
-                        "trace_id": ws_trace_id,
-                    },
-                )
-                continue
-
             context = orchestrator.get_context(session_id)
             state_before_turn = orchestrator.get_state(session_id)
             transcript_result = transcript_normalizer.normalize(
-                text=raw_rep_text,
+                text=stt_result.text,
                 provider=stt_result.source,
                 confidence=stt_result.confidence,
                 scenario=scenario,
@@ -1356,7 +1474,57 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 queued_objections=list(state_before_turn.queued_objections),
             )
             rep_text = transcript_result.normalized_text
-            if not rep_text:
+            if not _is_transcript_valid(rep_text):
+                if runtime_state.turn_latency is not None and runtime_state.turn_latency.stt_final_ts is None:
+                    runtime_state.turn_latency.stt_final_ts = _monotonic_ts()
+                logger.info(
+                    "Transcript too short to process, skipping LLM call",
+                    extra={
+                        "raw": transcript_result.raw_text,
+                        "normalized": rep_text,
+                        "session_id": session_id,
+                    },
+                )
+                ai_speaking = True
+                ai_speaking_started_at = datetime.now(timezone.utc)
+                await emit_session_state(
+                    {
+                        "state": "ai_speaking",
+                        "stage": state_before_turn.stage,
+                        "clarification": True,
+                    }
+                )
+                clarification_result = await _emit_clarification_response(stage=state_before_turn.stage)
+                if clarification_result["interrupted"]:
+                    barge_at, reason = consume_interrupt()
+                    if barge_at is not None:
+                        barge_in_count += 1
+                        await emit_session_state(
+                            {
+                                "state": "barge_in_detected",
+                                "reason": reason or "unknown",
+                                "barge_in_count": barge_in_count,
+                                "latency_ms": max(
+                                    0,
+                                    int((barge_at - (ai_speaking_started_at or barge_at)).total_seconds() * 1000),
+                                ),
+                                "at": barge_at.isoformat(),
+                                "trace_id": ws_trace_id,
+                                "clarification": True,
+                            }
+                        )
+                else:
+                    consume_interrupt()
+                ai_speaking = False
+                await emit_session_state(
+                    {
+                        "state": "ai_idle",
+                        "interrupted": clarification_result["interrupted"],
+                        "clarification": True,
+                    }
+                )
+                runtime_state.turn_latency = None
+                await maybe_flush()
                 continue
 
             plan = orchestrator.prepare_rep_turn(session_id=session_id, rep_text=rep_text, db=db)

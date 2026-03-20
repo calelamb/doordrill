@@ -255,13 +255,16 @@ class DeepgramSttClient(BaseSttClient):
     def _listen_url(self, payload: dict) -> str:
         content_type, codec, sample_rate, channels = self._normalized_audio_params(payload)
         ws_base = self.base_url.replace("https://", "wss://").replace("http://", "ws://")
-        params: dict[str, str] = {
+        params: dict[str, str | list[str]] = {
             "model": self.model,
             "smart_format": "true",
             "punctuate": "true",
             "interim_results": "true",
-            "endpointing": str(int(payload.get("endpointing_ms") or 75)),
-            "utterance_end_ms": str(int(payload.get("utterance_end_ms") or 350)),
+            "endpointing": str(int(payload.get("endpointing_ms") or 300)),
+            "utterance_end_ms": str(int(payload.get("utterance_end_ms") or 1200)),
+            "language": "en-US",
+            "no_delay": "true",
+            "disfluencies": "false",
         }
         vocabulary_hints = [
             " ".join(str(term or "").split()).strip()
@@ -269,7 +272,8 @@ class DeepgramSttClient(BaseSttClient):
             if " ".join(str(term or "").split()).strip()
         ]
         if vocabulary_hints:
-            params["keywords"] = ",".join(vocabulary_hints[:12])
+            # Deepgram nova-3 expects repeated `keyterm` query params, not a comma-joined `keywords` param.
+            params["keyterm"] = vocabulary_hints[:100]
         if codec == "opus" or "opus" in content_type:
             params["encoding"] = "opus"
             params["sample_rate"] = str(sample_rate)
@@ -279,7 +283,7 @@ class DeepgramSttClient(BaseSttClient):
             params["encoding"] = "linear16"
             params["sample_rate"] = str(sample_rate)
             params["channels"] = str(channels)
-        return f"{ws_base}/v1/listen?{urlencode(params)}"
+        return f"{ws_base}/v1/listen?{urlencode(params, doseq=True)}"
 
     async def _open_session(self, session_id: str, payload: dict) -> _DeepgramSessionState:
         listen_url = self._listen_url(payload)

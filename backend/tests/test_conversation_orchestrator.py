@@ -131,6 +131,26 @@ def test_system_prompt_includes_pressure_resolved_and_latent_objections():
     assert "LAYER 3A-PLAN - RESPONSE PLAN" in plan.system_prompt
 
 
+def test_system_prompt_blocks_meta_confusion_phrases_with_homeowner_alternatives():
+    orchestrator = ConversationOrchestrator()
+    orchestrator.initialize_session(
+        "session-meta-guard",
+        scenario_name="Unclear Opening",
+        scenario_description="A homeowner reacts to a vague first line from the rep.",
+        difficulty=2,
+        persona={"attitude": "neutral", "concerns": []},
+        stages=["door_knock", "initial_pitch", "objection_handling"],
+    )
+
+    plan = orchestrator.prepare_rep_turn("session-meta-guard", "Hey.")
+
+    assert "NEVER produce meta-confusion phrases" in plan.system_prompt
+    assert "I'm not sure what else to say" in plan.system_prompt
+    assert "Could you clarify what you mean" in plan.system_prompt
+    assert "What was that?" in plan.system_prompt
+    assert "What are you selling?" in plan.system_prompt
+
+
 def test_direct_question_uses_fast_path_and_requires_answer_first():
     orchestrator = ConversationOrchestrator()
     orchestrator.initialize_session(

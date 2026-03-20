@@ -1,5 +1,7 @@
 import asyncio
 
+from sqlalchemy import select
+
 from app.db.session import SessionLocal
 from app.models.session import SessionTurn
 from app.services.provider_clients import MockLlmClient, MockSttClient, MockTtsClient, ProviderSuite, SttTranscript
@@ -77,6 +79,26 @@ class _FinalizeAwareSttClient(MockSttClient):
     async def trigger_finalization(self) -> None:
         self.trigger_calls += 1
         self._finalized.set()
+
+
+class _RecordingLlmClient(MockLlmClient):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80):
+        self.calls += 1
+        raise AssertionError("LLM should not be called for empty or sub-threshold transcripts")
+        yield rep_text
+
+
+class _RecordingTtsClient(MockTtsClient):
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def stream_audio(self, text: str):
+        self.texts.append(text)
+        async for chunk in super().stream_audio(text):
+            yield chunk
 
 
 def test_ws_voice_pipeline_streams_events_in_order(client, seed_org, monkeypatch):
@@ -292,5 +314,62 @@ def test_ws_commits_transcript_audit_and_turn_analysis(client, seed_org, monkeyp
         assert rep_turn.normalized_transcript_text == stt_final["payload"]["transcript_normalization"]["normalized_text"]
         assert rep_turn.transcript_provider == stt_final["payload"]["provider"]
         assert rep_turn.transcript_confidence == stt_final["payload"]["confidence"]
+    finally:
+        db.close()
+
+
+def test_ws_empty_transcript_emits_clarification_without_llm_call(client, seed_org, monkeypatch):
+    llm = _RecordingLlmClient()
+    tts = _RecordingTtsClient()
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=MockSttClient(), llm=llm, tts=tts),
+    )
+    monkeypatch.setattr(voice_ws.random, "choice", lambda responses: "I didn't catch that.")
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 1,
+                "payload": {
+                    "transcript_hint": "",
+                    "codec": "opus",
+                },
+            }
+        )
+
+        messages: list[dict] = []
+        for _ in range(50):
+            message = ws.receive_json()
+            messages.append(message)
+            if (
+                message["type"] == "server.session.state"
+                and message["payload"].get("state") == "ai_idle"
+                and message["payload"].get("clarification") is True
+            ):
+                break
+
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    assert llm.calls == 0
+    assert any(message["type"] == "server.ai.text.delta" for message in messages)
+    assert any(message["type"] == "server.ai.text.done" for message in messages)
+    assert any(message["type"] == "server.ai.audio.chunk" for message in messages)
+    assert not any(message["type"] == "server.turn.committed" for message in messages)
+    assert any(message["payload"].get("clarification") is True for message in messages if "payload" in message)
+    assert any(text.endswith("I didn't catch that.") for text in tts.texts)
+
+    db = SessionLocal()
+    try:
+        turns = db.scalars(select(SessionTurn).where(SessionTurn.session_id == session_id)).all()
+        assert turns == []
     finally:
         db.close()
