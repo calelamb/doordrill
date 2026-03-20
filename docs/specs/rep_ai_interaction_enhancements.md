@@ -1,5 +1,15 @@
 # Rep–AI interaction: accurate transcription and better AI audio
 
+## Scope: refine, don’t reinvent
+
+The voice drill stack is **already built**: Deepgram streaming, transcript normalization, orchestrator-driven prompts, OpenAI (or Anthropic) streaming, micro-behavior, ElevenLabs TTS, and WebSocket events in [`ws.py`](../../backend/app/voice/ws.py). This document is **not** a backlog of new features—it is a guide to **optimization and tuning** on top of that baseline.
+
+Expect work to look like: **better data** (vocabulary hints, correction tables), **parameter and threshold tuning** (endpointing, confidence gates, temperature, voice settings), **tighter copy in existing prompt templates**, **logging and measurement**, and **A/B comparison** of settings—not new subsystems or protocols unless something proves inadequate after measurement.
+
+**Out of scope here:** greenfield features (new drill modes, new providers, large UI surfaces), unless a spike is explicitly justified by production evidence.
+
+---
+
 This roadmap narrows in on **what the homeowner “hears”** (STT quality) and **how the homeowner sounds and speaks** (OpenAI text + ElevenLabs voice). Garbage-in from STT drives nonsensical LLM replies; weak prompts or TTS settings make good text feel flat or robotic.
 
 **Pipeline (where quality is won or lost):** mic → Deepgram → [`TranscriptNormalizationService`](../../backend/app/services/transcript_normalization_service.py) → [`ConversationOrchestrator`](../../backend/app/services/conversation_orchestrator.py) → [`OpenAiLlmClient.stream_reply`](../../backend/app/services/provider_clients.py) → micro-behavior → [`ElevenLabsTtsClient.stream_audio`](../../backend/app/services/provider_clients.py) → mobile player ([`backend/app/voice/ws.py`](../../backend/app/voice/ws.py)).
@@ -19,26 +29,28 @@ flowchart LR
 
 ## Tracking
 
+*(Each item assumes the underlying hook already exists; the work is measurement, data, or tuning.)*
+
 ### Transcription accuracy
 
-- [ ] Log and review `deepgram_utterance_result` (raw vs final text, confidence) per session; sample failures where rep intent ≠ transcript
-- [ ] Expand `keyword_hints` / org + scenario vocabulary feeding Deepgram `keyterm` (see [`_current_vocabulary_hints`](../../backend/app/voice/ws.py) → `transcript_normalizer.keyword_hints`)
-- [ ] Tune `endpointing_ms` / `utterance_end_ms` and VAD debounce for **fewer clipped endings** vs **premature finalize** ([`_stt_turn_tuning`](../../backend/app/voice/ws.py), [`_listen_url`](../../backend/app/services/provider_clients.py))
-- [ ] Review `LOW_CONFIDENCE_THRESHOLD` and short-transcript rules so bad STT triggers clarification instead of wrong homeowner replies ([`ws.py`](../../backend/app/voice/ws.py))
-- [ ] Grow `PHONETIC_CORRECTION_TABLE` and domain lists from real mishears (pest brands, plan names, local place names)
+- [ ] **Measure** existing `deepgram_utterance_result` logs (raw vs final text, confidence); sample failures where rep intent ≠ transcript
+- [ ] **Enrich** `keyword_hints` content feeding Deepgram `keyterm`—same pipeline as today ([`_current_vocabulary_hints`](../../backend/app/voice/ws.py) → `transcript_normalizer.keyword_hints`)
+- [ ] **Tune** `endpointing_ms` / `utterance_end_ms` and VAD debounce for **fewer clipped endings** vs **premature finalize** ([`_stt_turn_tuning`](../../backend/app/voice/ws.py), [`_listen_url`](../../backend/app/services/provider_clients.py))
+- [ ] **Revisit** `LOW_CONFIDENCE_THRESHOLD` and short-transcript rules in [`ws.py`](../../backend/app/voice/ws.py) so bad STT triggers clarification instead of wrong homeowner replies
+- [ ] **Extend** `PHONETIC_CORRECTION_TABLE` and domain lists from real mishears (pest brands, plan names, local place names)
 
 ### OpenAI (homeowner replies)
 
-- [ ] Add explicit system guidance: respond to the **literal rep transcript**; if ambiguous, ask a short clarifying question (reduces “mouse vs house” derailment)
-- [ ] A/B `temperature` and `max_tokens` (`homeowner_token_budget`) for coherence vs variety ([`OpenAiLlmClient`](../../backend/app/services/provider_clients.py), orchestrator)
-- [ ] Align prompt layers with **active objections and stage** so replies reference what the rep actually addressed ([`conversation_orchestrator.py`](backend/app/services/conversation_orchestrator.py))
-- [ ] When `LLM_PROVIDER=openai`, validate `OPENAI_MODEL` for instruction-following vs cost (measure bad-turn rate on fixed eval transcripts)
+- [ ] **Sharpen** existing system / template layers: ground turns in the **literal rep transcript**; if ambiguous, ask a short clarifying question (reduces “mouse vs house” derailment)
+- [ ] **A/B** `temperature` and `max_tokens` (`homeowner_token_budget`) for coherence vs variety ([`OpenAiLlmClient`](../../backend/app/services/provider_clients.py), orchestrator)
+- [ ] **Tighten** prompt layers so replies consistently reference **active objections and stage** ([`conversation_orchestrator.py`](backend/app/services/conversation_orchestrator.py))
+- [ ] When `LLM_PROVIDER=openai`, **benchmark** `OPENAI_MODEL` for instruction-following vs cost (bad-turn rate on fixed eval transcripts)
 
 ### ElevenLabs (how the homeowner sounds)
 
-- [ ] Compare `eleven_flash_v2_5` vs higher-fidelity models for **natural prosody** on objections and interruptions; document latency vs quality tradeoff ([`config.py`](../../backend/app/core/config.py) `ELEVENLABS_MODEL_ID`)
-- [ ] Tune `voice_settings.stability` / `similarity_boost` (currently `0.5` / `0.75` in [`ElevenLabsTtsClient`](../../backend/app/services/provider_clients.py)) per persona or emotion
-- [ ] Audit micro-behavior **segment length and pauses** so TTS input reads like speech, not bullet points ([`micro_behavior_engine.py`](../../backend/app/services/micro_behavior_engine.py))
+- [ ] **Compare** env-selected `ELEVENLABS_MODEL_ID` (e.g. `eleven_flash_v2_5` vs higher-fidelity) for prosody; document latency vs quality ([`config.py`](../../backend/app/core/config.py))
+- [ ] **Adjust** hardcoded `voice_settings.stability` / `similarity_boost` in [`ElevenLabsTtsClient`](../../backend/app/services/provider_clients.py)—optionally map from emotion later; first pass can be global constants only
+- [ ] **Refine** micro-behavior **segment length and pauses** for speakability ([`micro_behavior_engine.py`](../../backend/app/services/micro_behavior_engine.py))
 
 ---
 
@@ -60,13 +72,13 @@ flowchart LR
 
 [`ws.py`](../../backend/app/voice/ws.py) can block low-confidence or too-short transcripts and play clarification lines instead of sending garbage to the LLM. Tuning thresholds is a direct accuracy lever: too strict → annoying “say again”; too loose → homeowner responds to nonsense.
 
-### 1.3 Optional deeper passes (product decision)
+### 1.3 Optional deeper passes (only if measurement demands it)
 
-Backend config includes Whisper-related settings (`WHISPER_*`) for cleanup paths—useful if you add a **second-pass** or **dispute** flow for grading or replay, less suited for the sub-second live turn unless async.
+Refinement-first: exhaust **hints, normalization, and gating** before new pipelines. Backend config includes Whisper-related settings (`WHISPER_*`); a **second-pass** or replay-only cleanup is a **larger feature** than tuning—only pursue if logs show a class of errors that hints and normalization cannot fix.
 
 ### 1.4 Diagnostics
 
-Implement or standardize logging described in [`CODEX_PROMPT_STT_FLOW.md`](../../CODEX_PROMPT_STT_FLOW.md): correlate **raw Deepgram output**, **post-normalization text**, and **LLM reply** for failed drills.
+**Standardize and use** logging described in [`CODEX_PROMPT_STT_FLOW.md`](../../CODEX_PROMPT_STT_FLOW.md): correlate **raw Deepgram output**, **post-normalization text**, and **LLM reply** for failed drills (extend what exists rather than designing a new observability stack).
 
 ---
 
@@ -74,12 +86,12 @@ Implement or standardize logging described in [`CODEX_PROMPT_STT_FLOW.md`](../..
 
 The homeowner only “knows” what the rep said through the **transcript string** passed into `stream_reply`. Accuracy work in §1 pays off here.
 
-**Prompting:**
+**Prompting (edit what you already ship):**
 
-- Instruct the model to **ground every turn in the latest user message** and to **ask a short clarification** when the transcript is vague or ungrammatical (common right after bad STT).
-- Keep **emotion, stage, and active objections** in the system prompt ([`conversation_orchestrator.py`](../../backend/app/services/conversation_orchestrator.py)) so replies are consistent and challenging, not generic chatbot filler.
+- Strengthen wording in **existing** orchestrator / Jinja / DB-backed prompt paths so the model **grounds every turn in the latest user message** and **asks a short clarification** when the transcript is vague or ungrammatical (common right after bad STT).
+- **Tighten** use of **emotion, stage, and active objections** already passed into the system prompt ([`conversation_orchestrator.py`](../../backend/app/services/conversation_orchestrator.py)) so replies stay consistent and challenging, not generic chatbot filler.
 
-**API parameters** ([`OpenAiLlmClient`](../../backend/app/services/provider_clients.py)):
+**API parameters** (already wired in [`OpenAiLlmClient`](../../backend/app/services/provider_clients.py); adjust values and redeploy):
 
 - **`temperature`** (currently `0.4`) — lower for more predictable objection handling; slightly higher for varied personas if rubric allows.
 - **`max_tokens`** — tied to `homeowner_token_budget(stage)`; too low causes clipped answers; too high encourages rambling that sounds unnatural when spoken.
@@ -98,23 +110,25 @@ TTS quality depends on **input text** (micro-behavior output), **voice ID**, **m
 - `optimize_streaming_latency: 3`,
 - `voice_settings`: `stability` / `similarity_boost` fixed at `0.5` / `0.75`.
 
-**Directions:**
+**Directions (mostly constants and content):**
 
-- **Model** — Flash is fast; if reps report “robotic” homeowners, try a higher-quality model for the same text and compare blind ratings.
-- **Voice settings** — Higher stability can sound flatter; lower can drift. Tune per **persona** or map from orchestrator **emotion** (optional product feature).
-- **Text fed to ElevenLabs** — The micro-behavior engine splits text and inserts pauses; overly fragmented segments can sound choppy. Tune segmentation for **speakability**, not only realism metadata.
+- **Model** — Change `ELEVENLABS_MODEL_ID` in config and compare; same client code path.
+- **Voice settings** — Higher stability can sound flatter; lower can drift. First optimization: **single best pair** of `stability` / `similarity_boost` in [`ElevenLabsTtsClient`](../../backend/app/services/provider_clients.py). Per-persona or emotion mapping is a **later** refinement if needed.
+- **Text fed to ElevenLabs** — Micro-behavior already splits text and inserts pauses; **tune rules** so segments read as speech, not bullet points.
 
 ---
 
 ## 4. Suggested sequencing
 
+Each phase is **iterative tuning** on the current architecture—not a milestone that unlocks a new capability.
+
 | Phase | Focus | Why |
 | ----- | ----- | --- |
-| A | Logging: STT raw + normalized + confidence + final LLM input | Find whether errors are ASR, normalization, or model |
-| B | Vocabulary hints + normalization tables from real sessions | High ROI for domain-heavy sales language |
-| C | Confidence / length gating + clarification copy | Stops wrong homeowner replies when STT is unsure |
-| D | OpenAI prompt + temperature / token budget | Better answers given a correct transcript |
-| E | ElevenLabs model + voice_settings + micro-behavior text | Natural delivery of good text |
+| A | Logging: STT raw + normalized + confidence + final LLM input | Pinpoint whether errors are ASR, normalization, or model |
+| B | Vocabulary hints + normalization tables from real sessions | High ROI using existing `keyterm` + normalizer hooks |
+| C | Confidence / length gating + clarification copy | Adjust existing gates in `ws.py` |
+| D | Prompt copy + temperature / token budget | Better answers without new APIs |
+| E | ElevenLabs model env + voice_settings constants + micro-behavior rules | Better audio from same `stream_audio` path |
 
 ---
 
