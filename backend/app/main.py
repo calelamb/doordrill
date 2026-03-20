@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import subprocess
@@ -24,11 +25,14 @@ from app.core.config import get_settings
 from app.core.logging_config import configure_logging
 from app.core.rate_limit import RateLimitExceeded, limiter, rate_limit_exceeded_handler
 from app.db.init_db import init_db
+from app.db.session import SessionLocal
 from app.middleware.request_logging import RequestLoggingMiddleware
+from app.services.universal_knowledge_service import UniversalKnowledgeService
 from app.voice.ws import router as ws_router
 
 settings = get_settings()
 configure_logging()
+logger = logging.getLogger("doordrill.startup")
 
 
 def _scrub_sentry_event(event: dict, hint: dict) -> dict:
@@ -92,10 +96,22 @@ def validate_production_config() -> None:
     if s.database_url.startswith("sqlite"):
         errors.append("SQLite is not supported in production; set DATABASE_URL to a PostgreSQL URL")
     if errors:
-        logger = logging.getLogger("doordrill.startup")
         for err in errors:
             logger.error("config_validation_error", extra={"error": err})
         raise RuntimeError(f"Production config validation failed: {'; '.join(errors)}")
+
+
+def _seed_universal_knowledge() -> None:
+    db = SessionLocal()
+    try:
+        service = UniversalKnowledgeService()
+        count = service.seed(db)
+        if count:
+            logger.info("startup: seeded %d universal knowledge chunks", count)
+    except Exception:
+        logger.exception("startup: universal knowledge seed failed (non-fatal)")
+    finally:
+        db.close()
 
 
 @asynccontextmanager
@@ -103,7 +119,10 @@ async def lifespan(_: FastAPI):
     validate_production_config()
     _init_sentry(settings)
     init_db()
+    seed_future = asyncio.get_running_loop().run_in_executor(None, _seed_universal_knowledge)
     yield
+    with contextlib.suppress(Exception):
+        await seed_future
 
 
 app = FastAPI(

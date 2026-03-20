@@ -1587,7 +1587,7 @@ class PromptBuilder:
         layer_five = None
         if company_context and company_context.strip():
             layer_five = (
-                "LAYER 5B - WHAT YOU MAY KNOW ABOUT THIS COMPANY\n"
+                "LAYER 5 - WHAT YOU MAY KNOW ABOUT THIS COMPANY\n"
                 "Before they knocked, you may have encountered this company through a flyer, neighbor mention, "
                 "or a quick online search. The following is what you found. Use it to make your objections "
                 "specific and grounded - but speak naturally, not like you memorized it. Express uncertainty "

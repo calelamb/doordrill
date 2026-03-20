@@ -14,6 +14,7 @@ class OrgDocumentResponse(BaseModel):
     chunk_count: int | None = None
     token_count: int | None = None
     error_message: str | None = None
+    universal_layer_active: bool = True
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -34,6 +35,7 @@ class RetrievedChunk(BaseModel):
     document_name: str
     text: str
     similarity_score: float
+    is_universal: bool = False
 
 
 class DocumentQueryRequest(BaseModel):

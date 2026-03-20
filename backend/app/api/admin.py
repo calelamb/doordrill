@@ -37,6 +37,7 @@ from app.services.org_prompt_config_service import OrgPromptConfigService
 from app.services.prompt_experiment_service import PromptExperimentService
 from app.services.prompt_version_synthesizer import PromptVersionSynthesizer
 from app.services.storage_service import StorageService
+from app.services.universal_knowledge_service import UniversalKnowledgeService
 from app.tasks.material_tasks import enqueue_material_processing
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -77,6 +78,14 @@ class QuestionnaireAnswerItem(BaseModel):
 
 class KnowledgeDocApprovalRequest(BaseModel):
     approved: bool
+
+
+class UniversalKnowledgeSeedRequest(BaseModel):
+    force: bool = False
+
+
+class UniversalKnowledgeSeedResponse(BaseModel):
+    inserted: int
 
 
 def _to_start_of_day(value: date | None) -> datetime | None:
@@ -1168,6 +1177,21 @@ def export_training_signals(
 
     body = "\n".join(json.dumps(item, ensure_ascii=True) for item in examples)
     return Response(content=body, media_type="application/x-ndjson")
+
+
+@router.post("/universal-knowledge/seed", response_model=UniversalKnowledgeSeedResponse)
+def seed_universal_knowledge(
+    payload: UniversalKnowledgeSeedRequest | None = None,
+    force: bool = Query(False),
+    actor: Actor = Depends(require_manager),
+    db: Session = Depends(get_db),
+) -> UniversalKnowledgeSeedResponse:
+    if actor.role != "admin":
+        raise HTTPException(status_code=403, detail="admin role required")
+
+    effective_force = bool(force or (payload.force if payload is not None else False))
+    inserted = UniversalKnowledgeService().seed(db, force=effective_force)
+    return UniversalKnowledgeSeedResponse(inserted=inserted)
 
 
 @router.get("/training-signals/conversation-export")

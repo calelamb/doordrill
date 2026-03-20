@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.db.init_db as init_db_module
 import app.db.session as db_session_module
+import app.services.document_processing_service as document_processing_service_module
 import app.services.ledger_service as ledger_service_module
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
@@ -40,6 +41,7 @@ db_session_module.engine = _TEST_ENGINE
 db_session_module.SessionLocal = _TEST_SESSION_LOCAL
 init_db_module.engine = _TEST_ENGINE
 init_db_module.SessionLocal = _TEST_SESSION_LOCAL
+document_processing_service_module.SessionLocal = _TEST_SESSION_LOCAL
 ledger_service_module.SessionLocal = _TEST_SESSION_LOCAL
 
 from app.main import app

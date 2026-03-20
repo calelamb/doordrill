@@ -18,11 +18,85 @@ from app.core.config import Settings, get_settings
 from app.models.knowledge import OrgDocument, OrgDocumentChunk
 from app.models.org_material import OrgKnowledgeDoc, OrgMaterial
 from app.models.types import OrgDocumentStatus
+from app.models.universal_knowledge import UniversalKnowledgeChunk
 from app.schemas.knowledge import RetrievedChunk
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.management_cache_service import ManagementCacheService
+from app.services.universal_knowledge_service import UNIVERSAL_CATEGORIES
 
 KEYWORD_RE = re.compile(r"[a-z0-9]{3,}")
+UNIVERSAL_CATEGORY_RE = re.compile(r"\[([a-z_]+)\]")
+CATEGORY_HINTS: dict[str, tuple[str, ...]] = {
+    "intro": (
+        "door approach",
+        "social proof",
+        "neighbor on the route",
+        "first contact",
+        "front step",
+    ),
+    "objection_handling": (
+        "not interested",
+        "already have a guy",
+        "think about it",
+        "we just moved in",
+        "do it ourselves",
+        "diy",
+    ),
+    "reading_homeowner": (
+        "engagement signals",
+        "disengagement signals",
+        "body language",
+        "eye contact",
+        "skepticism signals",
+    ),
+    "price_framing": (
+        "bimonthly",
+        "quarterly",
+        "monthly is",
+        "price anchor",
+        "startup fee",
+    ),
+    "closing": (
+        "assumptive close",
+        "option close",
+        "assignment close",
+        "tuesday or thursday",
+        "level up moment",
+    ),
+    "psychology": (
+        "reactance",
+        "loss aversion",
+        "decision fatigue",
+        "first-impression bias",
+        "prior bad experience",
+    ),
+    "service_value": (
+        "feature-benefit",
+        "dewebbing",
+        "perimeter",
+        "pet and kid safe",
+        "no annual contract",
+    ),
+    "competitor_handling": (
+        "switch over",
+        "terminix",
+        "orkin",
+        "aptive",
+        "competitor",
+    ),
+    "post_pitch": (
+        "post-pitch",
+        "outside-the-sale",
+        "call you later",
+        "swing back in 15 minutes",
+    ),
+    "backyard_close": (
+        "backyard close",
+        "backyard",
+        "standing water",
+        "grub damage",
+    ),
+}
 
 
 class DocumentRetrievalService:
@@ -43,7 +117,7 @@ class DocumentRetrievalService:
             ttl_seconds=900,
             max_entries=self.settings.management_analytics_cache_max_entries,
         )
-        self._topic_result_cache: TTLCache[tuple[str, str, int], list[RetrievedChunk]] = TTLCache(
+        self._topic_result_cache: TTLCache[tuple[str, str, int, str], list[RetrievedChunk]] = TTLCache(
             maxsize=self.TOPIC_RESULT_CACHE_MAX_ENTRIES,
             ttl=self.TOPIC_RESULT_CACHE_TTL_SECONDS,
         )
@@ -71,7 +145,15 @@ class DocumentRetrievalService:
             )
             .limit(1)
         )
-        return row is not None
+        if row is not None:
+            return True
+
+        universal_row = db.scalar(
+            select(UniversalKnowledgeChunk.id)
+            .where(UniversalKnowledgeChunk.is_active.is_(True))
+            .limit(1)
+        )
+        return universal_row is not None
 
     def retrieve(
         self,
@@ -107,8 +189,14 @@ class DocumentRetrievalService:
                 include_raw_chunks=True,
             )
             legacy_rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_query, k=k)
-            rows = self._merge_results(material_rows, legacy_rows, k=k)
-            return [row for row in rows if row.similarity_score >= min_score]
+            org_rows = [row for row in self._merge_results(material_rows, legacy_rows, k=k) if row.similarity_score >= min_score]
+            universal_rows = self._retrieve_universal_keyword(db, query_text=normalized_query, k=k)
+            return self._merge_with_universal(
+                org_rows=org_rows,
+                universal_rows=universal_rows,
+                k=k,
+                min_score=min_score,
+            )
 
         dialect_name = db.bind.dialect.name if db.bind is not None else ""
         if dialect_name == "postgresql" and self._supports_postgres_vector_search(db):
@@ -119,8 +207,16 @@ class DocumentRetrievalService:
         else:
             legacy_rows = self._retrieve_python(db, org_id=org_id, query_vector=query_vector, k=k)
 
-        rows = self._merge_results(material_rows, legacy_rows, k=k)
-        return [row for row in rows if row.similarity_score >= min_score]
+        org_rows = [row for row in self._merge_results(material_rows, legacy_rows, k=k) if row.similarity_score >= min_score]
+        universal_rows = self._retrieve_universal_python(db, query_vector=query_vector, k=k)
+        if not universal_rows:
+            universal_rows = self._retrieve_universal_keyword(db, query_text=normalized_query, k=k)
+        return self._merge_with_universal(
+            org_rows=org_rows,
+            universal_rows=universal_rows,
+            k=k,
+            min_score=min_score,
+        )
 
     def retrieve_for_topic(
         self,
@@ -141,12 +237,12 @@ class DocumentRetrievalService:
         if not self.has_ready_documents(db, org_id=org_id):
             return []
 
-        cache_key = (str(org_id or "__global__"), " ".join(topic.split()).strip().lower(), int(k))
+        cache_key = (str(org_id or "__global__"), " ".join(topic.split()).strip().lower(), int(k), f"{min_score:.2f}")
         cached_rows = self._get_cached_topic_results(cache_key)
         if cached_rows is not None:
-            return [row for row in cached_rows if row.similarity_score >= min_score]
+            return cached_rows
 
-        rows: list[RetrievedChunk]
+        org_rows: list[RetrievedChunk]
         query_vector: list[float] | None = None
         try:
             query_vector = self._resolve_query_embedding(normalized_prompt)
@@ -172,7 +268,7 @@ class DocumentRetrievalService:
             )
 
         if structured_rows:
-            rows = structured_rows
+            org_rows = [row for row in structured_rows if row.similarity_score >= min_score]
         elif query_vector is not None:
             raw_chunk_rows = self._retrieve_material_docs_python(
                 db,
@@ -189,7 +285,9 @@ class DocumentRetrievalService:
                     legacy_rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
             else:
                 legacy_rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
-            rows = self._merge_results(raw_chunk_rows, legacy_rows, k=k)
+            org_rows = [
+                row for row in self._merge_results(raw_chunk_rows, legacy_rows, k=k) if row.similarity_score >= min_score
+            ]
         else:
             raw_chunk_rows = self._retrieve_material_docs_keyword(
                 db,
@@ -199,19 +297,34 @@ class DocumentRetrievalService:
                 include_raw_chunks=True,
             )
             legacy_rows = self._retrieve_keyword(db, org_id=org_id, query_text=normalized_prompt, k=k)
-            rows = self._merge_results(raw_chunk_rows, legacy_rows, k=k)
+            org_rows = [
+                row for row in self._merge_results(raw_chunk_rows, legacy_rows, k=k) if row.similarity_score >= min_score
+            ]
 
+        if query_vector is not None:
+            universal_rows = self._retrieve_universal_python(db, query_vector=query_vector, k=k)
+            if not universal_rows:
+                universal_rows = self._retrieve_universal_keyword(db, query_text=normalized_prompt, k=k)
+        else:
+            universal_rows = self._retrieve_universal_keyword(db, query_text=normalized_prompt, k=k)
+
+        rows = self._merge_with_universal(
+            org_rows=org_rows,
+            universal_rows=universal_rows,
+            k=k,
+            min_score=min_score,
+        )
         self._set_cached_topic_results(cache_key, rows)
-        return [row for row in rows if row.similarity_score >= min_score]
+        return rows
 
-    def _get_cached_topic_results(self, cache_key: tuple[str, str, int]) -> list[RetrievedChunk] | None:
+    def _get_cached_topic_results(self, cache_key: tuple[str, str, int, str]) -> list[RetrievedChunk] | None:
         with self._topic_result_cache_lock:
             cached_rows = self._topic_result_cache.get(cache_key)
             if cached_rows is None:
                 return None
             return [row.model_copy(deep=True) for row in cached_rows]
 
-    def _set_cached_topic_results(self, cache_key: tuple[str, str, int], rows: list[RetrievedChunk]) -> None:
+    def _set_cached_topic_results(self, cache_key: tuple[str, str, int, str], rows: list[RetrievedChunk]) -> None:
         with self._topic_result_cache_lock:
             self._topic_result_cache[cache_key] = [row.model_copy(deep=True) for row in rows]
 
@@ -219,33 +332,34 @@ class DocumentRetrievalService:
         if not chunks:
             return ""
 
-        header = "=== Company Training Material ==="
-        footer = "=== End Company Training Material ==="
-        consumed_tokens = self.processing_service.count_tokens(header) + self.processing_service.count_tokens(footer)
-        entries: list[str] = []
+        org_chunks = [chunk for chunk in chunks if not chunk.is_universal]
+        universal_chunks = [chunk for chunk in chunks if chunk.is_universal]
 
-        for chunk in chunks:
-            prefix = f"[From: {chunk.document_name}]"
-            prefix_tokens = self.processing_service.count_tokens(prefix)
-            remaining = max_tokens - consumed_tokens - prefix_tokens
-            if remaining <= 0:
-                break
+        parts: list[str] = []
+        remaining_budget = max_tokens
 
-            chunk_text = chunk.text.strip()
-            chunk_tokens = self.processing_service.count_tokens(chunk_text)
-            if chunk_tokens > remaining:
-                chunk_text = self._truncate_text_to_token_budget(chunk_text, remaining)
-                if not chunk_text:
-                    break
-                entries.append(f"{prefix}\n{chunk_text}")
-                break
+        if org_chunks:
+            org_block, consumed = self._format_chunk_block(
+                org_chunks,
+                header="=== Company Training Material ===",
+                footer="=== End Company Training Material ===",
+                token_budget=remaining_budget,
+            )
+            if org_block:
+                parts.append(org_block)
+                remaining_budget -= consumed
 
-            entries.append(f"{prefix}\n{chunk_text}")
-            consumed_tokens += prefix_tokens + chunk_tokens
+        if universal_chunks and remaining_budget > 100:
+            universal_block, _ = self._format_chunk_block(
+                universal_chunks,
+                header="=== Industry Sales Knowledge ===",
+                footer="=== End Industry Sales Knowledge ===",
+                token_budget=remaining_budget,
+            )
+            if universal_block:
+                parts.append(universal_block)
 
-        if not entries:
-            return ""
-        return f"{header}\n" + "\n\n".join(entries) + f"\n{footer}"
+        return "\n\n".join(parts)
 
     async def _embed_query(self, query: str) -> list[float]:
         cache_key = self.cache.make_key(
@@ -542,6 +656,71 @@ class DocumentRetrievalService:
         scored.sort(key=lambda item: (item.similarity_score, len(item.text)), reverse=True)
         return scored[:k]
 
+    def _retrieve_universal_python(
+        self,
+        db: Session,
+        *,
+        query_vector: list[float],
+        k: int,
+    ) -> list[RetrievedChunk]:
+        rows = db.execute(
+            select(UniversalKnowledgeChunk)
+            .where(UniversalKnowledgeChunk.is_active.is_(True))
+            .where(UniversalKnowledgeChunk.embedding.is_not(None))
+        ).scalars().all()
+
+        scored: list[RetrievedChunk] = []
+        for chunk in rows:
+            similarity = self._cosine_similarity(query_vector, chunk.embedding or [])
+            scored.append(
+                RetrievedChunk(
+                    chunk_id=str(chunk.id),
+                    document_id="universal",
+                    document_name=f"Industry Knowledge [{chunk.category}]",
+                    text=chunk.content,
+                    similarity_score=similarity,
+                    is_universal=True,
+                )
+            )
+
+        scored.sort(key=lambda item: item.similarity_score, reverse=True)
+        return scored[:k]
+
+    def _retrieve_universal_keyword(
+        self,
+        db: Session,
+        *,
+        query_text: str,
+        k: int,
+    ) -> list[RetrievedChunk]:
+        terms = self._keyword_terms(query_text)
+        if not terms:
+            return []
+
+        rows = db.execute(
+            select(UniversalKnowledgeChunk)
+            .where(UniversalKnowledgeChunk.is_active.is_(True))
+        ).scalars().all()
+
+        scored: list[RetrievedChunk] = []
+        for chunk in rows:
+            similarity = self._keyword_similarity(chunk.content, terms)
+            if similarity <= 0:
+                continue
+            scored.append(
+                RetrievedChunk(
+                    chunk_id=str(chunk.id),
+                    document_id="universal",
+                    document_name=f"Industry Knowledge [{chunk.category}]",
+                    text=chunk.content,
+                    similarity_score=similarity,
+                    is_universal=True,
+                )
+            )
+
+        scored.sort(key=lambda item: (item.similarity_score, len(item.text)), reverse=True)
+        return scored[:k]
+
     def _keyword_terms(self, query_text: str) -> list[str]:
         terms = KEYWORD_RE.findall(query_text.lower())
         unique_terms: list[str] = []
@@ -578,6 +757,106 @@ class DocumentRetrievalService:
             merged.append(row)
         merged.sort(key=lambda item: item.similarity_score, reverse=True)
         return merged[:k]
+
+    def _merge_with_universal(
+        self,
+        *,
+        org_rows: list[RetrievedChunk],
+        universal_rows: list[RetrievedChunk],
+        k: int,
+        min_score: float = 0.70,
+    ) -> list[RetrievedChunk]:
+        result = list(org_rows[:k])
+        occupied_categories = self._covered_categories(result)
+        seen: set[tuple[str, str]] = {(row.document_id, row.chunk_id) for row in result}
+
+        for universal in universal_rows:
+            if len(result) >= k:
+                break
+            if universal.similarity_score < min_score:
+                continue
+            key = (universal.document_id, universal.chunk_id)
+            if key in seen:
+                continue
+            category = self._extract_universal_category(universal)
+            if category is not None and category in occupied_categories:
+                continue
+            seen.add(key)
+            if category is not None:
+                occupied_categories.add(category)
+            result.append(universal)
+
+        return result
+
+    def _covered_categories(self, rows: list[RetrievedChunk]) -> set[str]:
+        covered: set[str] = set()
+        for row in rows:
+            category = self._infer_chunk_category(row)
+            if category in UNIVERSAL_CATEGORIES:
+                covered.add(category)
+        return covered
+
+    def _infer_chunk_category(self, row: RetrievedChunk) -> str | None:
+        universal_category = self._extract_universal_category(row)
+        if universal_category is not None:
+            return universal_category
+
+        haystack = f"{row.document_name}\n{row.text}".lower()
+        best_category: str | None = None
+        best_score = 0
+        for category, hints in CATEGORY_HINTS.items():
+            score = sum(1 for hint in hints if hint in haystack)
+            if score > best_score:
+                best_category = category
+                best_score = score
+        return best_category if best_score > 0 else None
+
+    def _extract_universal_category(self, row: RetrievedChunk) -> str | None:
+        if not row.is_universal and "Industry Knowledge [" not in row.document_name:
+            return None
+        match = UNIVERSAL_CATEGORY_RE.search(row.document_name)
+        if match is None:
+            return None
+        category = match.group(1).strip()
+        if category not in UNIVERSAL_CATEGORIES:
+            return None
+        return category
+
+    def _format_chunk_block(
+        self,
+        chunks: list[RetrievedChunk],
+        *,
+        header: str,
+        footer: str,
+        token_budget: int,
+    ) -> tuple[str, int]:
+        consumed_tokens = self.processing_service.count_tokens(header) + self.processing_service.count_tokens(footer)
+        entries: list[str] = []
+
+        for chunk in chunks:
+            prefix = f"[From: {chunk.document_name}]"
+            prefix_tokens = self.processing_service.count_tokens(prefix)
+            remaining = token_budget - consumed_tokens - prefix_tokens
+            if remaining <= 0:
+                break
+
+            chunk_text = chunk.text.strip()
+            chunk_tokens = self.processing_service.count_tokens(chunk_text)
+            if chunk_tokens > remaining:
+                chunk_text = self._truncate_text_to_token_budget(chunk_text, remaining)
+                if not chunk_text:
+                    break
+                chunk_tokens = self.processing_service.count_tokens(chunk_text)
+                entries.append(f"{prefix}\n{chunk_text}")
+                consumed_tokens += prefix_tokens + chunk_tokens
+                break
+
+            entries.append(f"{prefix}\n{chunk_text}")
+            consumed_tokens += prefix_tokens + chunk_tokens
+
+        if not entries:
+            return "", 0
+        return f"{header}\n" + "\n\n".join(entries) + f"\n{footer}", consumed_tokens
 
     def _truncate_text_to_token_budget(self, text: str, token_budget: int) -> str:
         words = text.split()
