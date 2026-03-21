@@ -615,6 +615,11 @@ def _list_manager_team_reps(db: Session, manager: User) -> list[User]:
     ).all()
 
 
+def _ensure_manager_team_access(manager: User, rep: User) -> None:
+    if manager.team_id and rep.team_id != manager.team_id:
+        raise HTTPException(status_code=403, detail="rep does not belong to this manager's team")
+
+
 def _resolve_rep_for_chat(db: Session, manager: User, requested_name: str | None) -> User | None:
     normalized_query = " ".join((requested_name or "").lower().split())
     if not normalized_query:
@@ -639,6 +644,85 @@ def _resolve_rep_for_chat(db: Session, manager: User, requested_name: str | None
             best_match = (score, rep)
 
     return best_match[1] if best_match[0] >= 0.45 else None
+
+
+def _build_manager_ai_data_snapshot(
+    db: Session,
+    *,
+    manager: User,
+    date_from: datetime,
+    date_to: datetime,
+    rep: User | None = None,
+) -> dict[str, int]:
+    rep_filters = [User.role == UserRole.REP]
+    if manager.team_id:
+        rep_filters.append(User.team_id == manager.team_id)
+    else:
+        rep_filters.append(User.id == "__no_team__")
+    rep_count = db.scalar(select(func.count(User.id)).where(*rep_filters)) or 0
+
+    scenario_count = db.scalar(select(func.count(Scenario.id)).where(Scenario.org_id == manager.org_id)) or 0
+
+    assignment_stmt = (
+        select(func.count(Assignment.id))
+        .join(User, User.id == Assignment.rep_id)
+        .where(
+            User.role == UserRole.REP,
+            User.team_id == manager.team_id if manager.team_id else User.id == "__no_team__",
+            Assignment.created_at >= date_from,
+            Assignment.created_at <= date_to,
+        )
+    )
+    session_stmt = (
+        select(func.count(DrillSession.id))
+        .join(User, User.id == DrillSession.rep_id)
+        .where(
+            User.role == UserRole.REP,
+            User.team_id == manager.team_id if manager.team_id else User.id == "__no_team__",
+            DrillSession.started_at >= date_from,
+            DrillSession.started_at <= date_to,
+        )
+    )
+    scored_stmt = (
+        select(func.count(DrillSession.id))
+        .join(User, User.id == DrillSession.rep_id)
+        .join(Scorecard, Scorecard.session_id == DrillSession.id)
+        .where(
+            User.role == UserRole.REP,
+            User.team_id == manager.team_id if manager.team_id else User.id == "__no_team__",
+            DrillSession.started_at >= date_from,
+            DrillSession.started_at <= date_to,
+            Scorecard.overall_score.is_not(None),
+        )
+    )
+    if rep is not None:
+        assignment_stmt = assignment_stmt.where(Assignment.rep_id == rep.id)
+        session_stmt = session_stmt.where(DrillSession.rep_id == rep.id)
+        scored_stmt = scored_stmt.where(DrillSession.rep_id == rep.id)
+
+    return {
+        "rep_count": int(rep_count),
+        "scenario_count": int(scenario_count),
+        "assignment_count": int(db.scalar(assignment_stmt) or 0),
+        "session_count": int(db.scalar(session_stmt) or 0),
+        "scored_session_count": int(db.scalar(scored_stmt) or 0),
+    }
+
+
+def _resolve_manager_ai_data_state(*, snapshot: dict[str, int], intent: str) -> str | None:
+    if int(snapshot.get("rep_count") or 0) <= 0:
+        return "no_reps"
+    if int(snapshot.get("scenario_count") or 0) <= 0 and int(snapshot.get("assignment_count") or 0) <= 0:
+        return "no_scenarios"
+    if intent == "scenario_analysis" and int(snapshot.get("scenario_count") or 0) <= 0:
+        return "no_scenarios"
+    if int(snapshot.get("assignment_count") or 0) <= 0:
+        return "no_assignments"
+    if int(snapshot.get("session_count") or 0) <= 0:
+        return "no_sessions"
+    if int(snapshot.get("scored_session_count") or 0) <= 0:
+        return "no_scored_sessions"
+    return None
 
 
 def _build_rep_risk_detail_response(
@@ -1356,11 +1440,15 @@ def list_manager_sessions(
     stmt = (
         select(DrillSession, Assignment, Scorecard)
         .join(Assignment, Assignment.id == DrillSession.assignment_id)
+        .join(User, User.id == DrillSession.rep_id)
         .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
-        .where(Assignment.assigned_by == manager_id)
         .order_by(DrillSession.started_at.desc())
         .limit(limit)
     )
+    if manager.team_id:
+        stmt = stmt.where(User.team_id == manager.team_id)
+    else:
+        stmt = stmt.where(Assignment.assigned_by == manager_id)
     if rep_id:
         stmt = stmt.where(DrillSession.rep_id == rep_id)
     if status:
@@ -1557,6 +1645,7 @@ def get_manager_feed(
     items = feed_service.get_feed(
         db,
         manager_id=manager_id,
+        team_id=manager.team_id,
         rep_id=rep_id,
         scenario_id=scenario_id,
         reviewed=reviewed,
@@ -1586,6 +1675,7 @@ def get_rep_progress(
     _ensure_same_org(actor, manager.org_id)
     if manager.org_id != rep.org_id:
         raise HTTPException(status_code=403, detail="cross-organization access denied")
+    _ensure_manager_team_access(manager, rep)
 
     current_end = date_to or datetime.now(timezone.utc)
     if current_end.tzinfo is None:
@@ -1698,6 +1788,7 @@ def get_manager_analytics(
     return management_analytics_service.get_team_analytics(
         db,
         manager_id=manager_id,
+        team_id=manager.team_id,
         period=period,
         current_start=current_start,
         current_end=current_end,
@@ -1747,6 +1838,7 @@ def get_command_center(
     return management_analytics_service.get_command_center(
         db,
         manager_id=manager_id,
+        team_id=manager.team_id,
         date_from=current_start,
         date_to=current_end,
         previous_start=previous_start,
@@ -1777,6 +1869,7 @@ def get_scenario_intelligence(
     return management_analytics_service.get_scenario_intelligence(
         db,
         manager_id=manager_id,
+        team_id=manager.team_id,
         date_from=current_start,
         date_to=current_end,
         period=period,
@@ -1907,6 +2000,7 @@ def get_ai_rep_insight(
     _ensure_same_org(actor, manager.org_id)
     if manager.org_id != rep.org_id:
         raise HTTPException(status_code=403, detail="cross-organization access denied")
+    _ensure_manager_team_access(manager, rep)
 
     try:
         return manager_ai_service.generate_rep_insight(
@@ -1934,6 +2028,7 @@ def get_one_on_one_prep(
     _ensure_same_org(actor, manager.org_id)
     if manager.org_id != rep.org_id:
         raise HTTPException(status_code=403, detail="cross-organization access denied")
+    _ensure_manager_team_access(manager, rep)
 
     try:
         return manager_ai_service.generate_one_on_one_prep(
@@ -1991,6 +2086,7 @@ def get_ai_session_annotations(
     _ensure_same_org(actor, manager.org_id)
     if manager.org_id != rep.org_id:
         raise HTTPException(status_code=403, detail="cross-organization access denied")
+    _ensure_manager_team_access(manager, rep)
 
     try:
         return manager_ai_service.generate_session_annotations(db, session_id=payload.session_id)
@@ -2027,6 +2123,8 @@ def get_ai_team_coaching_summary(
             period_days=payload.period_days,
             coaching_analytics=coaching_analytics,
         )
+    except AiCoachingDataUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=exc.detail()) from exc
     except AiCoachingUnavailableError as exc:
         raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
@@ -2059,10 +2157,58 @@ def chat_with_manager_ai(
         "date_to": current_end.isoformat(),
     }
     sources_used: list[str] = []
+    resolved_rep: User | None = None
 
     def attach_source(source_name: str, data: Any) -> None:
         sources_used.append(source_name)
         relevant_data[source_name] = _serialize_chat_payload(data)
+
+    if classification.intent == "rep_specific":
+        resolved_rep = _resolve_rep_for_chat(db, manager, classification.rep_name_mentioned or payload.message)
+        if resolved_rep is not None:
+            relevant_data["resolved_rep"] = {"rep_id": resolved_rep.id, "rep_name": resolved_rep.name}
+        else:
+            relevant_data["rep_lookup"] = {
+                "requested_name": classification.rep_name_mentioned or payload.message,
+                "matched": False,
+                "available_reps": [rep.name for rep in _list_manager_team_reps(db, manager)],
+            }
+
+    data_snapshot = _build_manager_ai_data_snapshot(
+        db,
+        manager=manager,
+        date_from=current_start,
+        date_to=current_end,
+        rep=resolved_rep if classification.intent == "rep_specific" else None,
+    )
+    data_state = _resolve_manager_ai_data_state(snapshot=data_snapshot, intent=classification.intent)
+    if data_state is not None:
+        assignment_target = resolved_rep
+        if assignment_target is None and data_state in {"no_assignments", "no_sessions", "no_scored_sessions"}:
+            team_reps = _list_manager_team_reps(db, manager)
+            assignment_target = team_reps[0] if team_reps else None
+        assignment_suggestion = (
+            manager_ai_service._build_assignment_suggestion(db, rep=assignment_target)
+            if assignment_target is not None and data_snapshot.get("scenario_count", 0) > 0
+            else None
+        )
+        answer, answer_meta = manager_ai_service.build_no_data_chat_response(
+            manager=manager,
+            data_state=data_state,
+            period_days=payload.period_days,
+            resolved_rep=resolved_rep,
+            assignment_suggestion=assignment_suggestion,
+        )
+        return ManagerChatResponse(
+            **answer.model_dump(),
+            intent_detected=classification.intent,
+            sources_used=[],
+            ai_meta=manager_ai_service._merge_ai_meta_records(
+                ("classification", classification_meta),
+                ("answer", answer_meta),
+                generated_at=answer_meta.generated_at,
+            ),
+        )
 
     if classification.intent in {"team_performance", "general"}:
         attach_source(
@@ -2070,6 +2216,7 @@ def chat_with_manager_ai(
             management_analytics_service.get_command_center(
                 db,
                 manager_id=payload.manager_id,
+                team_id=manager.team_id,
                 date_from=current_start,
                 date_to=current_end,
                 previous_start=previous_start,
@@ -2078,9 +2225,7 @@ def chat_with_manager_ai(
             ),
         )
     elif classification.intent == "rep_specific":
-        resolved_rep = _resolve_rep_for_chat(db, manager, classification.rep_name_mentioned or payload.message)
         if resolved_rep is not None:
-            relevant_data["resolved_rep"] = {"rep_id": resolved_rep.id, "rep_name": resolved_rep.name}
             attach_source(
                 f"rep_progress:{resolved_rep.id}",
                 get_rep_progress(
@@ -2095,16 +2240,12 @@ def chat_with_manager_ai(
                 ),
             )
         else:
-            relevant_data["rep_lookup"] = {
-                "requested_name": classification.rep_name_mentioned or payload.message,
-                "matched": False,
-                "available_reps": [rep.name for rep in _list_manager_team_reps(db, manager)],
-            }
             attach_source(
                 "command_center",
                 management_analytics_service.get_command_center(
                     db,
                     manager_id=payload.manager_id,
+                    team_id=manager.team_id,
                     date_from=current_start,
                     date_to=current_end,
                     previous_start=previous_start,
@@ -2118,6 +2259,7 @@ def chat_with_manager_ai(
             management_analytics_service.get_scenario_intelligence(
                 db,
                 manager_id=payload.manager_id,
+                team_id=manager.team_id,
                 date_from=current_start,
                 date_to=current_end,
                 period="custom",
@@ -2151,6 +2293,7 @@ def chat_with_manager_ai(
             management_analytics_service.get_command_center(
                 db,
                 manager_id=payload.manager_id,
+                team_id=manager.team_id,
                 date_from=current_start,
                 date_to=current_end,
                 previous_start=previous_start,
@@ -2271,6 +2414,7 @@ def get_session_explorer(
     return management_analytics_service.get_session_explorer(
         db,
         manager_id=manager_id,
+        team_id=manager.team_id,
         date_from=current_start,
         date_to=current_end,
         rep_id=rep_id,
@@ -2307,6 +2451,7 @@ def get_manager_alerts(
     return management_analytics_service.get_alerts(
         db,
         manager_id=manager_id,
+        team_id=manager.team_id,
         date_from=current_start,
         date_to=current_end,
         period=period,
@@ -2391,6 +2536,7 @@ def get_manager_benchmarks(
     return management_analytics_service.get_benchmarks(
         db,
         manager_id=manager_id,
+        team_id=manager.team_id,
         date_from=current_start,
         date_to=current_end,
         period=period,

@@ -438,6 +438,7 @@ class ManagementAnalyticsRuntimeService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime,
         date_to: datetime,
         previous_start: datetime,
@@ -448,13 +449,14 @@ class ManagementAnalyticsRuntimeService:
             payload = self.base.get_command_center(
                 db,
                 manager_id=manager_id,
+                team_id=team_id,
                 date_from=date_from,
                 date_to=date_to,
                 previous_start=previous_start,
                 previous_end=previous_end,
                 period=period,
             )
-            if not self._use_warehouse(db, manager_id=manager_id):
+            if team_id or not self._use_warehouse(db, manager_id=manager_id):
                 return payload
 
             warehouse = self._warehouse_command_center_overrides(
@@ -492,6 +494,7 @@ class ManagementAnalyticsRuntimeService:
             query_name="command_center",
             manager_id=manager_id,
             cache_params={
+                "team_id": team_id,
                 "date_from": _cache_dt_iso(date_from),
                 "date_to": _cache_dt_iso(date_to),
                 "previous_start": _cache_dt_iso(previous_start),
@@ -506,6 +509,7 @@ class ManagementAnalyticsRuntimeService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime,
         date_to: datetime,
         period: str,
@@ -514,10 +518,11 @@ class ManagementAnalyticsRuntimeService:
             db,
             query_name="scenario_intelligence",
             manager_id=manager_id,
-            cache_params={"date_from": _cache_dt_iso(date_from), "date_to": _cache_dt_iso(date_to), "period": period},
+            cache_params={"team_id": team_id, "date_from": _cache_dt_iso(date_from), "date_to": _cache_dt_iso(date_to), "period": period},
             builder=lambda: self.base.get_scenario_intelligence(
                 db,
                 manager_id=manager_id,
+                team_id=team_id,
                 date_from=date_from,
                 date_to=date_to,
                 period=period,
@@ -552,6 +557,7 @@ class ManagementAnalyticsRuntimeService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime | None,
         date_to: datetime | None,
         rep_id: str | None = None,
@@ -569,6 +575,7 @@ class ManagementAnalyticsRuntimeService:
             query_name="session_explorer",
             manager_id=manager_id,
             cache_params={
+                "team_id": team_id,
                 "date_from": _cache_dt_iso(date_from),
                 "date_to": _cache_dt_iso(date_to),
                 "rep_id": rep_id,
@@ -584,6 +591,7 @@ class ManagementAnalyticsRuntimeService:
             builder=lambda: self.base.get_session_explorer(
                 db,
                 manager_id=manager_id,
+                team_id=team_id,
                 date_from=date_from,
                 date_to=date_to,
                 rep_id=rep_id,
@@ -603,6 +611,7 @@ class ManagementAnalyticsRuntimeService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime,
         date_to: datetime,
         period: str,
@@ -611,10 +620,11 @@ class ManagementAnalyticsRuntimeService:
             db,
             query_name="alerts",
             manager_id=manager_id,
-            cache_params={"date_from": _cache_dt_iso(date_from), "date_to": _cache_dt_iso(date_to), "period": period},
+            cache_params={"team_id": team_id, "date_from": _cache_dt_iso(date_from), "date_to": _cache_dt_iso(date_to), "period": period},
             builder=lambda: self.base.get_alerts(
                 db,
                 manager_id=manager_id,
+                team_id=team_id,
                 date_from=date_from,
                 date_to=date_to,
                 period=period,
@@ -626,6 +636,7 @@ class ManagementAnalyticsRuntimeService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime,
         date_to: datetime,
         period: str,
@@ -634,10 +645,11 @@ class ManagementAnalyticsRuntimeService:
             db,
             query_name="benchmarks",
             manager_id=manager_id,
-            cache_params={"date_from": _cache_dt_iso(date_from), "date_to": _cache_dt_iso(date_to), "period": period},
+            cache_params={"team_id": team_id, "date_from": _cache_dt_iso(date_from), "date_to": _cache_dt_iso(date_to), "period": period},
             builder=lambda: self.base.get_benchmarks(
                 db,
                 manager_id=manager_id,
+                team_id=team_id,
                 date_from=date_from,
                 date_to=date_to,
                 period=period,
@@ -649,6 +661,7 @@ class ManagementAnalyticsRuntimeService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         period: str,
         current_start: datetime,
         current_end: datetime,
@@ -656,25 +669,53 @@ class ManagementAnalyticsRuntimeService:
         previous_end: datetime,
     ) -> dict[str, Any]:
         def build() -> dict[str, Any]:
-            assignment_count = db.scalar(select(func.count(Assignment.id)).where(Assignment.assigned_by == manager_id)) or 0
+            assignment_scope = (
+                select(func.count(Assignment.id))
+                .join(User, User.id == Assignment.rep_id)
+                .where(User.team_id == team_id)
+                if team_id
+                else select(func.count(Assignment.id)).where(Assignment.assigned_by == manager_id)
+            )
+            assignment_count = db.scalar(assignment_scope) or 0
             completed_assignments = (
                 db.scalar(
-                    select(func.count(Assignment.id)).where(
-                        Assignment.assigned_by == manager_id,
-                        Assignment.status == AssignmentStatus.COMPLETED,
+                    (
+                        select(func.count(Assignment.id))
+                        .join(User, User.id == Assignment.rep_id)
+                        .where(
+                            User.team_id == team_id,
+                            Assignment.status == AssignmentStatus.COMPLETED,
+                        )
+                        if team_id
+                        else select(func.count(Assignment.id)).where(
+                            Assignment.assigned_by == manager_id,
+                            Assignment.status == AssignmentStatus.COMPLETED,
+                        )
                     )
                 )
                 or 0
             )
             sessions_count = db.scalar(
-                select(func.count(AnalyticsFactSession.session_id)).where(AnalyticsFactSession.manager_id == manager_id)
+                select(func.count(AnalyticsFactSession.session_id)).where(
+                    AnalyticsFactSession.team_id == team_id if team_id else AnalyticsFactSession.manager_id == manager_id
+                )
             ) or 0
             avg_score = db.scalar(
-                select(func.avg(AnalyticsFactSession.overall_score)).where(AnalyticsFactSession.manager_id == manager_id)
+                select(func.avg(AnalyticsFactSession.overall_score)).where(
+                    AnalyticsFactSession.team_id == team_id if team_id else AnalyticsFactSession.manager_id == manager_id
+                )
             )
-            unique_reps = db.scalar(select(func.count(func.distinct(Assignment.rep_id))).where(Assignment.assigned_by == manager_id)) or 0
+            unique_reps = db.scalar(
+                (
+                    select(func.count(func.distinct(Assignment.rep_id)))
+                    .join(User, User.id == Assignment.rep_id)
+                    .where(User.team_id == team_id)
+                    if team_id
+                    else select(func.count(func.distinct(Assignment.rep_id))).where(Assignment.assigned_by == manager_id)
+                )
+            ) or 0
 
-            completion_rows = db.execute(
+            completion_stmt = (
                 select(
                     Assignment.rep_id.label("rep_id"),
                     User.name.label("rep_name"),
@@ -683,15 +724,19 @@ class ManagementAnalyticsRuntimeService:
                 )
                 .join(User, User.id == Assignment.rep_id)
                 .where(
-                    Assignment.assigned_by == manager_id,
                     Assignment.created_at >= current_start,
                     Assignment.created_at <= current_end,
                 )
                 .group_by(Assignment.rep_id, User.name)
                 .order_by(User.name.asc())
-            ).mappings().all()
+            )
+            if team_id:
+                completion_stmt = completion_stmt.where(User.team_id == team_id)
+            else:
+                completion_stmt = completion_stmt.where(Assignment.assigned_by == manager_id)
+            completion_rows = db.execute(completion_stmt).mappings().all()
 
-            use_warehouse = self._use_warehouse(db, manager_id=manager_id)
+            use_warehouse = False if team_id else self._use_warehouse(db, manager_id=manager_id)
             if use_warehouse:
                 warehouse_session_rows = self._warehouse_session_rows(
                     db,
@@ -725,7 +770,7 @@ class ManagementAnalyticsRuntimeService:
                     )
                     .join(Scenario, Scenario.id == AnalyticsFactSession.scenario_id)
                     .where(
-                        AnalyticsFactSession.manager_id == manager_id,
+                        AnalyticsFactSession.team_id == team_id if team_id else AnalyticsFactSession.manager_id == manager_id,
                         AnalyticsFactSession.overall_score.is_not(None),
                         AnalyticsFactSession.session_date >= current_start.date(),
                         AnalyticsFactSession.session_date <= current_end.date(),
@@ -735,7 +780,7 @@ class ManagementAnalyticsRuntimeService:
                 ).mappings().all()
                 histogram_scores = db.scalars(
                     select(AnalyticsFactSession.overall_score).where(
-                        AnalyticsFactSession.manager_id == manager_id,
+                        AnalyticsFactSession.team_id == team_id if team_id else AnalyticsFactSession.manager_id == manager_id,
                         AnalyticsFactSession.overall_score.is_not(None),
                         AnalyticsFactSession.session_date >= current_start.date(),
                         AnalyticsFactSession.session_date <= current_end.date(),
@@ -747,6 +792,7 @@ class ManagementAnalyticsRuntimeService:
             command_center = self.get_command_center(
                 db,
                 manager_id=manager_id,
+                team_id=team_id,
                 date_from=current_start,
                 date_to=current_end,
                 previous_start=previous_start,
@@ -820,6 +866,7 @@ class ManagementAnalyticsRuntimeService:
             query_name="team_analytics",
             manager_id=manager_id,
             cache_params={
+                "team_id": team_id,
                 "period": period,
                 "current_start": _cache_dt_iso(current_start),
                 "current_end": _cache_dt_iso(current_end),

@@ -192,14 +192,25 @@ class ManagementAnalyticsService:
             return alerts
         return [item for item in alerts if item.get("id") not in acknowledged_ids]
 
-    def _load_alert_facts(self, db: Session, *, manager_id: str, period: str) -> list[dict[str, Any]]:
+    def _load_alert_facts(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        period: str,
+        team_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        filters = [
+            AnalyticsFactAlert.period_key == period,
+            AnalyticsFactAlert.is_active.is_(True),
+        ]
+        if team_id:
+            filters.append(AnalyticsFactAlert.team_id == team_id)
+        else:
+            filters.append(AnalyticsFactAlert.manager_id == manager_id)
         rows = db.scalars(
             select(AnalyticsFactAlert)
-            .where(
-                AnalyticsFactAlert.manager_id == manager_id,
-                AnalyticsFactAlert.period_key == period,
-                AnalyticsFactAlert.is_active.is_(True),
-            )
+            .where(*filters)
             .order_by(AnalyticsFactAlert.occurred_at.desc())
         ).all()
         items = []
@@ -231,6 +242,7 @@ class ManagementAnalyticsService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> list[SessionRecord]:
@@ -273,9 +285,12 @@ class ManagementAnalyticsService:
             .join(User, User.id == AnalyticsFactSession.rep_id)
             .join(Scenario, Scenario.id == AnalyticsFactSession.scenario_id)
             .outerjoin(Scorecard, Scorecard.session_id == AnalyticsFactSession.session_id)
-            .where(AnalyticsFactSession.manager_id == manager_id)
             .order_by(AnalyticsFactSession.started_at.desc())
         )
+        if team_id:
+            stmt = stmt.where(AnalyticsFactSession.team_id == team_id)
+        else:
+            stmt = stmt.where(AnalyticsFactSession.manager_id == manager_id)
         if date_from is not None:
             stmt = stmt.where(AnalyticsFactSession.session_date >= date_from.date())
         if date_to is not None:
@@ -342,8 +357,16 @@ class ManagementAnalyticsService:
         ).all()
         return {session_id: int(count or 0) for session_id, count in rows}
 
-    def _load_assignment_completion(self, db: Session, *, manager_id: str, date_from: datetime, date_to: datetime) -> dict[str, dict[str, Any]]:
-        rows = db.execute(
+    def _load_assignment_completion(
+        self,
+        db: Session,
+        *,
+        manager_id: str,
+        date_from: datetime,
+        date_to: datetime,
+        team_id: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        stmt = (
             select(
                 Assignment.rep_id.label("rep_id"),
                 User.name.label("rep_name"),
@@ -352,12 +375,16 @@ class ManagementAnalyticsService:
             )
             .join(User, User.id == Assignment.rep_id)
             .where(
-                Assignment.assigned_by == manager_id,
                 Assignment.created_at >= date_from,
                 Assignment.created_at <= date_to,
             )
             .group_by(Assignment.rep_id, User.name)
-        ).mappings().all()
+        )
+        if team_id:
+            stmt = stmt.where(User.team_id == team_id)
+        else:
+            stmt = stmt.where(Assignment.assigned_by == manager_id)
+        rows = db.execute(stmt).mappings().all()
         return {
             row["rep_id"]: {
                 "rep_name": row["rep_name"],
@@ -696,24 +723,41 @@ class ManagementAnalyticsService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime,
         date_to: datetime,
         previous_start: datetime,
         previous_end: datetime,
         period: str,
     ) -> dict[str, Any]:
-        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="command_center", period=period)
+        materialized = (
+            None
+            if team_id
+            else self._get_materialized_payload(db, manager_id=manager_id, view_name="command_center", period=period)
+        )
         if materialized is not None:
-            alert_facts = self._load_alert_facts(db, manager_id=manager_id, period=period)
+            alert_facts = self._load_alert_facts(db, manager_id=manager_id, period=period, team_id=team_id)
             if alert_facts:
                 materialized = dict(materialized)
                 materialized["alerts"] = alert_facts
                 materialized["alerts_preview"] = alert_facts[:6]
             return materialized
-        sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
-        previous_sessions = self._load_sessions(db, manager_id=manager_id, date_from=previous_start, date_to=previous_end)
+        sessions = self._load_sessions(db, manager_id=manager_id, team_id=team_id, date_from=date_from, date_to=date_to)
+        previous_sessions = self._load_sessions(
+            db,
+            manager_id=manager_id,
+            team_id=team_id,
+            date_from=previous_start,
+            date_to=previous_end,
+        )
         session_ids = [session.session_id for session in sessions]
-        completion_rows = self._load_assignment_completion(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
+        completion_rows = self._load_assignment_completion(
+            db,
+            manager_id=manager_id,
+            team_id=team_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
 
         scores = [session.overall_score for session in sessions if session.overall_score is not None]
         previous_scores = [session.overall_score for session in previous_sessions if session.overall_score is not None]
@@ -805,8 +849,10 @@ class ManagementAnalyticsService:
         rep_risk_matrix = self._rep_risk_matrix(sessions, completion_rows)
         overdue_assignments = (
             db.scalar(
-                select(func.count(Assignment.id)).where(
-                    Assignment.assigned_by == manager_id,
+                select(func.count(Assignment.id))
+                .join(User, User.id == Assignment.rep_id)
+                .where(
+                    User.team_id == team_id if team_id else Assignment.assigned_by == manager_id,
                     Assignment.status != AssignmentStatus.COMPLETED,
                     Assignment.due_at.is_not(None),
                     Assignment.due_at < datetime.now(timezone.utc),
@@ -883,14 +929,19 @@ class ManagementAnalyticsService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime,
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
-        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="scenario_intelligence", period=period)
+        materialized = (
+            None
+            if team_id
+            else self._get_materialized_payload(db, manager_id=manager_id, view_name="scenario_intelligence", period=period)
+        )
         if materialized is not None:
             return materialized
-        sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
+        sessions = self._load_sessions(db, manager_id=manager_id, team_id=team_id, date_from=date_from, date_to=date_to)
         session_ids = [session.session_id for session in sessions]
         objection_tags = self._load_objection_tags(db, session_ids)
 
@@ -1363,6 +1414,7 @@ class ManagementAnalyticsService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime | None,
         date_to: datetime | None,
         rep_id: str | None = None,
@@ -1375,7 +1427,7 @@ class ManagementAnalyticsService:
         search: str | None = None,
         limit: int = 200,
     ) -> dict[str, Any]:
-        sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
+        sessions = self._load_sessions(db, manager_id=manager_id, team_id=team_id, date_from=date_from, date_to=date_to)
         session_ids = [session.session_id for session in sessions]
         objection_tags = self._load_objection_tags(db, session_ids)
         transcript_previews = self._load_transcript_previews(db, session_ids)
@@ -1453,11 +1505,12 @@ class ManagementAnalyticsService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime,
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
-        alert_facts = self._load_alert_facts(db, manager_id=manager_id, period=period)
+        alert_facts = self._load_alert_facts(db, manager_id=manager_id, team_id=team_id, period=period)
         if alert_facts:
             return {
                 "manager_id": manager_id,
@@ -1466,12 +1519,17 @@ class ManagementAnalyticsService:
                 "date_to": date_to.isoformat(),
                 "items": alert_facts,
             }
-        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="alerts", period=period)
+        materialized = (
+            None
+            if team_id
+            else self._get_materialized_payload(db, manager_id=manager_id, view_name="alerts", period=period)
+        )
         if materialized is not None:
             return materialized
         command_center = self.get_command_center(
             db,
             manager_id=manager_id,
+            team_id=team_id,
             date_from=date_from,
             date_to=date_to,
             previous_start=date_from,
@@ -1491,14 +1549,19 @@ class ManagementAnalyticsService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         date_from: datetime,
         date_to: datetime,
         period: str,
     ) -> dict[str, Any]:
-        materialized = self._get_materialized_payload(db, manager_id=manager_id, view_name="benchmarks", period=period)
+        materialized = (
+            None
+            if team_id
+            else self._get_materialized_payload(db, manager_id=manager_id, view_name="benchmarks", period=period)
+        )
         if materialized is not None:
             return materialized
-        sessions = self._load_sessions(db, manager_id=manager_id, date_from=date_from, date_to=date_to)
+        sessions = self._load_sessions(db, manager_id=manager_id, team_id=team_id, date_from=date_from, date_to=date_to)
         scores = sorted(session.overall_score for session in sessions if session.overall_score is not None)
         if scores:
             median = scores[len(scores) // 2]

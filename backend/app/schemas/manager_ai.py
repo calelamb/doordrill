@@ -7,6 +7,24 @@ from pydantic import BaseModel, Field
 from app.schemas.ai_meta import AiMeta
 
 
+class AssignmentSuggestion(BaseModel):
+    rep_id: str
+    rep_name: str
+    scenario_id: str | None = None
+    scenario_label: str = Field(min_length=1, max_length=180)
+    scenario_search: str | None = Field(default=None, max_length=180)
+    difficulty: int | None = Field(default=None, ge=1, le=5)
+    min_score_target: float | None = Field(default=None, ge=0, le=10)
+    retry_policy: dict[str, Any] = Field(default_factory=dict)
+    rationale: str = Field(min_length=1, max_length=600)
+
+
+class ManagerPrimaryAction(BaseModel):
+    type: Literal["route", "assignment_builder"]
+    label: str = Field(min_length=1, max_length=80)
+    target_url: str = Field(min_length=1, max_length=240)
+
+
 class RepInsightRequest(BaseModel):
     manager_id: str
     rep_id: str
@@ -32,6 +50,7 @@ class RepInsightResponse(RepInsightContent):
     rep_name: str
     generated_at: str
     data_summary: dict[str, Any] = Field(default_factory=dict)
+    assignment_suggestion: AssignmentSuggestion | None = None
     ai_meta: AiMeta | None = None
 
 
@@ -78,6 +97,7 @@ class OneOnOnePrepResponse(OneOnOnePrepContent):
     period_days: int
     generated_at: str
     data_summary: dict[str, Any] = Field(default_factory=dict)
+    assignment_suggestion: AssignmentSuggestion | None = None
     ai_meta: AiMeta | None = None
 
 
@@ -91,8 +111,10 @@ class WeeklyTeamBriefingStandoutRep(BaseModel):
 
 
 class WeeklyTeamBriefingNeedsAttentionItem(BaseModel):
+    rep_id: str | None = None
     name: str = Field(min_length=1, max_length=160)
     concern: str = Field(min_length=1, max_length=400)
+    assignment_suggestion: AssignmentSuggestion | None = None
 
 
 class WeeklyTeamBriefingSharedWeakness(BaseModel):
@@ -198,6 +220,9 @@ class ManagerChatAnswerContent(BaseModel):
     follow_up_suggestions: list[str] = Field(default_factory=list)
     action_suggestion: str | None = Field(default=None, max_length=240)
     data_points: list[ChatDataPoint] = Field(default_factory=list)
+    data_state: str | None = Field(default=None, max_length=40)
+    primary_action: ManagerPrimaryAction | None = None
+    assignment_suggestion: AssignmentSuggestion | None = None
 
 
 class ManagerChatResponse(ManagerChatAnswerContent):

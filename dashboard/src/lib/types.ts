@@ -60,6 +60,24 @@ export type AiMeta = {
   generated_at: string;
 };
 
+export type AssignmentSuggestion = {
+  rep_id: string;
+  rep_name: string;
+  scenario_id?: string | null;
+  scenario_label: string;
+  scenario_search?: string | null;
+  difficulty?: number | null;
+  min_score_target?: number | null;
+  retry_policy: Record<string, unknown>;
+  rationale: string;
+};
+
+export type ManagerPrimaryAction = {
+  type: "route" | "assignment_builder";
+  label: string;
+  target_url: string;
+};
+
 export type FeedItem = {
   session_id: string;
   rep_id: string;
@@ -240,6 +258,7 @@ export type RepInsightResponse = {
     contributing_metrics?: string[];
   }>;
   data_summary: Record<string, unknown>;
+  assignment_suggestion?: AssignmentSuggestion | null;
   ai_meta?: AiMeta | null;
 };
 
@@ -270,6 +289,7 @@ export type OneOnOnePrepResponse = {
   };
   readiness_summary: string;
   data_summary: Record<string, unknown>;
+  assignment_suggestion?: AssignmentSuggestion | null;
   ai_meta?: AiMeta | null;
 };
 
@@ -379,8 +399,10 @@ export type WeeklyTeamBriefingResponse = {
     why: string;
   };
   needs_attention: Array<{
+    rep_id?: string | null;
     name: string;
     concern: string;
+    assignment_suggestion?: AssignmentSuggestion | null;
   }>;
   shared_weakness: {
     skill: string;
@@ -408,6 +430,9 @@ export type ManagerChatResponse = {
   follow_up_suggestions: string[];
   action_suggestion: string | null;
   data_points: ChatDataPoint[];
+  data_state?: string | null;
+  primary_action?: ManagerPrimaryAction | null;
+  assignment_suggestion?: AssignmentSuggestion | null;
   intent_detected: string;
   sources_used: string[];
   ai_meta?: AiMeta | null;

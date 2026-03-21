@@ -477,11 +477,29 @@ export function ManagerFeedPage() {
 
             {!filteredFeed.length ? (
                 <div className="rounded-3xl border border-white/30 bg-white/40 px-6 py-10 shadow-xl shadow-black/5 backdrop-blur-2xl">
-                    <EmptyState
-                        variant="empty"
-                        message={feed.length ? "No sessions match the current filters." : "No sessions are available for this manager yet."}
-                        icon={ShieldAlert}
-                    />
+                    {feed.length ? (
+                        <EmptyState
+                            variant="empty"
+                            message="No sessions match the current filters."
+                            icon={ShieldAlert}
+                        />
+                    ) : (
+                        <div className="space-y-5 text-center">
+                            <EmptyState
+                                variant="empty"
+                                message="No sessions are available for this team yet."
+                                icon={ShieldAlert}
+                            />
+                            <button
+                                type="button"
+                                aria-label="Open assignment builder"
+                                onClick={() => navigate("/manager/assignments/new")}
+                                className="inline-flex items-center justify-center rounded-xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-accent/20 transition hover:bg-accent-hover"
+                            >
+                                Assign Drill
+                            </button>
+                        </div>
+                    )}
                 </div>
             ) : (
                 <FeedList

@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     manager_ai_fallback_provider: str | None = Field(default=None, alias="MANAGER_AI_FALLBACK_PROVIDER")
     manager_ai_fallback_model: str | None = Field(default=None, alias="MANAGER_AI_FALLBACK_MODEL")
     manager_ai_fallback_fast_model: str | None = Field(default=None, alias="MANAGER_AI_FALLBACK_FAST_MODEL")
+    manager_ai_allow_mock: bool = Field(default=False, alias="MANAGER_AI_ALLOW_MOCK")
     elevenlabs_api_key: str | None = Field(default=None, alias="ELEVENLABS_API_KEY")
     elevenlabs_voice_id: str | None = Field(default=None, alias="ELEVENLABS_VOICE_ID")
     elevenlabs_model_id: str = Field(default="eleven_flash_v2_5", alias="ELEVENLABS_MODEL_ID")

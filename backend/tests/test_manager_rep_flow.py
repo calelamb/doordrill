@@ -5,6 +5,8 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.models.session import SessionEvent
+from app.models.user import User
+from app.models.types import UserRole
 from app.services.provider_clients import MockLlmClient, MockSttClient, MockTtsClient, ProviderSuite
 from app.voice import ws as voice_ws
 
@@ -151,6 +153,47 @@ def test_ws_ledger_replay_and_feed(client, seed_org):
     )
     assert filtered.status_code == 200
     assert any(item["session_id"] == session_id for item in filtered.json()["items"])
+
+
+def test_team_scoped_feed_includes_sessions_assigned_by_other_manager(client, seed_org):
+    db = SessionLocal()
+    try:
+        primary_manager = db.scalar(select(User).where(User.id == seed_org["manager_id"]))
+        assert primary_manager is not None
+        second_manager = User(
+            org_id=primary_manager.org_id,
+            team_id=primary_manager.team_id,
+            role=UserRole.MANAGER,
+            name="Nina Manager",
+            email="nina@example.com",
+        )
+        db.add(second_manager)
+        db.commit()
+        db.refresh(second_manager)
+    finally:
+        db.close()
+
+    assignment = client.post(
+        "/manager/assignments",
+        json={
+            "scenario_id": seed_org["scenario_id"],
+            "rep_id": seed_org["rep_id"],
+            "assigned_by": second_manager.id,
+            "min_score_target": 7.0,
+            "retry_policy": {"max_attempts": 2},
+        },
+    )
+    assert assignment.status_code == 200
+    session_id = _run_session(client, seed_org, assignment.json()["id"])
+    manager_headers = {"x-user-id": seed_org["manager_id"], "x-user-role": "manager"}
+
+    feed_resp = client.get("/manager/feed", params={"manager_id": seed_org["manager_id"]}, headers=manager_headers)
+    assert feed_resp.status_code == 200
+    assert any(item["session_id"] == session_id for item in feed_resp.json()["items"])
+
+    sessions_resp = client.get("/manager/sessions", params={"manager_id": seed_org["manager_id"]}, headers=manager_headers)
+    assert sessions_resp.status_code == 200
+    assert any(item["session_id"] == session_id for item in sessions_resp.json()["items"])
 
 
 def test_replay_exposes_quality_signals_without_manual_drill(client, seed_org, monkeypatch):

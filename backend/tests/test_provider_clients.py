@@ -461,3 +461,71 @@ def test_json_router_does_not_fallback_on_non_retryable_provider_request_error(m
 
     assert exc.value.code == "ai_invalid_response"
     assert anthropic_called["value"] is False
+
+
+def test_json_router_respects_explicit_mock_disable():
+    settings = SimpleNamespace(
+        environment="development",
+        llm_provider="openai",
+        manager_ai_fallback_provider=None,
+        manager_ai_model=None,
+        manager_ai_fast_model=None,
+        manager_ai_fallback_model=None,
+        manager_ai_fallback_fast_model=None,
+        openai_api_key=None,
+        openai_model="gpt-4o-mini",
+        openai_base_url="https://api.openai.com/v1",
+        anthropic_api_key=None,
+        anthropic_model="claude-3-5-sonnet-latest",
+        anthropic_chat_classification_model="claude-3-5-haiku-latest",
+        anthropic_chat_answer_model="claude-3-5-sonnet-latest",
+        anthropic_base_url="https://api.anthropic.com",
+        provider_timeout_seconds=5.0,
+    )
+    router = JsonLlmRouter(settings)
+
+    with pytest.raises(JsonLlmRouterError) as exc:
+        router.generate_json(
+            system_prompt="Return JSON.",
+            user_prompt='{"answer":"string"}',
+            max_tokens=100,
+            validator=lambda payload: payload,
+            task="manager_chat_answer",
+            allow_mock_fallback=False,
+        )
+
+    assert exc.value.code == "ai_not_configured"
+
+
+def test_json_router_allows_explicit_mock_opt_in():
+    settings = SimpleNamespace(
+        environment="production",
+        llm_provider="openai",
+        manager_ai_fallback_provider=None,
+        manager_ai_model=None,
+        manager_ai_fast_model=None,
+        manager_ai_fallback_model=None,
+        manager_ai_fallback_fast_model=None,
+        openai_api_key=None,
+        openai_model="gpt-4o-mini",
+        openai_base_url="https://api.openai.com/v1",
+        anthropic_api_key=None,
+        anthropic_model="claude-3-5-sonnet-latest",
+        anthropic_chat_classification_model="claude-3-5-haiku-latest",
+        anthropic_chat_answer_model="claude-3-5-sonnet-latest",
+        anthropic_base_url="https://api.anthropic.com",
+        provider_timeout_seconds=5.0,
+    )
+    router = JsonLlmRouter(settings)
+
+    result = router.generate_json(
+        system_prompt="Return JSON.",
+        user_prompt='{"key_metric_label":"label","data_points":[]}',
+        max_tokens=100,
+        validator=lambda payload: payload,
+        task="manager_chat_answer",
+        allow_mock_fallback=True,
+    )
+
+    assert result.provider == "mock"
+    assert result.status == "mock"

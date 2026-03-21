@@ -20,6 +20,7 @@ import { AiMetaStrip } from "../components/shared/AiMetaStrip";
 import { ScoreTrajectoryBar } from "../components/shared/ScoreTrajectoryBar";
 import { ScoreChip } from "../components/shared/ScoreChip";
 import { SkillChip } from "../components/shared/SkillChip";
+import { buildAssignmentPrefillState } from "../lib/assignmentPrefill";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchManagerFeed, fetchRepInsight, fetchRepProgress, fetchRepRiskDetail } from "../lib/api";
 import {
@@ -584,7 +585,13 @@ export function RepProgressPage() {
             <button
               type="button"
               aria-label="Assign a new drill"
-              onClick={() => navigate("/manager/assignments/new")}
+              onClick={() =>
+                navigate("/manager/assignments/new", {
+                  state: {
+                    prefillRepIds: [repId],
+                  },
+                })
+              }
               className="rounded-xl bg-accent px-5 py-2.5 text-sm font-medium text-white shadow-lg shadow-accent/25 transition-colors hover:bg-accent-hover"
             >
               Assign Drill
@@ -915,7 +922,15 @@ export function RepProgressPage() {
               <button
                 type="button"
                 aria-label="Assign a follow-up drill"
-                onClick={() => navigate("/manager/assignments/new")}
+                onClick={() =>
+                  navigate("/manager/assignments/new", {
+                    state: {
+                      prefillRepIds: [repId],
+                      prefillCategoryKey: weakSkills[0]?.key ?? biggestGap.category,
+                      prefillScenarioSearch: getCategoryLabel(weakSkills[0]?.key ?? biggestGap.category),
+                    },
+                  })
+                }
                 className="mt-auto flex w-full items-center justify-center gap-2 rounded-xl border border-white/30 bg-white/50 px-4 py-3 text-sm font-medium text-ink transition-colors hover:bg-white/70"
               >
                 Assign Follow-Up Drill
@@ -1016,11 +1031,11 @@ export function RepProgressPage() {
                     aria-label="Assign recommended drill"
                     onClick={() =>
                       navigate("/manager/assignments/new", {
-                        state: {
+                        state: buildAssignmentPrefillState(insight.assignment_suggestion, {
                           prefillScenarioSearch: drillPrefill?.scenarioSearch ?? insight.drill_recommendation,
-                          prefillDifficulty: drillPrefill?.difficulty,
+                          prefillDifficulty: insight.assignment_suggestion?.difficulty ?? drillPrefill?.difficulty,
                           prefillRepIds: [repId],
-                        },
+                        }),
                       })
                     }
                     className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-hover"

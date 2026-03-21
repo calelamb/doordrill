@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 
 import { sendManagerChatMessage } from "../lib/api";
 import { describeAiError } from "../lib/aiStatus";
+import { buildAssignmentPrefillState } from "../lib/assignmentPrefill";
 import type { ChatMessage, ManagerChatResponse } from "../lib/types";
 import { AiMetaStrip } from "./shared/AiMetaStrip";
 
@@ -52,6 +53,9 @@ function getRepIdFromSources(sources: string[]): string | null {
 }
 
 function getActionTarget(response: ManagerChatResponse): string | null {
+  if (response.primary_action?.target_url) {
+    return response.primary_action.target_url;
+  }
   const repId = getRepIdFromSources(response.sources_used);
   if (repId) {
     return `/manager/reps/${repId}/progress`;
@@ -353,7 +357,13 @@ export function ManagerChatPanel({ isOpen, managerId, onClose, onToggle }: ChatP
                                   if (!actionTarget) {
                                     return;
                                   }
-                                  navigate(actionTarget);
+                                  if (message.response?.primary_action?.type === "assignment_builder") {
+                                    navigate(actionTarget, {
+                                      state: buildAssignmentPrefillState(message.response.assignment_suggestion),
+                                    });
+                                  } else {
+                                    navigate(actionTarget);
+                                  }
                                   onClose();
                                 }}
                                 aria-label={actionTarget ? `Open recommended page for: ${message.response.action_suggestion}` : "AI action suggestion"}
@@ -364,7 +374,10 @@ export function ManagerChatPanel({ isOpen, managerId, onClose, onToggle }: ChatP
                                 }`}
                               >
                                 <Lightbulb className="mt-0.5 h-4 w-4 shrink-0" />
-                                <span className="text-sm leading-6">{message.response.action_suggestion}</span>
+                                <span className="text-sm leading-6">
+                                  {message.response.action_suggestion}
+                                  {message.response.primary_action?.label ? ` (${message.response.primary_action.label})` : ""}
+                                </span>
                               </button>
                             ) : null}
 

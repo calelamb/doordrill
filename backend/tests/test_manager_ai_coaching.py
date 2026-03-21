@@ -402,8 +402,8 @@ def test_ai_endpoints_return_503_when_claude_is_unavailable(client, seed_org, mo
         headers=_manager_headers(seed_org),
         json={"manager_id": seed_org["manager_id"], "period_days": 30},
     )
-    assert summary_response.status_code == 503
-    assert "temporarily unavailable" in summary_response.json()["detail"]["message"]
+    assert summary_response.status_code == 404
+    assert "no coaching data" in summary_response.json()["detail"]["message"].lower()
 
     chat_response = client.post(
         "/manager/ai/chat",
@@ -415,6 +415,14 @@ def test_ai_endpoints_return_503_when_claude_is_unavailable(client, seed_org, mo
 
 
 def test_manager_ai_chat_uses_command_center_for_team_questions(client, seed_org, monkeypatch):
+    _create_scored_session(
+        seed_org,
+        day_offset=2,
+        overall_score=6.8,
+        weakness_tags=["objection_handling"],
+        ai_summary="Objection handling remains the main drag.",
+    )
+
     monkeypatch.setattr(
         manager_api.manager_ai_service,
         "classify_manager_chat_intent_with_meta",
@@ -474,6 +482,46 @@ def test_manager_ai_chat_uses_command_center_for_team_questions(client, seed_org
     assert body["key_metric"] == "6.8"
     assert body["data_points"][0]["value"] == "2 reps"
     assert body["ai_meta"]["status"] == "live"
+
+
+def test_manager_ai_chat_returns_truthful_no_data_response_for_empty_team_window(client, seed_org, monkeypatch):
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "classify_manager_chat_intent_with_meta",
+        lambda **kwargs: (
+            ManagerChatClassification(
+                intent="team_performance",
+                rep_name_mentioned=None,
+                scenario_mentioned=None,
+                category_mentioned=None,
+            ),
+            _ai_meta("classification"),
+        ),
+    )
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "answer_manager_chat_with_meta",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("LLM should not run for no-data chat")),
+    )
+
+    response = client.post(
+        "/manager/ai/chat",
+        headers=_manager_headers(seed_org),
+        json={
+            "manager_id": seed_org["manager_id"],
+            "message": "How is my team doing?",
+            "conversation_history": [],
+            "period_days": 30,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ai_meta"]["status"] == "no_data"
+    assert body["sources_used"] == []
+    assert body["key_metric"] is None
+    assert body["data_points"] == []
+    assert body["data_state"] in {"no_assignments", "no_sessions", "no_scored_sessions"}
 
 
 def test_manager_ai_chat_uses_rep_progress_for_rep_specific_questions(client, seed_org, monkeypatch):

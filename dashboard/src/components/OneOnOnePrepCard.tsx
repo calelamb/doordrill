@@ -7,6 +7,7 @@ import { ChartSkeleton } from "./shared/ChartSkeleton";
 import { EmptyState } from "./shared/EmptyState";
 import { AiMetaStrip } from "./shared/AiMetaStrip";
 import { clearStoredAuth, isAuthError } from "../lib/auth";
+import { buildAssignmentPrefillState } from "../lib/assignmentPrefill";
 import { fetchOneOnOnePrep } from "../lib/api";
 import type { OneOnOnePrepResponse } from "../lib/types";
 
@@ -290,6 +291,25 @@ export function OneOnOnePrepCard({
                       </span>
                     </div>
                     <p className="mt-3 text-sm leading-6 text-ink">{data.suggested_next_scenario.rationale}</p>
+                    <div className="mt-4">
+                      <button
+                        type="button"
+                        aria-label={`Assign suggested drill for ${data.rep_name}`}
+                        onClick={() => {
+                          navigate("/manager/assignments/new", {
+                            state: buildAssignmentPrefillState(data.assignment_suggestion, {
+                              prefillRepIds: [data.rep_id],
+                              prefillScenarioSearch: data.assignment_suggestion?.scenario_search ?? data.suggested_next_scenario.scenario_type,
+                              prefillDifficulty: data.assignment_suggestion?.difficulty ?? data.suggested_next_scenario.difficulty,
+                            }),
+                          });
+                          onClose();
+                        }}
+                        className="inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-hover"
+                      >
+                        Assign Drill
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : null}

@@ -20,8 +20,10 @@ from app.models.user import User
 from app.models.warehouse import FactRepDaily
 from app.schemas.ai_meta import AiAttemptMeta, AiMeta
 from app.schemas.manager_ai import (
+    AssignmentSuggestion,
     ManagerChatAnswerContent,
     ManagerChatClassification,
+    ManagerPrimaryAction,
     OneOnOnePrepContent,
     OneOnOnePrepResponse,
     RepInsightContent,
@@ -236,6 +238,7 @@ class ManagerAiCoachingService:
                 fast=fast,
                 task=task,
                 validator=validator,
+                allow_mock_fallback=self.settings.manager_ai_allow_mock,
             )
         except JsonLlmRouterError as exc:
             attempts = [
@@ -396,6 +399,185 @@ class ManagerAiCoachingService:
                     }
                 )
             }
+        )
+
+    def _system_ai_meta(self, *, generated_at: str, status: str = "no_data", cached: bool = False) -> AiMeta:
+        return AiMeta(
+            provider="system",
+            model="deterministic",
+            real_call=False,
+            cached=cached,
+            status=status,
+            latency_ms=0,
+            fallback_used=False,
+            attempts=[],
+            generated_at=generated_at,
+        )
+
+    def _build_assignment_suggestion(
+        self,
+        db: Session,
+        *,
+        rep: User,
+        adaptive_plan: dict[str, Any] | None = None,
+    ) -> AssignmentSuggestion | None:
+        try:
+            plan = adaptive_plan or self.adaptive_training_service.build_plan(db, rep_id=rep.id)
+        except Exception:
+            return None
+
+        recommended = next(iter(plan.get("recommended_scenarios") or []), None)
+        if not isinstance(recommended, dict):
+            return None
+
+        skill_profile = list(plan.get("skill_profile") or [])
+        min_score_target = None
+        if skill_profile:
+            min_score_target = self.adaptive_training_service._default_target_score(skill_profile)
+
+        scenario_id = recommended.get("scenario_id")
+        scenario_label = str(recommended.get("scenario_name") or recommended.get("scenario_label") or "Recommended drill").strip()
+        if not scenario_label:
+            scenario_label = "Recommended drill"
+
+        difficulty = recommended.get("difficulty")
+        try:
+            difficulty_value = int(difficulty) if difficulty is not None else None
+        except (TypeError, ValueError):
+            difficulty_value = None
+
+        rationale = str(recommended.get("rationale") or "").strip()
+        if not rationale:
+            focus_skills = ", ".join((recommended.get("focus_skills") or [])[:2]) or "current weak areas"
+            rationale = f"Targets {focus_skills} at the current recommended challenge level."
+
+        return AssignmentSuggestion(
+            rep_id=rep.id,
+            rep_name=rep.name,
+            scenario_id=str(scenario_id) if scenario_id else None,
+            scenario_label=scenario_label,
+            scenario_search=None if scenario_id else scenario_label,
+            difficulty=difficulty_value,
+            min_score_target=min_score_target,
+            retry_policy={"max_attempts": 2},
+            rationale=rationale,
+        )
+
+    def build_no_data_chat_response(
+        self,
+        *,
+        manager: User,
+        data_state: str,
+        period_days: int,
+        resolved_rep: User | None = None,
+        assignment_suggestion: AssignmentSuggestion | None = None,
+    ) -> tuple[ManagerChatAnswerContent, AiMeta]:
+        del manager, period_days
+        generated_at = datetime.now(timezone.utc).isoformat()
+        subject = resolved_rep.name if resolved_rep is not None else "your team"
+
+        action = ManagerPrimaryAction(
+            type="route",
+            label="Open Dashboard",
+            target_url="/manager/feed",
+        )
+        answer = f"There is not enough data to answer for {subject} yet."
+        action_suggestion = "Add more activity, then ask again."
+        follow_up = [
+            "What should I set up first?",
+            "How do I assign the first drill?",
+        ]
+
+        if data_state == "no_reps":
+            answer = "No reps are on this team yet, so there are no drills or scores to review."
+            action = ManagerPrimaryAction(type="route", label="Invite Rep", target_url="/reps/invite")
+            action_suggestion = "Invite a rep, then assign their first drill."
+            follow_up = [
+                "How do I invite my first rep?",
+                "What scenario should I launch first?",
+            ]
+        elif data_state == "no_scenarios":
+            answer = "There are no scenarios available for this org yet, so nothing can be assigned or graded."
+            action = ManagerPrimaryAction(type="route", label="Create Scenario", target_url="/scenarios/new")
+            action_suggestion = "Create a scenario, then assign it to a rep."
+            follow_up = [
+                "What scenario should I create first?",
+                "How should I sequence new drills for the team?",
+            ]
+        elif data_state == "no_assignments":
+            answer = (
+                f"{subject} does not have any assigned drills yet, so there is nothing to grade."
+                if resolved_rep is not None
+                else "Your team has not been assigned any drills yet, so there is nothing to grade."
+            )
+            action = ManagerPrimaryAction(
+                type="assignment_builder" if assignment_suggestion is not None else "route",
+                label="Assign Drill",
+                target_url="/manager/assignments/new",
+            )
+            action_suggestion = (
+                f"Assign {assignment_suggestion.scenario_label} to {assignment_suggestion.rep_name}."
+                if assignment_suggestion is not None
+                else "Assign the first drill to start generating scored sessions."
+            )
+            follow_up = [
+                "Which rep should get the first drill?",
+                "Which scenario is best to assign next?",
+            ]
+        elif data_state == "no_sessions":
+            answer = (
+                f"{subject} has assigned drills, but no completed sessions in the selected window yet."
+                if resolved_rep is not None
+                else "Your team has assigned drills, but no completed sessions in the selected window yet."
+            )
+            action = ManagerPrimaryAction(
+                type="assignment_builder" if assignment_suggestion is not None else "route",
+                label="Assign Another Drill",
+                target_url="/manager/assignments/new",
+            )
+            action_suggestion = (
+                f"Queue {assignment_suggestion.scenario_label} next for {assignment_suggestion.rep_name}."
+                if assignment_suggestion is not None
+                else "Assign a drill and wait for the rep to complete it."
+            )
+            follow_up = [
+                "Who still needs a drill this week?",
+                "What should I assign next?",
+            ]
+        elif data_state == "no_scored_sessions":
+            answer = (
+                f"{subject} has activity, but no scored drills are available yet in this window."
+                if resolved_rep is not None
+                else "Your team has activity, but no scored drills are available yet in this window."
+            )
+            action = ManagerPrimaryAction(
+                type="assignment_builder" if assignment_suggestion is not None else "route",
+                label="Assign Follow-up Drill",
+                target_url="/manager/assignments/new",
+            )
+            action_suggestion = (
+                f"Assign {assignment_suggestion.scenario_label} next so the team has a clean graded sample."
+                if assignment_suggestion is not None
+                else "Assign another drill and come back once a scorecard is complete."
+            )
+            follow_up = [
+                "What should I assign next?",
+                "Which rep needs the next scored attempt first?",
+            ]
+
+        return (
+            ManagerChatAnswerContent(
+                answer=answer,
+                key_metric=None,
+                key_metric_label=None,
+                follow_up_suggestions=follow_up,
+                action_suggestion=action_suggestion,
+                data_points=[],
+                data_state=data_state,
+                primary_action=action,
+                assignment_suggestion=assignment_suggestion,
+            ),
+            self._system_ai_meta(generated_at=generated_at, status="no_data"),
         )
 
     def classify_manager_chat_intent(self, *, message: str) -> ManagerChatClassification:
@@ -863,6 +1045,11 @@ Provide a coaching analysis in this exact JSON format:
             rep_name=rep.name,
             generated_at=generated_at,
             data_summary=data_summary,
+            assignment_suggestion=self._build_assignment_suggestion(
+                db,
+                rep=rep,
+                adaptive_plan=adaptive_plan,
+            ),
             ai_meta=self._ai_meta_from_result(result, generated_at=generated_at),
             **content.model_copy(
                 update={
@@ -1131,6 +1318,11 @@ Requirements:
             period_days=period_days,
             generated_at=generated_at,
             data_summary=data_summary,
+            assignment_suggestion=self._build_assignment_suggestion(
+                db,
+                rep=rep,
+                adaptive_plan=adaptive_plan,
+            ),
             ai_meta=self._ai_meta_from_result(result, generated_at=generated_at),
             **content.model_dump(),
         )
@@ -1358,20 +1550,30 @@ Requirements:
             validator=WeeklyTeamBriefingContent.model_validate,
         )
         content_payload = result.payload.model_dump()
-        content_payload["needs_attention"] = [
-            {
-                "name": next(
-                    (
-                        brief["rep_name"]
-                        for brief in rep_briefs
-                        if brief["rep_id"] == risk["rep_id"]
+        reps_by_id = {rep.id: rep for rep in reps}
+        content_payload["needs_attention"] = []
+        for risk in at_risk_reps[:2]:
+            rep_id = risk.get("rep_id")
+            rep = reps_by_id.get(rep_id) if isinstance(rep_id, str) else None
+            content_payload["needs_attention"].append(
+                {
+                    "rep_id": rep_id,
+                    "name": next(
+                        (
+                            brief["rep_name"]
+                            for brief in rep_briefs
+                            if brief["rep_id"] == rep_id
+                        ),
+                        rep_id,
                     ),
-                    risk["rep_id"],
-                ),
-                "concern": self._weekly_risk_concern_text(risk),
-            }
-            for risk in at_risk_reps[:2]
-        ]
+                    "concern": self._weekly_risk_concern_text(risk),
+                    "assignment_suggestion": (
+                        self._build_assignment_suggestion(db, rep=rep)
+                        if rep is not None
+                        else None
+                    ),
+                }
+            )
 
         generated_at = datetime.now(timezone.utc).isoformat()
         response = WeeklyTeamBriefingResponse.model_validate(
@@ -1675,6 +1877,16 @@ Return JSON array:
         calibration_items = coaching_analytics.get("manager_calibration", []) if isinstance(coaching_analytics, dict) else []
         recent_notes = coaching_analytics.get("recent_notes", []) if isinstance(coaching_analytics, dict) else []
         retry_items = coaching_analytics.get("retry_impact", []) if isinstance(coaching_analytics, dict) else []
+        if (
+            int(summary.get("coaching_note_count") or 0) <= 0
+            and int(summary.get("review_count") or 0) <= 0
+            and not weakness_items
+            and not uplift_items
+            and not calibration_items
+            and not recent_notes
+            and not retry_items
+        ):
+            raise AiCoachingDataUnavailableError("No coaching data is available for this team in the selected period")
 
         top_weaknesses = [
             {

@@ -15,6 +15,7 @@ import {
 import { ChartSkeleton } from "../components/shared/ChartSkeleton";
 import { EmptyState } from "../components/shared/EmptyState";
 import { AiMetaStrip } from "../components/shared/AiMetaStrip";
+import { buildAssignmentPrefillState } from "../lib/assignmentPrefill";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchManagerCoachingAnalytics, fetchTeamCoachingSummary, fetchWeeklyTeamBriefing } from "../lib/api";
 import { cardVariants, pageVariants } from "../lib/motion";
@@ -100,7 +101,8 @@ function isEmptyDataError(message: string | null) {
   if (!message) {
     return false;
   }
-  return message.toLowerCase().includes("no scored sessions") || message.toLowerCase().includes("no reps");
+  const normalized = message.toLowerCase();
+  return normalized.includes("no scored sessions") || normalized.includes("no reps") || normalized.includes("no coaching data");
 }
 
 export function CoachingLabPage() {
@@ -390,6 +392,22 @@ export function CoachingLabPage() {
                               {item.name}
                             </div>
                             <p className="mt-2 leading-6">{item.concern}</p>
+                            <div className="mt-3">
+                              <button
+                                type="button"
+                                aria-label={`Assign drill for ${item.name}`}
+                                onClick={() =>
+                                  navigate("/manager/assignments/new", {
+                                    state: buildAssignmentPrefillState(item.assignment_suggestion, {
+                                      prefillRepIds: item.rep_id ? [item.rep_id] : undefined,
+                                    }),
+                                  })
+                                }
+                                className="inline-flex items-center gap-2 rounded-xl bg-white/80 px-3 py-2 text-xs font-semibold text-amber-950 transition hover:bg-white"
+                              >
+                                Assign Drill
+                              </button>
+                            </div>
                           </div>
                         ))
                       ) : (
@@ -512,7 +530,11 @@ export function CoachingLabPage() {
             </div>
           ) : null}
 
-          {!summaryLoading && !summary && summaryError ? (
+          {!summaryLoading && !summary && summaryError && isEmptyDataError(summaryError) ? (
+            <EmptyState variant="empty" message="No team coaching summary is available yet." />
+          ) : null}
+
+          {!summaryLoading && !summary && summaryError && !isEmptyDataError(summaryError) ? (
             <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-4 py-4 text-sm text-error">
               {summaryError}
             </div>
@@ -527,13 +549,29 @@ export function CoachingLabPage() {
               ) : null}
 
               {!summaryLoading && summaryError ? (
-                <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-4 py-4 text-sm text-error">
-                  {summaryError}
-                </div>
+                isEmptyDataError(summaryError) ? (
+                  <div className="rounded-2xl border border-white/30 bg-white/60 px-4 py-4 text-sm text-muted">
+                    No coaching summary is available for this period yet.
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-4 py-4 text-sm text-error">
+                    {summaryError}
+                  </div>
+                )
               ) : null}
 
               <p className="text-base leading-7 text-ink">{summary.summary}</p>
-              <AiMetaStrip meta={summary.ai_meta} />
+              <div className="flex flex-wrap items-center gap-3">
+                <AiMetaStrip meta={summary.ai_meta} />
+                <button
+                  type="button"
+                  aria-label="Open assignment builder"
+                  onClick={() => navigate("/manager/assignments/new")}
+                  className="inline-flex items-center gap-2 rounded-xl border border-white/35 bg-white/70 px-3 py-2 text-sm font-semibold text-ink transition hover:bg-white"
+                >
+                  Assign Drill
+                </button>
+              </div>
             </div>
           ) : null}
         </div>

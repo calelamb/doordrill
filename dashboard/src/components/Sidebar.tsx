@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ActivitySquare, BarChart2, BookOpenText, Compass, History, LayoutDashboard, LogOut, Scale, Shield, TreePine, UserPlus } from "lucide-react";
+import { ActivitySquare, BarChart2, BookOpenText, ClipboardList, Compass, History, LayoutDashboard, LogOut, Scale, Shield, TreePine, UserPlus } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { clearStoredAuth, getValidStoredAuth } from "../lib/auth";
@@ -26,6 +26,7 @@ export function Sidebar() {
     const isExplorer = location.pathname.startsWith("/manager/explorer");
     const isKnowledgeBase = location.pathname.startsWith("/knowledge-base");
     const isActions = location.pathname.startsWith("/manager/actions");
+    const isAssignments = location.pathname.startsWith("/manager/assignments");
     const isInvite = location.pathname.startsWith("/reps/invite");
 
     useEffect(() => {
@@ -156,6 +157,17 @@ export function Sidebar() {
                 >
                     <BookOpenText className="w-4.5 h-4.5 min-w-4.5" />
                     Knowledge Base
+                </Link>
+
+                <Link
+                    to="/manager/assignments/new"
+                    className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-200 text-sm ${isAssignments
+                            ? "bg-accent-soft text-accent font-semibold"
+                            : "text-muted hover:bg-white/40 font-medium"
+                        }`}
+                >
+                    <ClipboardList className="w-4.5 h-4.5 min-w-4.5" />
+                    Assign Drill
                 </Link>
 
                 <Link

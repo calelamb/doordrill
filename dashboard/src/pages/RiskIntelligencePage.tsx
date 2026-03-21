@@ -16,6 +16,7 @@ import { DataTable } from "../components/shared/DataTable";
 import { EmptyState } from "../components/shared/EmptyState";
 import { ScoreTrajectoryBar } from "../components/shared/ScoreTrajectoryBar";
 import { AiMetaStrip } from "../components/shared/AiMetaStrip";
+import { buildAssignmentPrefillState } from "../lib/assignmentPrefill";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchRepInsight, fetchRepRiskDetail } from "../lib/api";
 import { getCategoryLabel, normalizeCategoryKey } from "../lib/analytics";
@@ -275,6 +276,21 @@ function RepInsightDrawer({ managerId, period, rep, onClose }: RepInsightDrawerP
                   <div className="rounded-[28px] border border-white/35 bg-white/55 p-5 backdrop-blur-2xl">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Recommended Drill</div>
                     <p className="mt-3 text-sm leading-6 text-ink">{insight.drill_recommendation}</p>
+                    <button
+                      type="button"
+                      aria-label={`Assign recommended drill for ${rep.rep_name}`}
+                      onClick={() =>
+                        navigate("/manager/assignments/new", {
+                          state: buildAssignmentPrefillState(insight.assignment_suggestion, {
+                            prefillRepIds: [rep.rep_id],
+                            prefillScenarioSearch: insight.assignment_suggestion?.scenario_search ?? insight.drill_recommendation,
+                          }),
+                        })
+                      }
+                      className="mt-4 inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-hover"
+                    >
+                      Assign Drill
+                    </button>
                   </div>
 
                   <div className="rounded-[28px] border border-white/35 bg-white/55 p-5 backdrop-blur-2xl">

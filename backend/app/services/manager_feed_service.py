@@ -18,6 +18,7 @@ class ManagerFeedService:
         db: Session,
         *,
         manager_id: str,
+        team_id: str | None = None,
         rep_id: str | None = None,
         scenario_id: str | None = None,
         reviewed: bool | None = None,
@@ -71,10 +72,13 @@ class ManagerFeedService:
             .join(User, User.id == DrillSession.rep_id)
             .join(Scenario, Scenario.id == DrillSession.scenario_id)
             .outerjoin(Scorecard, Scorecard.session_id == DrillSession.id)
-            .where(Assignment.assigned_by == manager_id)
             .order_by(DrillSession.created_at.desc())
             .limit(limit)
         )
+        if team_id:
+            stmt = stmt.where(User.team_id == team_id)
+        else:
+            stmt = stmt.where(Assignment.assigned_by == manager_id)
         if rep_id:
             stmt = stmt.where(DrillSession.rep_id == rep_id)
         if scenario_id:

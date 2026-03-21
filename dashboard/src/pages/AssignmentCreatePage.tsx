@@ -8,17 +8,10 @@ import { EmptyState } from "../components/shared/EmptyState";
 import { SkillChip } from "../components/shared/SkillChip";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { normalizeCategoryKey, type AnalyticsCategoryKey } from "../lib/analytics";
+import type { AssignmentPrefillState } from "../lib/assignmentPrefill";
 import { createManagerAssignment, fetchManagerTeam, fetchScenarios } from "../lib/api";
 import { dispatchFeedRefresh } from "../lib/feedEvents";
 import type { ManagerTeamMember, ScenarioSummary } from "../lib/types";
-
-type AssignmentPrefillState = {
-    prefillScenarioSearch?: string;
-    prefillScenarioId?: string;
-    prefillDifficulty?: number;
-    prefillRepIds?: string[];
-    prefillCategoryKey?: string;
-} | null;
 
 function scenarioTargetsCategory(scenario: ScenarioSummary, categoryKey: AnalyticsCategoryKey | null): boolean {
     if (!categoryKey) {
@@ -94,6 +87,13 @@ export function AssignmentCreatePage() {
         if (repIds.length) {
             setSelectedReps(repIds);
         }
+        if (typeof prefillState?.prefillMinScoreTarget === "number") {
+            setMinScore(String(prefillState.prefillMinScoreTarget));
+        }
+        const maxAttempts = prefillState?.prefillRetryPolicy?.max_attempts;
+        if (typeof maxAttempts === "number" && Number.isFinite(maxAttempts)) {
+            setMaxAttempts(String(maxAttempts));
+        }
     }, [prefillState, queryPrefillRepIds]);
 
     useEffect(() => {
@@ -119,7 +119,7 @@ export function AssignmentCreatePage() {
 
         setScenarioId(matchedScenario.id);
         if ((prefillState?.prefillRepIds?.length ?? 0) > 0 || queryPrefillRepIds.length > 0) {
-            setStep(2);
+            setStep(3);
         }
     }, [prefillCategory, prefillState, queryPrefillRepIds.length, scenarioId, scenarios]);
 

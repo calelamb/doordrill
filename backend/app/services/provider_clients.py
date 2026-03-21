@@ -309,6 +309,7 @@ class JsonLlmRouter:
         fast: bool = False,
         task: str = "manager_ai",
         validator: Callable[[Any], Any] | None = None,
+        allow_mock_fallback: bool | None = None,
     ) -> JsonLlmResult:
         primary_provider = self._normalize_provider(self.settings.llm_provider)
         fallback_provider = self._resolve_fallback_provider(primary_provider)
@@ -352,7 +353,8 @@ class JsonLlmRouter:
             if not retryable:
                 break
 
-        if self._should_allow_mock_fallback() and "mock" not in providers:
+        should_allow_mock = self._should_allow_mock_fallback() if allow_mock_fallback is None else bool(allow_mock_fallback)
+        if should_allow_mock and "mock" not in providers:
             payload, attempt, _, error = self._attempt_provider(
                 provider="mock",
                 model=self._resolve_model("mock", fast=fast, is_fallback=True),
