@@ -85,6 +85,7 @@ function buildHeaders({ userId, role, public: isPublic }: AuthOptions = {}): Hea
 }
 
 async function requestJson<T>(path: string, init: RequestInit = {}, authOptions: AuthOptions = {}): Promise<T> {
+  const isPublic = Boolean(authOptions.public);
   const headers = buildHeaders(authOptions);
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -92,8 +93,10 @@ async function requestJson<T>(path: string, init: RequestInit = {}, authOptions:
   });
 
   if (response.status === 401) {
-    clearStoredAuth();
-    throw createAuthRequiredError();
+    if (!isPublic) {
+      clearStoredAuth();
+      throw createAuthRequiredError();
+    }
   }
 
   if (!response.ok) {
