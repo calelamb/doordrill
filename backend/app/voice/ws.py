@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 import contextlib
 import logging
 import random
@@ -75,6 +76,7 @@ WS_KEEPALIVE_INTERVAL_SECONDS = 30
 MIN_TRANSCRIPT_WORD_COUNT = 1
 LOW_CONFIDENCE_THRESHOLD = 0.45
 LOW_CONFIDENCE_MAX_WORDS = 5
+REP_TURN_COMPLETION_GRACE_MS = 350
 CLARIFICATION_RESPONSES = [
     "Sorry, I didn't catch that.",
     "Hmm, didn't quite get that.",
@@ -132,6 +134,37 @@ ANSWER_LEAD_WORDS = frozenset(
         "they",
     }
 )
+ABRUPT_TRAILING_TOKENS = frozenset(
+    {
+        "and",
+        "or",
+        "but",
+        "because",
+        "so",
+        "her",
+        "him",
+        "them",
+        "it",
+        "this",
+        "that",
+    }
+)
+CONTINUATION_LEAD_TOKENS = frozenset({"lately", "recently", "also", "too", "still"})
+PUSHBACK_PHRASES = ("not today", "not right now", "not yet", "i'm not ready", "i still need", "need more")
+
+
+@dataclass
+class RepTurnCompletenessAssessment:
+    status: str
+    reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class HomeownerReplyValidationResult:
+    text: str
+    issues: list[str] = field(default_factory=list)
+    pruned_sentence_count: int = 0
+    polarity_rewrites: int = 0
 
 
 @dataclass
@@ -239,10 +272,183 @@ def _sentence_looks_like_direct_answer(sentence: str) -> bool:
     return first_word in ANSWER_LEAD_WORDS
 
 
-def _validate_and_clean_homeowner_reply(rep_text: str, ai_response: str, stage: str) -> tuple[str, list[str]]:
+def _topic_tags_for_text(text: str) -> set[str]:
+    normalized = _normalize_reply_sentence(text)
+    tags: set[str] = set()
+    if not normalized:
+        return tags
+    if any(token in normalized for token in ("karen", "neighbor", "down the street", "house")):
+        tags.add("neighbor_claim")
+    if any(token in normalized for token in ("spider", "wasp", "ant", "bug", "pest", "termite", "rodent")):
+        tags.add("pest_presence")
+    if any(token in normalized for token in ("pest control company", "provider", "someone handling", "switch", "already have someone")):
+        tags.add("provider_status")
+    if any(token in normalized for token in ("cost", "price", "monthly", "expensive", "budget")):
+        tags.add("price_probe")
+    if any(token in normalized for token in ("what were you doing", "what are you doing", "what do you do", "what does that cover", "what would that include")):
+        tags.add("service_detail")
+    if any(token in normalized for token in ("what do you recommend", "what would you recommend", "what do you suggest")):
+        tags.add("service_recommendation")
+    if any(token in normalized for token in ("why do you ask", "why are you asking")):
+        tags.add("provider_reason")
+    if any(token in normalized for token in ("how long have you been", "working in the area", "been in the area", "around the area")):
+        tags.add("tenure")
+    if any(token in normalized for token in ("reading", "online lately", "been on my mind")):
+        tags.add("research_tangent")
+    if any(token in normalized for token in ("next step", "what day", "what day were you thinking", "schedule")):
+        tags.add("next_step")
+    if any(phrase in normalized for phrase in PUSHBACK_PHRASES):
+        tags.add("close_pushback")
+    if "?" in normalized:
+        tags.add("question")
+    return tags
+
+
+def _sentence_matches_primary_act(sentence: str, primary_response_act: str, rep_text: str) -> bool:
+    normalized = _normalize_reply_sentence(sentence)
+    tags = _topic_tags_for_text(sentence)
+    if not normalized:
+        return False
+    if primary_response_act == "clarify_rep_statement":
+        return any(phrase in normalized for phrase in ("what do you mean", "could you say that again", "can you repeat", "didn't catch", "what was that"))
+    if primary_response_act == "acknowledge_neighbor_claim":
+        return "neighbor_claim" in tags
+    if primary_response_act == "answer_presence_question":
+        return "pest_presence" in tags and _sentence_looks_like_direct_answer(sentence)
+    if primary_response_act == "answer_provider_status":
+        return "provider_status" in tags and _sentence_looks_like_direct_answer(sentence)
+    if primary_response_act == "answer_price_probe":
+        return "price_probe" in tags and _sentence_looks_like_direct_answer(sentence)
+    if primary_response_act == "push_back_on_close":
+        return "close_pushback" in tags or any(phrase in normalized for phrase in PUSHBACK_PHRASES)
+    rep_overlap = len(_topic_tags_for_text(rep_text) & tags)
+    return rep_overlap > 0 or _sentence_looks_like_direct_answer(sentence)
+
+
+def _sentence_matches_followup_act(sentence: str, allowed_followup_act: str, response_plan: dict[str, Any] | None) -> bool:
+    if allowed_followup_act == "none":
+        return False
+    tags = _topic_tags_for_text(sentence)
+    if allowed_followup_act == "ask_service_detail":
+        return "service_detail" in tags
+    if allowed_followup_act == "ask_service_recommendation":
+        return "service_recommendation" in tags or "service_detail" in tags
+    if allowed_followup_act == "ask_provider_reason":
+        return "provider_reason" in tags
+    if allowed_followup_act == "ask_cost_detail":
+        return "price_probe" in tags or "service_detail" in tags
+    if allowed_followup_act == "ask_next_step_detail":
+        return "next_step" in tags or "service_detail" in tags
+    if allowed_followup_act == "pressure_test_claim":
+        return bool({"service_detail", "price_probe"} & tags)
+    if allowed_followup_act == "raise_allowed_objection":
+        allowed_objection = str((response_plan or {}).get("allowed_new_objection") or "").strip().lower()
+        if not allowed_objection:
+            return False
+        return allowed_objection.replace("_", " ") in _normalize_reply_sentence(sentence)
+    return False
+
+
+def _sentence_stays_in_primary_lane(sentence: str, primary_response_act: str, rep_text: str) -> bool:
+    tags = _topic_tags_for_text(sentence)
+    if primary_response_act == "acknowledge_neighbor_claim":
+        return bool(tags & {"neighbor_claim", "service_detail"})
+    if primary_response_act == "answer_presence_question":
+        return bool(tags & {"pest_presence", "service_recommendation", "service_detail"})
+    if primary_response_act == "answer_provider_status":
+        return bool(tags & {"provider_status", "provider_reason"})
+    if primary_response_act == "answer_price_probe":
+        return bool(tags & {"price_probe", "service_detail"})
+    if primary_response_act == "push_back_on_close":
+        return bool(tags & {"close_pushback", "next_step", "service_detail", "price_probe"})
+    return bool(tags & _topic_tags_for_text(rep_text))
+
+
+def _rewrite_binary_polarity(sentence: str, rep_text: str) -> tuple[str, bool]:
+    normalized = _normalize_reply_sentence(sentence)
+    rep_lower = _normalize_reply_sentence(rep_text)
+    if not normalized:
+        return sentence, False
+    provider_question = any(
+        phrase in rep_lower
+        for phrase in ("do you have a pest control company", "do you guys have a pest control company", "already have a pest control company")
+    )
+    if provider_question and normalized.startswith(("yes ", "yeah ", "yep ")) and any(
+        phrase in normalized for phrase in ("dont have", "do not have", "not have", "no pest control company", "we dont have", "we do not have")
+    ):
+        updated = re.sub(r"^(yes|yeah|yep)\b[, ]*", "No, ", sentence.strip(), count=1, flags=re.IGNORECASE)
+        if not updated.lower().startswith("no"):
+            updated = f"No, {sentence.strip()}"
+        return updated, True
+    return sentence, False
+
+
+def _assess_rep_turn_completeness(
+    *,
+    rep_text: str,
+    raw_text: str,
+    confidence: float,
+    utterance_duration_ms: int,
+) -> RepTurnCompletenessAssessment:
+    normalized = _normalize_reply_sentence(rep_text)
+    words = TRANSCRIPT_WORD_RE.findall(normalized)
+    reasons: list[str] = []
+    severe = 0
+    soft = 0
+
+    if not words:
+        return RepTurnCompletenessAssessment(status="incomplete", reasons=["empty"])
+    if words[-1] in ABRUPT_TRAILING_TOKENS:
+        reasons.append("abrupt_trailing_token")
+        severe += 2
+    if any(
+        normalized.endswith(fragment)
+        for fragment in ("we do her", "we do him", "we do their", "have you guys been seeing", "have you been seeing", "we're just working on", "we are just working on")
+    ):
+        reasons.append("dangling_clause")
+        severe += 2
+    if words[0] in CONTINUATION_LEAD_TOKENS:
+        reasons.append("continuation_lead")
+        soft += 2
+    if _rep_requires_direct_answer(rep_text) and "?" not in raw_text and len(words) <= 7:
+        reasons.append("unfinished_question")
+        soft += 2
+    if utterance_duration_ms <= 900 and len(words) <= 6:
+        reasons.append("short_utterance")
+        soft += 1
+    if confidence < 0.72:
+        reasons.append("borderline_confidence")
+        soft += 1
+    if len(words) <= 2 and confidence < 0.85:
+        reasons.append("very_short")
+        severe += 1
+
+    if severe >= 2:
+        return RepTurnCompletenessAssessment(status="incomplete", reasons=sorted(set(reasons)))
+    if severe + soft >= 2:
+        return RepTurnCompletenessAssessment(status="possibly_clipped", reasons=sorted(set(reasons)))
+    return RepTurnCompletenessAssessment(status="complete", reasons=sorted(set(reasons)))
+
+
+def _merge_transcript_fragments(first: str, second: str) -> str:
+    left = str(first or "").strip()
+    right = str(second or "").strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    return re.sub(r"\s+", " ", f"{left.rstrip()} {right.lstrip()}").strip()
+
+
+def _validate_and_clean_homeowner_reply(
+    rep_text: str,
+    ai_response: str,
+    stage: str,
+    response_plan: dict[str, Any] | None = None,
+) -> HomeownerReplyValidationResult:
     sentences = _split_reply_sentences(ai_response)
     if not sentences:
-        return "", ["empty_reply"]
+        return HomeownerReplyValidationResult(text="", issues=["empty_reply"])
 
     cleaned: list[str] = []
     seen_sentences: set[str] = set()
@@ -250,8 +456,18 @@ def _validate_and_clean_homeowner_reply(rep_text: str, ai_response: str, stage: 
     follow_up_questions = 0
     issues: list[str] = []
     stage_lower = (stage or "").strip().lower()
+    pruned_sentence_count = 0
+    polarity_rewrites = 0
+    primary_response_act = str((response_plan or {}).get("primary_response_act") or "react_to_latest_claim")
+    allowed_followup_act = str((response_plan or {}).get("allowed_followup_act") or "none")
+    forbidden_drift_topics = {str(item).strip().lower() for item in ((response_plan or {}).get("forbidden_drift_topics") or []) if str(item).strip()}
 
-    for sentence in sentences:
+    for index, original_sentence in enumerate(sentences):
+        sentence = original_sentence.strip()
+        sentence, polarity_rewritten = _rewrite_binary_polarity(sentence, rep_text)
+        if polarity_rewritten:
+            issues.append("binary_polarity_rewrite")
+            polarity_rewrites += 1
         normalized = _normalize_reply_sentence(sentence)
         if not normalized:
             continue
@@ -264,16 +480,37 @@ def _validate_and_clean_homeowner_reply(rep_text: str, ai_response: str, stage: 
         if family is not None:
             if family in seen_families:
                 issues.append(f"repeated_{family}")
+                pruned_sentence_count += 1
                 continue
             seen_families.add(family)
             if family in {"selling", "relevance", "opener"} and stage_lower in {"considering", "close_attempt", "close_window"}:
                 issues.append("stage_reset")
+                pruned_sentence_count += 1
                 continue
 
         if normalized.endswith("?"):
             follow_up_questions += 1
             if follow_up_questions > 1:
+                tags = _topic_tags_for_text(sentence)
                 issues.append("too_many_followups")
+                if forbidden_drift_topics & tags:
+                    issues.append("off_lane_reply_blocked")
+                elif not _sentence_stays_in_primary_lane(sentence, primary_response_act, rep_text) and not _sentence_matches_followup_act(sentence, allowed_followup_act, response_plan):
+                    issues.append("unsupported_topic_jump")
+                pruned_sentence_count += 1
+                continue
+
+        if index == 0 and primary_response_act and not _sentence_matches_primary_act(sentence, primary_response_act, rep_text):
+            issues.append("primary_act_mismatch")
+        elif index > 0:
+            tags = _topic_tags_for_text(sentence)
+            if forbidden_drift_topics & tags:
+                issues.append("off_lane_reply_blocked")
+                pruned_sentence_count += 1
+                continue
+            if not _sentence_stays_in_primary_lane(sentence, primary_response_act, rep_text) and not _sentence_matches_followup_act(sentence, allowed_followup_act, response_plan):
+                issues.append("unsupported_topic_jump")
+                pruned_sentence_count += 1
                 continue
 
         cleaned.append(sentence.strip())
@@ -287,7 +524,12 @@ def _validate_and_clean_homeowner_reply(rep_text: str, ai_response: str, stage: 
     finalized = " ".join(cleaned).strip()
     if not finalized:
         finalized = sentences[0].strip()
-    return finalized, sorted(set(issues))
+    return HomeownerReplyValidationResult(
+        text=finalized,
+        issues=sorted(set(issues)),
+        pruned_sentence_count=pruned_sentence_count,
+        polarity_rewrites=polarity_rewrites,
+    )
 
 
 def _dedupe_retrieved_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
@@ -540,6 +782,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     )
 
     incoming: asyncio.Queue[WsEvent] = asyncio.Queue(maxsize=1000)
+    deferred_messages: deque[WsEvent] = deque()
     disconnected = asyncio.Event()
     server_sequence = 0
     last_flush = time.monotonic()
@@ -784,9 +1027,11 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         interrupt_signal_reason = None
         return at, reason
 
-    def _derive_rep_turn_window(msg: WsEvent) -> tuple[datetime, datetime]:
+    def _derive_rep_turn_window(msg: WsEvent, *, duration_ms_override: int | None = None) -> tuple[datetime, datetime]:
         rep_started_at = _normalize_ts(msg.timestamp)
-        duration_ms = int(msg.payload.get("utterance_duration_ms", 0) or 0)
+        duration_ms = int(duration_ms_override or 0)
+        if duration_ms <= 0:
+            duration_ms = int(msg.payload.get("utterance_duration_ms", 0) or 0)
         if duration_ms <= 0:
             duration_ms = max(150, len(str(msg.payload.get("transcript_hint", ""))) * 22)
         rep_ended_at = rep_started_at + timedelta(milliseconds=duration_ms)
@@ -866,6 +1111,175 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             await emit_error("stt_error", str(exc), retryable=True)
             return None
 
+    async def _repair_and_normalize_transcript(
+        *,
+        stt_result: SttTranscript,
+        state_before_turn: Any,
+    ) -> tuple[SttTranscript, TranscriptNormalizationResult]:
+        if stt_result.text and settings.transcript_repair_enabled:
+            repair_result = transcript_repair.deterministic_repair(stt_result.text)
+            repaired_text = repair_result.repaired_text
+
+            if not repair_result.all_confident:
+                conversation_context = []
+                try:
+                    repaired_text = await transcript_repair.llm_repair(
+                        repair_result.repaired_text,
+                        conversation_context,
+                        providers.llm,
+                        model=settings.transcript_repair_model,
+                    )
+                except Exception as exc:
+                    logger.warning("LLM transcript repair failed: %s", exc)
+
+            if repair_result.repairs or repaired_text != stt_result.text:
+                logger.info(
+                    "transcript_repaired",
+                    extra={
+                        "session_id": session_id,
+                        "original": stt_result.text,
+                        "repaired": repaired_text,
+                        "repairs": repair_result.repairs,
+                        "used_llm": not repair_result.all_confident,
+                    },
+                )
+            stt_result = SttTranscript(
+                text=repaired_text,
+                confidence=stt_result.confidence,
+                is_final=stt_result.is_final,
+                source=stt_result.source,
+            )
+
+        context = orchestrator.get_context(session_id)
+        transcript_result = transcript_normalizer.normalize(
+            text=stt_result.text,
+            provider=stt_result.source,
+            confidence=stt_result.confidence,
+            scenario=scenario,
+            org_config=context.org_config if context is not None else None,
+            active_objections=list(state_before_turn.active_objections),
+            queued_objections=list(state_before_turn.queued_objections),
+        )
+        return stt_result, transcript_result
+
+    def _merge_stt_results(first: SttTranscript, second: SttTranscript) -> SttTranscript:
+        return SttTranscript(
+            text=_merge_transcript_fragments(first.text, second.text),
+            confidence=min(float(first.confidence or 0.0), float(second.confidence or 0.0)),
+            is_final=bool(first.is_final and second.is_final),
+            source=second.source or first.source,
+        )
+
+    def _merge_transcript_results(
+        first: TranscriptNormalizationResult,
+        second: TranscriptNormalizationResult,
+    ) -> TranscriptNormalizationResult:
+        return TranscriptNormalizationResult(
+            raw_text=_merge_transcript_fragments(first.raw_text, second.raw_text),
+            normalized_text=_merge_transcript_fragments(first.normalized_text, second.normalized_text),
+            provider=second.provider or first.provider,
+            confidence=min(float(first.confidence or 0.0), float(second.confidence or 0.0)),
+            applied_terms=list(dict.fromkeys([*(first.applied_terms or []), *(second.applied_terms or [])])),
+            normalization_source="merged" if first.normalization_source != second.normalization_source else first.normalization_source,
+        )
+
+    async def _next_message(*, timeout: float | None = None) -> WsEvent:
+        if deferred_messages:
+            return deferred_messages.popleft()
+        if timeout is None:
+            return await incoming.get()
+        return await asyncio.wait_for(incoming.get(), timeout=timeout)
+
+    async def _maybe_extend_rep_turn(
+        *,
+        initial_msg: WsEvent,
+        state_before_turn: Any,
+        stt_result: SttTranscript,
+        transcript_result: TranscriptNormalizationResult,
+    ) -> tuple[WsEvent, SttTranscript, TranscriptNormalizationResult, RepTurnCompletenessAssessment, int]:
+        nonlocal has_rep_audio, filler_emitted_for_silence, last_rep_audio_at
+        total_duration_ms = int(initial_msg.payload.get("utterance_duration_ms", 0) or 0)
+        if total_duration_ms <= 0:
+            total_duration_ms = max(150, len(str(initial_msg.payload.get("transcript_hint", ""))) * 22)
+        assessment = _assess_rep_turn_completeness(
+            rep_text=transcript_result.normalized_text,
+            raw_text=transcript_result.raw_text,
+            confidence=stt_result.confidence,
+            utterance_duration_ms=total_duration_ms,
+        )
+        if assessment.status != "possibly_clipped":
+            return initial_msg, stt_result, transcript_result, assessment, total_duration_ms
+
+        logger.info(
+            "rep_turn_completion_wait",
+            extra={
+                "session_id": session_id,
+                "trace_id": ws_trace_id,
+                "normalized": transcript_result.normalized_text,
+                "reasons": assessment.reasons,
+                "wait_ms": REP_TURN_COMPLETION_GRACE_MS,
+            },
+        )
+
+        deadline = time.monotonic() + (REP_TURN_COMPLETION_GRACE_MS / 1000)
+        merged_stt = stt_result
+        merged_transcript = transcript_result
+        last_audio_msg = initial_msg
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                next_msg = await _next_message(timeout=remaining)
+            except TimeoutError:
+                break
+
+            if next_msg.type == "client.vad.state":
+                deferred_messages.append(next_msg)
+                continue
+            if next_msg.type == "client.session.end":
+                deferred_messages.appendleft(next_msg)
+                break
+            if next_msg.type != "client.audio.chunk":
+                deferred_messages.append(next_msg)
+                continue
+
+            await buffer_event(EventDirection.CLIENT, next_msg)
+            has_rep_audio = True
+            filler_emitted_for_silence = False
+            last_rep_audio_at = time.monotonic()
+
+            next_stt = await run_stt(next_msg)
+            if next_stt is None:
+                runtime_state.barge_in_started_at = None
+                continue
+            runtime_state.barge_in_started_at = None
+            next_stt, next_transcript = await _repair_and_normalize_transcript(
+                stt_result=next_stt,
+                state_before_turn=state_before_turn,
+            )
+            if not _is_transcript_valid(next_transcript.normalized_text):
+                continue
+
+            merged_stt = _merge_stt_results(merged_stt, next_stt)
+            merged_transcript = _merge_transcript_results(merged_transcript, next_transcript)
+            last_audio_msg = next_msg
+            next_duration_ms = int(next_msg.payload.get("utterance_duration_ms", 0) or 0)
+            if next_duration_ms <= 0:
+                next_duration_ms = max(150, len(str(next_msg.payload.get("transcript_hint", ""))) * 22)
+            total_duration_ms += next_duration_ms
+            assessment = _assess_rep_turn_completeness(
+                rep_text=merged_transcript.normalized_text,
+                raw_text=merged_transcript.raw_text,
+                confidence=merged_stt.confidence,
+                utterance_duration_ms=total_duration_ms,
+            )
+            if assessment.status == "complete":
+                return last_audio_msg, merged_stt, merged_transcript, assessment, total_duration_ms
+
+        return last_audio_msg, merged_stt, merged_transcript, assessment, total_duration_ms
+
     async def stream_ai_response(
         *,
         prompt_text: str,
@@ -876,6 +1290,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         behavioral_signals: list[str],
         active_objections: list[str],
         turn_kind: str = "primary",
+        response_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         nonlocal audio_frame_count, total_audio_duration_ms
         t0 = asyncio.get_event_loop().time()
@@ -1155,14 +1570,60 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
         full_ai_text = await generate_reply_text(system_prompt)
         validation_issues: list[str] = []
+        effective_turn_kind = turn_kind
         if full_ai_text and not ai_interrupted:
-            full_ai_text, validation_issues = _validate_and_clean_homeowner_reply(prompt_text, full_ai_text, stage)
+            validation_result = _validate_and_clean_homeowner_reply(
+                prompt_text,
+                full_ai_text,
+                stage,
+                response_plan=response_plan,
+            )
+            if validation_result.pruned_sentence_count:
+                logger.info(
+                    "semantic_drift_pruned",
+                    extra={
+                        "session_id": session_id,
+                        "trace_id": ws_trace_id,
+                        "rep_text": prompt_text,
+                        "issues": validation_result.issues,
+                        "pruned_sentence_count": validation_result.pruned_sentence_count,
+                    },
+                )
+            if validation_result.polarity_rewrites:
+                logger.info(
+                    "binary_polarity_rewrite",
+                    extra={
+                        "session_id": session_id,
+                        "trace_id": ws_trace_id,
+                        "count": validation_result.polarity_rewrites,
+                    },
+                )
+            full_ai_text = validation_result.text
+            validation_issues = list(validation_result.issues)
             relevance = check_response_relevance(prompt_text, full_ai_text, emotion_after)
             should_retry = turn_kind == "primary" and settings.response_quality_gate_enabled and (
                 relevance == "disconnected"
-                or any(issue in {"did_not_answer_rep_first", "too_many_followups", "stage_reset"} for issue in validation_issues)
+                or any(
+                    issue in {
+                        "did_not_answer_rep_first",
+                        "too_many_followups",
+                        "stage_reset",
+                        "primary_act_mismatch",
+                        "unsupported_topic_jump",
+                        "off_lane_reply_blocked",
+                    }
+                    for issue in validation_issues
+                )
             )
             if should_retry:
+                logger.warning(
+                    "semantic_drift_retry",
+                    extra={
+                        "session_id": session_id,
+                        "trace_id": ws_trace_id,
+                        "issues": validation_issues,
+                    },
+                )
                 logger.warning(
                     "response_quality_gate_triggered",
                     extra={
@@ -1177,16 +1638,42 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     f"{system_prompt}\n\n"
                     f"CRITICAL: The rep just said: {prompt_text!r}. "
                     "Respond to that exact utterance in the first sentence. "
+                    f"Your primary response act is {str((response_plan or {}).get('primary_response_act') or 'react_to_latest_claim')}. "
+                    f"If you use a second sentence, it may only perform this follow-up act: {str((response_plan or {}).get('allowed_followup_act') or 'none')}. "
+                    f"Do not drift into these topics: {', '.join(str(item) for item in ((response_plan or {}).get('forbidden_drift_topics') or [])) or 'none'}. "
                     "Do not repeat the same challenge twice. "
                     "Ask at most one follow-up question after the direct response. "
-                    "Do not reset to an earlier stage once you have moved to pricing or listening mode."
+                    "Do not reset to an earlier stage once you have moved to pricing or listening mode. "
+                    "Do not answer yes if the factual answer is no."
                 )
                 retry_text = await generate_reply_text(augmented_system)
                 if retry_text and not ai_interrupted:
-                    cleaned_retry, retry_issues = _validate_and_clean_homeowner_reply(prompt_text, retry_text, stage)
-                    if cleaned_retry:
-                        full_ai_text = cleaned_retry
-                        validation_issues = retry_issues
+                    retry_result = _validate_and_clean_homeowner_reply(
+                        prompt_text,
+                        retry_text,
+                        stage,
+                        response_plan=response_plan,
+                    )
+                    if retry_result.text:
+                        full_ai_text = retry_result.text
+                        validation_issues = list(retry_result.issues)
+            severe_semantic_failure = any(
+                issue in {"did_not_answer_rep_first", "primary_act_mismatch", "unsupported_topic_jump", "off_lane_reply_blocked"}
+                for issue in validation_issues
+            )
+            if turn_kind == "primary" and severe_semantic_failure:
+                logger.warning(
+                    "off_lane_reply_blocked",
+                    extra={
+                        "session_id": session_id,
+                        "trace_id": ws_trace_id,
+                        "rep_text": prompt_text,
+                        "issues": validation_issues,
+                    },
+                )
+                full_ai_text = random.choice(CLARIFICATION_RESPONSES)
+                validation_issues = sorted({*validation_issues, "clarification_fallback"})
+                effective_turn_kind = "clarification"
 
         if full_ai_text and not ai_interrupted:
             ai_started_at = datetime.now(timezone.utc)
@@ -1206,7 +1693,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         "provider": providers.llm.provider_name,
                         "stage": stage,
                         "trace_id": ws_trace_id,
-                        "turn_kind": turn_kind,
+                        "turn_kind": effective_turn_kind,
                         "validation_issues": validation_issues,
                         "micro_behavior": _serialize_micro_behavior(plan),
                     },
@@ -1217,7 +1704,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     extra={
                         "session_id": session_id,
                         "elapsed_ms": _elapsed_ms(),
-                        "turn_kind": turn_kind,
+                        "turn_kind": effective_turn_kind,
                     },
                 )
                 await emit_server_event(
@@ -1226,7 +1713,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         "provider": providers.llm.provider_name,
                         "stage": stage,
                         "trace_id": ws_trace_id,
-                        "turn_kind": turn_kind,
+                        "turn_kind": effective_turn_kind,
                     },
                 )
                 await maybe_flush()
@@ -1253,7 +1740,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             "micro_behavior": _serialize_micro_behavior(last_behavior_plan) if last_behavior_plan is not None else None,
             "audio_emitted": first_tts_audio_started.is_set(),
             "validation_issues": validation_issues,
-            "turn_kind": "interrupted_partial" if ai_interrupted and first_tts_audio_started.is_set() else turn_kind,
+            "turn_kind": "interrupted_partial" if ai_interrupted and first_tts_audio_started.is_set() else effective_turn_kind,
         }
 
     async def _emit_clarification_response(*, stage: str, consecutive_count: int) -> dict[str, Any]:
@@ -1436,6 +1923,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         ):
             return False
         if (time.monotonic() - last_rep_audio_at) < SILENCE_FILLER_SECONDS:
+            return False
+
+        context = orchestrator.get_context(session_id)
+        if context is not None and context.turn_history and context.turn_history[-1].speaker == "homeowner":
             return False
 
         state = orchestrator.get_state(session_id)
@@ -1730,11 +2221,11 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             await maybe_flush()
 
         while True:
-            if disconnected.is_set() and incoming.empty():
+            if disconnected.is_set() and incoming.empty() and not deferred_messages:
                 break
 
             try:
-                msg = await asyncio.wait_for(incoming.get(), timeout=0.25)
+                msg = await _next_message(timeout=0.25)
             except TimeoutError:
                 if await maybe_emit_silence_filler():
                     await maybe_flush()
@@ -1780,43 +2271,16 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 continue
             runtime_state.barge_in_started_at = None
 
-            # --- Transcript repair (our feature) ---
-            if stt_result and stt_result.text and settings.transcript_repair_enabled:
-                repair_result = transcript_repair.deterministic_repair(stt_result.text)
-                repaired_text = repair_result.repaired_text
-
-                if not repair_result.all_confident:
-                    conversation_context = []
-                    try:
-                        repaired_text = await transcript_repair.llm_repair(
-                            repair_result.repaired_text, conversation_context, providers.llm,
-                            model=settings.transcript_repair_model,
-                        )
-                    except Exception as exc:
-                        logger.warning("LLM transcript repair failed: %s", exc)
-
-                if repair_result.repairs or repaired_text != stt_result.text:
-                    logger.info("transcript_repaired", extra={
-                        "session_id": session_id, "original": stt_result.text,
-                        "repaired": repaired_text, "repairs": repair_result.repairs,
-                        "used_llm": not repair_result.all_confident,
-                    })
-                stt_result = SttTranscript(
-                    text=repaired_text, confidence=stt_result.confidence,
-                    is_final=stt_result.is_final, source=stt_result.source,
-                )
-
-            # --- Transcript normalization (main's pipeline) ---
-            context = orchestrator.get_context(session_id)
             state_before_turn = orchestrator.get_state(session_id)
-            transcript_result = transcript_normalizer.normalize(
-                text=stt_result.text,
-                provider=stt_result.source,
-                confidence=stt_result.confidence,
-                scenario=scenario,
-                org_config=context.org_config if context is not None else None,
-                active_objections=list(state_before_turn.active_objections),
-                queued_objections=list(state_before_turn.queued_objections),
+            stt_result, transcript_result = await _repair_and_normalize_transcript(
+                stt_result=stt_result,
+                state_before_turn=state_before_turn,
+            )
+            msg, stt_result, transcript_result, completeness_assessment, merged_duration_ms = await _maybe_extend_rep_turn(
+                initial_msg=msg,
+                state_before_turn=state_before_turn,
+                stt_result=stt_result,
+                transcript_result=transcript_result,
             )
             rep_text = transcript_result.normalized_text
             transcript_quality = _serialize_transcript_quality(transcript_result)
@@ -1832,6 +2296,22 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         "normalized": rep_text,
                         "word_count": rep_word_count,
                         "confidence": stt_result.confidence,
+                    },
+                )
+                await _run_clarification_flow(stage=state_before_turn.stage)
+                continue
+
+            if completeness_assessment.status != "complete":
+                if runtime_state.turn_latency is not None and runtime_state.turn_latency.stt_final_ts is None:
+                    runtime_state.turn_latency.stt_final_ts = _monotonic_ts()
+                logger.info(
+                    "rep_turn_clarified_instead_of_guessed",
+                    extra={
+                        "session_id": session_id,
+                        "trace_id": ws_trace_id,
+                        "normalized": rep_text,
+                        "reasons": completeness_assessment.reasons,
+                        "status": completeness_assessment.status,
                     },
                 )
                 await _run_clarification_flow(stage=state_before_turn.stage)
@@ -1873,7 +2353,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             if turn_latency.analysis_complete_ts is None:
                 turn_latency.analysis_complete_ts = _monotonic_ts()
             analysis_phase_latency_breakdown = _serialize_phase_latency(turn_latency)
-            rep_started_at, rep_ended_at = _derive_rep_turn_window(msg)
+            rep_started_at, rep_ended_at = _derive_rep_turn_window(msg, duration_ms_override=merged_duration_ms)
             context_after_plan = orchestrator.get_context(session_id)
 
             rep_turn = ledger.commit_turn(
@@ -1917,6 +2397,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "confidence": stt_result.confidence,
                 "provider": stt_result.source,
                 "transcript_normalization": _serialize_transcript_normalization(transcript_result),
+                "rep_turn_completeness": {
+                    "status": completeness_assessment.status,
+                    "reasons": list(completeness_assessment.reasons),
+                },
                 "trace_id": ws_trace_id,
             }
             await emit_server_event("server.stt.final", stt_final_payload)
@@ -1952,6 +2436,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "phase_latency_breakdown": analysis_phase_latency_breakdown,
                     "transcript_quality": transcript_quality,
                     "transcript_normalization": _serialize_transcript_normalization(transcript_result),
+                    "rep_turn_completeness": {
+                        "status": completeness_assessment.status,
+                        "reasons": list(completeness_assessment.reasons),
+                    },
                 }
             )
             await maybe_flush()
@@ -1968,6 +2456,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 emotion_after=plan.emotion_after,
                 behavioral_signals=plan.behavioral_signals,
                 active_objections=plan.active_objections,
+                response_plan=_serialize_response_plan(plan.response_plan),
             )
             runtime_state.pending_primary_reply = False
 
@@ -2069,6 +2558,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "phase_latency_breakdown": phase_latency_breakdown,
                 "transcript_quality": transcript_quality,
                 "transcript_normalization": _serialize_transcript_normalization(transcript_result),
+                "rep_turn_completeness": {
+                    "status": completeness_assessment.status,
+                    "reasons": list(completeness_assessment.reasons),
+                },
                 "micro_behavior": ai_result["micro_behavior"],
                 "audio_emitted": bool(ai_result.get("audio_emitted")),
                 "validation_issues": list(ai_result.get("validation_issues") or []),

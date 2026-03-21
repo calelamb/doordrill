@@ -229,6 +229,30 @@ def test_first_turn_neighbor_mention_stays_on_the_specific_claim():
 
     assert "neighbor" in plan.reaction_intent.lower()
     assert plan.response_plan.allowed_new_objection is None
+    assert plan.response_plan.primary_response_act == "acknowledge_neighbor_claim"
+    assert plan.response_plan.allowed_followup_act == "ask_service_detail"
+
+
+def test_response_plan_provider_question_sets_binary_answer_contract():
+    orchestrator = ConversationOrchestrator()
+    orchestrator.initialize_session(
+        "session-provider-status",
+        scenario_name="Existing Provider",
+        scenario_description="A homeowner may or may not already have pest control service.",
+        difficulty=2,
+        persona={"attitude": "neutral", "concerns": ["trust"]},
+        stages=["door_knock", "initial_pitch", "objection_handling"],
+    )
+
+    plan = orchestrator.prepare_rep_turn(
+        "session-provider-status",
+        "Do you guys have a pest control company right now?",
+        transcript_quality={"quality_band": "high", "confidence": 0.96},
+    )
+
+    assert plan.response_plan.primary_response_act == "answer_provider_status"
+    assert plan.response_plan.allowed_followup_act == "ask_provider_reason"
+    assert "trust" in plan.response_plan.deferred_topics
 
 
 def test_three_non_question_rep_turns_trigger_monologue_disengagement():

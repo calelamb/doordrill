@@ -244,6 +244,29 @@ def test_realism_eval_flags_transcript_corruption_when_confidence_is_low():
     assert result.transcript_entity_score <= 5.5
 
 
+def test_realism_eval_flags_semantic_drift_and_polarity_glitch():
+    service = ConversationRealismEvalService()
+    turns, committed_payloads = _make_turn_pair(
+        rep_text="Do you guys have a pest control company right now?",
+        ai_text="Yes, we don't have a pest control company right now. Well, I've been reading a bit about pests online lately.",
+        response_plan={
+            "must_answer": True,
+            "primary_response_act": "answer_provider_status",
+            "allowed_followup_act": "ask_provider_reason",
+            "forbidden_drift_topics": ["research_tangent"],
+            "stance": "direct_but_guarded",
+            "next_step_acceptability": "info_only",
+        },
+        turn_analysis={"direct_response_required": True},
+    )
+
+    result = service.evaluate_session(turns=turns, committed_payloads=committed_payloads)
+
+    assert "semantic_drift" in result.failure_labels
+    assert "polarity_glitch" in result.failure_labels
+    assert result.directness_score < 7.0
+
+
 def test_emotion_score_uses_prior_homeowner_signals_to_validate_transition():
     service = ConversationRealismEvalService()
     ai_turn = SessionTurn(

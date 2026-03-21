@@ -157,6 +157,19 @@ class _LatencyAwareLlmClient(MockLlmClient):
         yield self.reply
 
 
+class _ExpectMergedRepTextLlmClient(MockLlmClient):
+    def __init__(self, expected_rep_text: str, reply: str) -> None:
+        self.expected_rep_text = expected_rep_text
+        self.reply = reply
+        self.calls = 0
+
+    async def stream_reply(self, *, rep_text: str, stage: str, system_prompt: str, max_tokens: int = 80):
+        del stage, system_prompt, max_tokens
+        self.calls += 1
+        assert rep_text == self.expected_rep_text
+        yield self.reply
+
+
 class _LatencyAwareTtsClient(MockTtsClient):
     def __init__(self, *, first_chunk_delay_s: float) -> None:
         self.first_chunk_delay_s = first_chunk_delay_s
@@ -212,6 +225,59 @@ def test_is_transcript_valid_single_valid_word():
 def test_is_transcript_valid_noise_words():
     for transcript in ("um", "uh", "mm"):
         assert voice_ws._is_transcript_valid(transcript) is False
+
+
+def test_assess_rep_turn_completeness_flags_dangling_and_continuation_turns():
+    incomplete = voice_ws._assess_rep_turn_completeness(
+        rep_text="We do her",
+        raw_text="We do her",
+        confidence=0.98,
+        utterance_duration_ms=520,
+    )
+    clipped = voice_ws._assess_rep_turn_completeness(
+        rep_text="lately? Do you guys have a pest control company?",
+        raw_text="lately? Do you guys have a pest control company?",
+        confidence=0.91,
+        utterance_duration_ms=760,
+    )
+
+    assert incomplete.status == "incomplete"
+    assert "dangling_clause" in incomplete.reasons
+    assert clipped.status == "possibly_clipped"
+    assert "continuation_lead" in clipped.reasons
+
+
+def test_validate_and_clean_homeowner_reply_prunes_off_lane_followup_and_rewrites_binary_polarity():
+    result = voice_ws._validate_and_clean_homeowner_reply(
+        "Do you guys have a pest control company right now?",
+        "Yes, we don't have a pest control company right now. Well, I've been reading a bit about pests online lately.",
+        "initial_pitch",
+        response_plan={
+            "primary_response_act": "answer_provider_status",
+            "allowed_followup_act": "ask_provider_reason",
+            "forbidden_drift_topics": ["research_tangent"],
+        },
+    )
+
+    assert result.text == "No, we don't have a pest control company right now."
+    assert "binary_polarity_rewrite" in result.issues
+    assert "off_lane_reply_blocked" in result.issues
+
+
+def test_validate_and_clean_homeowner_reply_keeps_grounded_presence_followup_and_blocks_tenure_drift():
+    result = voice_ws._validate_and_clean_homeowner_reply(
+        "Have you guys been seeing spiders lately?",
+        "Hmm, I haven't noticed any spiders around here. What do you recommend for that? So, um, how long have you been working in the area?",
+        "initial_pitch",
+        response_plan={
+            "primary_response_act": "answer_presence_question",
+            "allowed_followup_act": "ask_service_recommendation",
+            "forbidden_drift_topics": ["tenure"],
+        },
+    )
+
+    assert result.text == "Hmm, I haven't noticed any spiders around here. What do you recommend for that?"
+    assert "unsupported_topic_jump" in result.issues or "off_lane_reply_blocked" in result.issues
 
 
 def test_ws_voice_pipeline_streams_events_in_order(client, seed_org, monkeypatch):
@@ -711,3 +777,106 @@ def test_ws_low_confidence_short_deepgram_turn_uses_clarification(client, seed_o
     assert llm.calls == 0
     assert any(message["type"] == "server.ai.text.delta" for message in messages)
     assert any(text.endswith(voice_ws.CLARIFICATION_RESPONSES[0]) for text in tts.texts)
+
+
+def test_ws_incomplete_rep_turn_uses_clarification_instead_of_guessing(client, seed_org, monkeypatch):
+    llm = _RecordingLlmClient()
+    tts = _RecordingTtsClient()
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=MockSttClient(), llm=llm, tts=tts),
+    )
+    monkeypatch.setattr(voice_ws.random, "choice", lambda responses: responses[0])
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 1,
+                "payload": {
+                    "transcript_hint": "We do her",
+                    "utterance_duration_ms": 420,
+                    "codec": "opus",
+                },
+            }
+        )
+
+        messages: list[dict] = []
+        for _ in range(120):
+            message = ws.receive_json()
+            messages.append(message)
+            if (
+                message["type"] == "server.session.state"
+                and message["payload"].get("state") == "ai_idle"
+                and message["payload"].get("clarification") is True
+            ):
+                break
+
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    assert llm.calls == 0
+    assert any(message["type"] == "server.ai.text.delta" for message in messages)
+    assert any(text.endswith(voice_ws.CLARIFICATION_RESPONSES[0]) for text in tts.texts)
+
+
+def test_ws_possibly_clipped_rep_turn_waits_and_merges_follow_on_audio(client, seed_org, monkeypatch):
+    llm = _ExpectMergedRepTextLlmClient(
+        expected_rep_text="Have you guys been seeing spiders lately? Do you guys have a pest control company?",
+        reply="We haven't noticed spiders, and no, we don't have a pest control company right now.",
+    )
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(stt=MockSttClient(), llm=llm, tts=MockTtsClient()),
+    )
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        connected = ws.receive_json()
+        assert connected["type"] == "server.session.state"
+
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 1,
+                "payload": {
+                    "transcript_hint": "Have you guys been seeing spiders",
+                    "utterance_duration_ms": 480,
+                    "codec": "opus",
+                },
+            }
+        )
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 2,
+                "payload": {
+                    "transcript_hint": "lately? Do you guys have a pest control company?",
+                    "utterance_duration_ms": 620,
+                    "codec": "opus",
+                },
+            }
+        )
+
+        messages: list[dict] = []
+        for _ in range(220):
+            message = ws.receive_json()
+            messages.append(message)
+            if message["type"] == "server.turn.committed":
+                break
+
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    assert llm.calls == 1
+    stt_final = next(message for message in messages if message["type"] == "server.stt.final")
+    assert stt_final["payload"]["text"] == "Have you guys been seeing spiders lately? Do you guys have a pest control company?"
+    assert stt_final["payload"]["rep_turn_completeness"]["status"] == "complete"

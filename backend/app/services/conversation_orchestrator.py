@@ -874,6 +874,10 @@ class HomeownerResponsePlan:
     allowed_new_objection: str | None
     semantic_anchors: list[str]
     next_step_acceptability: str
+    primary_response_act: str = "react_to_latest_claim"
+    allowed_followup_act: str = "none"
+    forbidden_drift_topics: list[str] = field(default_factory=list)
+    deferred_topics: list[str] = field(default_factory=list)
     fast_path_prompt: bool = False
     wording_rotation_hint: str | None = None
     selected_brief_keys: list[str] = field(default_factory=list)
@@ -888,6 +892,10 @@ class HomeownerResponsePlan:
             "allowed_new_objection": self.allowed_new_objection,
             "semantic_anchors": list(self.semantic_anchors),
             "next_step_acceptability": self.next_step_acceptability,
+            "primary_response_act": self.primary_response_act,
+            "allowed_followup_act": self.allowed_followup_act,
+            "forbidden_drift_topics": list(self.forbidden_drift_topics),
+            "deferred_topics": list(self.deferred_topics),
             "fast_path_prompt": self.fast_path_prompt,
             "wording_rotation_hint": self.wording_rotation_hint,
             "selected_brief_keys": list(self.selected_brief_keys),
@@ -1639,10 +1647,20 @@ class PromptBuilder:
                 f"Reaction goal: {response_plan.reaction_goal}",
                 f"Stance this turn: {response_plan.stance}",
                 f"Friction level: {response_plan.friction_level}/5",
+                f"Primary response act: {response_plan.primary_response_act}",
+                f"Allowed follow-up act: {response_plan.allowed_followup_act}",
                 f"Allowed new objection after reacting: {response_plan.allowed_new_objection or 'none'}",
                 f"Semantic anchors to preserve: {', '.join(response_plan.semantic_anchors) or 'none'}",
                 f"Next-step acceptability: {response_plan.next_step_acceptability}",
             ]
+            if response_plan.forbidden_drift_topics:
+                plan_lines.append(
+                    f"Forbidden drift topics this turn: {', '.join(topic.replace('_', ' ') for topic in response_plan.forbidden_drift_topics)}"
+                )
+            if response_plan.deferred_topics:
+                plan_lines.append(
+                    f"Deferred topics for later turns: {', '.join(topic.replace('_', ' ') for topic in response_plan.deferred_topics)}"
+                )
             if response_plan.wording_rotation_hint:
                 plan_lines.append(f"Wording rotation hint: {response_plan.wording_rotation_hint}")
             if response_plan.friction_gates:
@@ -1651,6 +1669,9 @@ class PromptBuilder:
                     plan_lines.append(f"Do not soften past the missing gates: {', '.join(unmet)}")
             if response_plan.fast_path_prompt:
                 plan_lines.append("Fast path: answer directly and skip extra setup.")
+            plan_lines.append(
+                "Keep this homeowner turn in one conversational lane. If you add a second sentence, it must stay in the allowed follow-up lane."
+            )
             layer_three_a_plan = "\n".join(plan_lines)
         layer_three_b = (
             "LAYER 3B - EMOTIONAL CONTEXT\n"
@@ -2209,6 +2230,7 @@ class ConversationOrchestrator:
             state=state,
             context=context,
             stage_after=stage_after,
+            transcript_quality=transcript_quality,
         )
         state.last_response_plan = response_plan.to_payload()
         state.reaction_intent = response_plan.reaction_goal
@@ -2562,6 +2584,7 @@ class ConversationOrchestrator:
         state: ConversationState,
         context: SessionPromptContext | None,
         stage_after: str,
+        transcript_quality: dict[str, Any] | None = None,
     ) -> HomeownerResponsePlan:
         realism_pack = context.realism_pack if context is not None else None
         persona = context.persona if context is not None else None
@@ -2673,6 +2696,27 @@ class ConversationOrchestrator:
             semantic_anchors=semantic_anchors,
             analysis=analysis,
         )
+        primary_response_act = self._primary_response_act_for_turn(
+            rep_text=rep_text,
+            analysis=analysis,
+            transcript_quality=transcript_quality,
+        )
+        allowed_followup_act = self._allowed_followup_act_for_turn(
+            rep_text=rep_text,
+            analysis=analysis,
+            primary_response_act=primary_response_act,
+            next_step_acceptability=next_step_acceptability,
+        )
+        deferred_topics = self._deferred_topics_for_turn(
+            state=state,
+            analysis=analysis,
+            allowed_new_objection=allowed_new_objection,
+        )
+        forbidden_drift_topics = self._forbidden_drift_topics_for_turn(
+            primary_response_act=primary_response_act,
+            allowed_followup_act=allowed_followup_act,
+            deferred_topics=deferred_topics,
+        )
         return HomeownerResponsePlan(
             must_answer=analysis.direct_response_required or analysis.stage_intent in {"attempt_close", "advance_pitch"},
             reaction_goal=reaction_goal,
@@ -2681,11 +2725,108 @@ class ConversationOrchestrator:
             allowed_new_objection=allowed_new_objection,
             semantic_anchors=semantic_anchors,
             next_step_acceptability=next_step_acceptability,
+            primary_response_act=primary_response_act,
+            allowed_followup_act=allowed_followup_act,
+            forbidden_drift_topics=forbidden_drift_topics,
+            deferred_topics=deferred_topics,
             fast_path_prompt=fast_path_prompt,
             wording_rotation_hint=wording_rotation_hint,
             selected_brief_keys=selected_brief_keys,
             friction_gates=friction_gates,
         )
+
+    def _primary_response_act_for_turn(
+        self,
+        *,
+        rep_text: str,
+        analysis: TurnAnalysis,
+        transcript_quality: dict[str, Any] | None,
+    ) -> str:
+        rep_lower = rep_text.lower()
+        confidence = float((transcript_quality or {}).get("confidence") or 1.0)
+        quality_band = str((transcript_quality or {}).get("quality_band") or "").lower()
+        if quality_band == "low" or confidence < 0.6:
+            return "clarify_rep_statement"
+        if "mentions_social_proof" in analysis.behavioral_signals:
+            return "acknowledge_neighbor_claim"
+        if any(phrase in rep_lower for phrase in ("do you have a pest control company", "already have a pest control company", "do you guys have a pest control company")):
+            return "answer_provider_status"
+        if any(phrase in rep_lower for phrase in ("have you seen", "have you been seeing", "have you guys been seeing", "noticed any", "seeing any")):
+            return "answer_presence_question"
+        if any(phrase in rep_lower for phrase in ("how much", "what does it cost", "what's this going to cost", "what will this cost", "what's the monthly")):
+            return "answer_price_probe"
+        if analysis.stage_intent == "attempt_close":
+            return "push_back_on_close"
+        if analysis.direct_response_required:
+            return "react_to_latest_claim"
+        return "react_to_latest_claim"
+
+    def _allowed_followup_act_for_turn(
+        self,
+        *,
+        rep_text: str,
+        analysis: TurnAnalysis,
+        primary_response_act: str,
+        next_step_acceptability: str,
+    ) -> str:
+        rep_lower = rep_text.lower()
+        if primary_response_act == "clarify_rep_statement":
+            return "none"
+        if primary_response_act == "acknowledge_neighbor_claim":
+            return "ask_service_detail"
+        if primary_response_act == "answer_presence_question":
+            return "ask_service_recommendation"
+        if primary_response_act == "answer_provider_status":
+            return "ask_provider_reason"
+        if primary_response_act == "answer_price_probe":
+            return "ask_cost_detail"
+        if primary_response_act == "push_back_on_close":
+            return "ask_next_step_detail" if next_step_acceptability in {"inspection_only", "booking_possible"} else "none"
+        if analysis.recommended_next_objection and not analysis.direct_response_required:
+            return "raise_allowed_objection"
+        if "provides_proof" in analysis.behavioral_signals or "explains_value" in analysis.behavioral_signals:
+            return "pressure_test_claim"
+        if any(phrase in rep_lower for phrase in ("what", "how", "why", "when")) and analysis.direct_response_required:
+            return "ask_service_detail"
+        return "none"
+
+    def _deferred_topics_for_turn(
+        self,
+        *,
+        state: ConversationState,
+        analysis: TurnAnalysis,
+        allowed_new_objection: str | None,
+    ) -> list[str]:
+        deferred: list[str] = []
+        for topic in [*state.active_objections, *state.queued_objections]:
+            if topic and topic != allowed_new_objection:
+                deferred.append(str(topic))
+        if analysis.recommended_next_objection and analysis.recommended_next_objection != allowed_new_objection:
+            deferred.append(analysis.recommended_next_objection)
+        return self._dedupe(deferred)[:3]
+
+    def _forbidden_drift_topics_for_turn(
+        self,
+        *,
+        primary_response_act: str,
+        allowed_followup_act: str,
+        deferred_topics: list[str],
+    ) -> list[str]:
+        blocked: list[str] = []
+        if primary_response_act != "acknowledge_neighbor_claim":
+            blocked.append("neighbor_claim")
+        if primary_response_act != "answer_presence_question":
+            blocked.append("pest_presence")
+        if primary_response_act != "answer_provider_status":
+            blocked.append("provider_status")
+        if primary_response_act != "answer_price_probe":
+            blocked.append("price_probe")
+        if allowed_followup_act not in {"ask_service_detail", "pressure_test_claim"}:
+            blocked.append("tenure")
+        if allowed_followup_act != "ask_provider_reason":
+            blocked.append("research_tangent")
+        blocked.extend(deferred_topics)
+        return self._dedupe(blocked)
 
     def _friction_gates_for_turn(
         self,

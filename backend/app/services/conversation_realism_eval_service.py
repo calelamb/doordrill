@@ -42,6 +42,81 @@ def _word_set(text: str | None) -> set[str]:
     }
 
 
+def _split_sentences(text: str | None) -> list[str]:
+    return [part.strip() for part in re.findall(r"[^.?!]+(?:[.?!]+|$)", str(text or "")) if part.strip()]
+
+
+def _topic_tags(text: str | None) -> set[str]:
+    normalized = _normalize_text(text)
+    tags: set[str] = set()
+    if not normalized:
+        return tags
+    if any(token in normalized for token in ("neighbor", "karen", "down the street")):
+        tags.add("neighbor_claim")
+    if any(token in normalized for token in ("spider", "wasp", "ant", "bug", "pest")):
+        tags.add("pest_presence")
+    if any(token in normalized for token in ("pest control company", "provider", "switch", "someone handling")):
+        tags.add("provider_status")
+    if any(token in normalized for token in ("cost", "price", "budget", "monthly")):
+        tags.add("price_probe")
+    if any(token in normalized for token in ("why do you ask", "why are you asking")):
+        tags.add("provider_reason")
+    if any(token in normalized for token in ("what do you recommend", "what would you recommend")):
+        tags.add("service_recommendation")
+    if any(token in normalized for token in ("what were you doing", "what do you recommend", "why do you ask", "what day")):
+        tags.add("grounded_followup")
+    if any(token in normalized for token in ("how long have you been", "working in the area")):
+        tags.add("tenure")
+    if any(token in normalized for token in ("reading a bit", "online lately", "been on my mind")):
+        tags.add("research_tangent")
+    return tags
+
+
+def _matches_primary_response_act(text: str, primary_response_act: str) -> bool:
+    tags = _topic_tags(text)
+    normalized = _normalize_text(text)
+    if primary_response_act == "acknowledge_neighbor_claim":
+        return "neighbor_claim" in tags
+    if primary_response_act == "answer_presence_question":
+        return "pest_presence" in tags
+    if primary_response_act == "answer_provider_status":
+        return "provider_status" in tags
+    if primary_response_act == "answer_price_probe":
+        return "price_probe" in tags
+    if primary_response_act == "push_back_on_close":
+        return any(phrase in normalized for phrase in _PUSHBACK_PHRASES)
+    if primary_response_act == "clarify_rep_statement":
+        return "what do you mean" in normalized or "say that again" in normalized
+    return True
+
+
+def _matches_allowed_followup_act(text: str, allowed_followup_act: str) -> bool:
+    if allowed_followup_act == "none":
+        return False
+    tags = _topic_tags(text)
+    if allowed_followup_act == "ask_service_detail":
+        return "grounded_followup" in tags
+    if allowed_followup_act == "ask_service_recommendation":
+        return "service_recommendation" in tags or "grounded_followup" in tags
+    if allowed_followup_act == "ask_provider_reason":
+        return "provider_reason" in tags
+    if allowed_followup_act == "ask_cost_detail":
+        return "price_probe" in tags or "grounded_followup" in tags
+    if allowed_followup_act == "ask_next_step_detail":
+        return "grounded_followup" in tags
+    if allowed_followup_act == "pressure_test_claim":
+        return bool(tags & {"price_probe", "provider_status", "pest_presence", "grounded_followup"})
+    return False
+
+
+def _has_binary_polarity_conflict(text: str | None) -> bool:
+    normalized = _normalize_text(text)
+    return normalized.startswith(("yes", "yeah", "yep")) and any(
+        phrase in normalized
+        for phrase in ("don't have", "dont have", "do not have", "we don't have", "we dont have", "we do not have", "haven't", "havent", "have not")
+    )
+
+
 @dataclass
 class ConversationRealismEvalResult:
     overall_score: float
@@ -146,6 +221,11 @@ class ConversationRealismEvalService:
                 response_plan=response_plan,
                 turn_analysis=turn_analysis,
             )
+            semantic_lane_score, semantic_lane_labels = self._semantic_lane_score(
+                ai_text=ai_text,
+                response_plan=response_plan,
+            )
+            directness = min(directness, semantic_lane_score)
             carryover, weak_carryover = self._carryover_score(
                 ai_text=ai_text,
                 response_plan=response_plan,
@@ -171,7 +251,7 @@ class ConversationRealismEvalService:
                 transcript_quality=transcript_quality,
             )
             repeated = self._is_repetitive(ai_text, previous_ai_texts)
-            contradictory = close <= 4.0
+            contradictory = close <= 4.0 or _has_binary_polarity_conflict(ai_text)
 
             if repeated:
                 repeated_turns += 1
@@ -181,6 +261,9 @@ class ConversationRealismEvalService:
                 contradictory_turns += 1
                 failure_labels.append("over_softening")
                 notes.append(f"Turn {ai_turn.turn_index} softened more than the response plan allowed.")
+            if semantic_lane_labels:
+                failure_labels.extend(semantic_lane_labels)
+                notes.append(f"Turn {ai_turn.turn_index} drifted away from the expected response lane.")
             if weak_carryover:
                 notes.append(f"Turn {ai_turn.turn_index} used only weak objection carryover.")
             if transcript <= 5.5:
@@ -249,6 +332,34 @@ class ConversationRealismEvalService:
         if "?" in ai_text and overlap == 0:
             return 4.5
         return 6.0
+
+    def _semantic_lane_score(
+        self,
+        *,
+        ai_text: str,
+        response_plan: dict[str, Any],
+    ) -> tuple[float, list[str]]:
+        primary_response_act = str(response_plan.get("primary_response_act") or "").strip()
+        allowed_followup_act = str(response_plan.get("allowed_followup_act") or "none").strip()
+        if not primary_response_act:
+            return 8.0, []
+        sentences = _split_sentences(ai_text)
+        if not sentences:
+            return 0.0, ["semantic_drift"]
+        labels: list[str] = []
+        score = 8.5
+        if not _matches_primary_response_act(sentences[0], primary_response_act):
+            labels.append("semantic_drift")
+            score = min(score, 4.5)
+        if len(sentences) > 1 and not _matches_allowed_followup_act(sentences[1], allowed_followup_act):
+            extra_tags = _topic_tags(sentences[1])
+            if extra_tags & {"tenure", "research_tangent"}:
+                labels.append("semantic_drift")
+                score = min(score, 4.0)
+        if _has_binary_polarity_conflict(ai_text):
+            labels.append("polarity_glitch")
+            score = min(score, 3.5)
+        return score, self._dedupe(labels)
 
     def _carryover_score(
         self,
