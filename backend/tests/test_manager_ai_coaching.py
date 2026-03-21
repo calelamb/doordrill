@@ -10,8 +10,9 @@ from app.models.assignment import Assignment
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
 from app.models.session import SessionTurn
-from app.models.types import AssignmentStatus, SessionStatus, TurnSpeaker
-from app.schemas.ai_meta import AiMeta
+from app.models.types import AssignmentStatus, SessionStatus, TurnSpeaker, UserRole
+from app.models.user import User
+from app.schemas.ai_meta import AiAttemptMeta, AiMeta
 from app.schemas.knowledge import RetrievedChunk
 from app.schemas.manager_ai import ManagerChatAnswerContent, ManagerChatClassification, TeamCoachingSummaryContent
 from app.services.document_retrieval_service import DocumentRetrievalService
@@ -66,13 +67,15 @@ def _create_scored_session(
     overall_score: float,
     weakness_tags: list[str],
     ai_summary: str,
+    rep_id: str | None = None,
 ) -> dict[str, str]:
     db = SessionLocal()
     started_at = datetime.now(timezone.utc) - timedelta(days=day_offset)
+    target_rep_id = rep_id or seed_org["rep_id"]
 
     assignment = Assignment(
         scenario_id=seed_org["scenario_id"],
-        rep_id=seed_org["rep_id"],
+        rep_id=target_rep_id,
         assigned_by=seed_org["manager_id"],
         status=AssignmentStatus.COMPLETED,
         retry_policy={"max_attempts": 2},
@@ -82,7 +85,7 @@ def _create_scored_session(
 
     session = DrillSession(
         assignment_id=assignment.id,
-        rep_id=seed_org["rep_id"],
+        rep_id=target_rep_id,
         scenario_id=seed_org["scenario_id"],
         started_at=started_at,
         ended_at=started_at + timedelta(minutes=4),
@@ -142,6 +145,26 @@ def _create_scored_session(
         "rep_turn_id": rep_turn.id,
         "ai_turn_id": ai_turn.id,
     }
+    db.close()
+    return payload
+
+
+def _create_team_rep(seed_org: dict[str, str], *, name: str, email_prefix: str) -> dict[str, str]:
+    db = SessionLocal()
+    existing_rep = db.get(User, seed_org["rep_id"])
+    assert existing_rep is not None
+
+    rep = User(
+        org_id=seed_org["org_id"],
+        team_id=existing_rep.team_id,
+        role=UserRole.REP,
+        name=name,
+        email=f"{email_prefix}@example.com",
+    )
+    db.add(rep)
+    db.commit()
+    db.refresh(rep)
+    payload = {"rep_id": rep.id, "rep_name": rep.name}
     db.close()
     return payload
 
@@ -607,3 +630,180 @@ def test_manager_ai_chat_uses_rep_progress_for_rep_specific_questions(client, se
     assert body["intent_detected"] == "rep_specific"
     assert body["sources_used"] == [f"rep_progress:{seed_org['rep_id']}"]
     assert body["key_metric_label"] == "Ray Average Score"
+
+
+def test_manager_ai_chat_falls_back_to_deterministic_risk_snapshot(client, seed_org, monkeypatch):
+    _create_scored_session(
+        seed_org,
+        day_offset=1,
+        overall_score=5.2,
+        weakness_tags=["objection_handling", "closing"],
+        ai_summary="Ray is slipping on objections and closes.",
+    )
+
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "classify_manager_chat_intent_with_meta",
+        lambda **kwargs: (
+            ManagerChatClassification(
+                intent="risk_alerts",
+                rep_name_mentioned=None,
+                scenario_mentioned=None,
+                category_mentioned=None,
+            ),
+            _ai_meta("classification"),
+        ),
+    )
+
+    def failing_manager_call(**kwargs):
+        raise AiCoachingUnavailableError(
+            "Anthropic could not complete the manager AI request.",
+            code="ai_provider_unavailable",
+            attempts=[
+                AiAttemptMeta(
+                    provider="openai",
+                    model="gpt-4o-mini",
+                    outcome="ai_provider_unavailable",
+                    latency_ms=18,
+                    real_call=True,
+                    task="manager_chat_answer",
+                    error="status=401; code=invalid_api_key",
+                ),
+                AiAttemptMeta(
+                    provider="anthropic",
+                    model="claude-3-5-sonnet-latest",
+                    outcome="ai_provider_unavailable",
+                    latency_ms=21,
+                    real_call=True,
+                    task="manager_chat_answer",
+                    error="status=401; type=authentication_error",
+                ),
+            ],
+        )
+
+    monkeypatch.setattr(manager_api.manager_ai_service, "_call_manager_ai_json", failing_manager_call)
+
+    response = client.post(
+        "/manager/ai/chat",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "message": "Who's at risk this week?", "period_days": 30},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["intent_detected"] == "risk_alerts"
+    assert body["sources_used"] == ["rep_risk_detail"]
+    assert body["ai_meta"]["status"] == "fallback"
+    assert body["ai_meta"]["fallback_kind"] == "deterministic"
+    assert body["key_metric_label"] in {"High Risk Reps", "Medium Risk Reps", "Team Average Score"}
+    assert body["assignment_suggestion"] is not None
+    assert "Ray Rep" in body["answer"]
+
+
+def test_manager_ai_chat_falls_back_to_deterministic_rep_progress(client, seed_org, monkeypatch):
+    _create_scored_session(
+        seed_org,
+        day_offset=2,
+        overall_score=6.3,
+        weakness_tags=["closing"],
+        ai_summary="Ray is steady, but the close is still lagging.",
+    )
+
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "classify_manager_chat_intent_with_meta",
+        lambda **kwargs: (
+            ManagerChatClassification(
+                intent="rep_specific",
+                rep_name_mentioned="Ray",
+                scenario_mentioned=None,
+                category_mentioned="closing",
+            ),
+            _ai_meta("classification"),
+        ),
+    )
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "_call_manager_ai_json",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AiCoachingUnavailableError(
+                "OpenAI could not complete the manager AI request.",
+                code="ai_provider_unavailable",
+            )
+        ),
+    )
+
+    response = client.post(
+        "/manager/ai/chat",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "message": "How is Ray doing?", "period_days": 30},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["intent_detected"] == "rep_specific"
+    assert body["ai_meta"]["status"] == "fallback"
+    assert body["ai_meta"]["fallback_kind"] == "deterministic"
+    assert body["sources_used"] == [f"rep_progress:{seed_org['rep_id']}"]
+    assert body["assignment_suggestion"] is not None
+    assert body["primary_action"]["target_url"] == "/manager/assignments/new"
+    assert "Ray Rep" in body["answer"]
+
+
+def test_manager_ai_chat_falls_back_to_deterministic_comparison_snapshot(client, seed_org, monkeypatch):
+    _create_scored_session(
+        seed_org,
+        day_offset=1,
+        overall_score=7.1,
+        weakness_tags=["closing"],
+        ai_summary="Ray is strong overall.",
+    )
+    second_rep = _create_team_rep(seed_org, name="Jordan Rep", email_prefix="jordan-comparison")
+    _create_scored_session(
+        seed_org,
+        day_offset=2,
+        overall_score=5.4,
+        weakness_tags=["objection_handling"],
+        ai_summary="Jordan is slipping on objections.",
+        rep_id=second_rep["rep_id"],
+    )
+
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "classify_manager_chat_intent_with_meta",
+        lambda **kwargs: (
+            ManagerChatClassification(
+                intent="comparison",
+                rep_name_mentioned=None,
+                scenario_mentioned=None,
+                category_mentioned=None,
+            ),
+            _ai_meta("classification"),
+        ),
+    )
+    monkeypatch.setattr(
+        manager_api.manager_ai_service,
+        "_call_manager_ai_json",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AiCoachingUnavailableError(
+                "Anthropic could not complete the manager AI request.",
+                code="ai_provider_unavailable",
+            )
+        ),
+    )
+
+    response = client.post(
+        "/manager/ai/chat",
+        headers=_manager_headers(seed_org),
+        json={"manager_id": seed_org["manager_id"], "message": "Compare my reps this month.", "period_days": 30},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["intent_detected"] == "comparison"
+    assert body["ai_meta"]["status"] == "fallback"
+    assert body["ai_meta"]["fallback_kind"] == "deterministic"
+    assert body["sources_used"] == ["command_center", "rep_progress_collection"]
+    assert body["key_metric_label"] == "Top-to-Bottom Gap"
+    assert "Ray Rep" in body["answer"]
+    assert "Jordan Rep" in body["answer"]

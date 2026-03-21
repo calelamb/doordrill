@@ -95,11 +95,13 @@ class JsonLlmRouterError(RuntimeError):
         *,
         code: str,
         retryable: bool = True,
+        detail: str | None = None,
         attempts: list[JsonLlmAttempt] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.detail = detail
         self.attempts = list(attempts or [])
 
 
@@ -160,6 +162,158 @@ def _extract_anthropic_text_content(payload: dict[str, Any]) -> str:
             if isinstance(text, str):
                 parts.append(text)
     return "".join(parts).strip()
+
+
+def _safe_json_payload(response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_openai_error_fields(response: httpx.Response) -> tuple[str, str, str]:
+    payload = _safe_json_payload(response)
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return "", "", ""
+    message = str(error.get("message") or "").strip()
+    error_type = str(error.get("type") or "").strip()
+    error_code = str(error.get("code") or "").strip()
+    return message, error_type, error_code
+
+
+def _extract_anthropic_error_fields(response: httpx.Response) -> tuple[str, str, str]:
+    payload = _safe_json_payload(response)
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or payload.get("message") or "").strip()
+        error_type = str(error.get("type") or payload.get("type") or "").strip()
+        error_code = str(error.get("error_code") or "").strip()
+        return message, error_type, error_code
+    return str(payload.get("message") or "").strip(), str(payload.get("type") or "").strip(), ""
+
+
+def _provider_error_detail(*, status_code: int, error_type: str, error_code: str, message: str) -> str:
+    parts = [f"status={status_code}"]
+    if error_type:
+        parts.append(f"type={error_type}")
+    if error_code:
+        parts.append(f"code={error_code}")
+    if message:
+        collapsed = re.sub(r"\s+", " ", message).strip()
+        parts.append(f"message={collapsed[:160]}")
+    return "; ".join(parts)[:240]
+
+
+def _map_provider_request_error(
+    provider: str,
+    *,
+    status_code: int,
+    message: str,
+    error_type: str,
+    error_code: str,
+) -> JsonLlmRouterError:
+    provider_title = provider.title()
+    lowered = " ".join(part for part in (message, error_type, error_code) if part).lower()
+    detail = _provider_error_detail(
+        status_code=status_code,
+        error_type=error_type,
+        error_code=error_code,
+        message=message,
+    )
+
+    failover_hints = (
+        "api key",
+        "authentication",
+        "auth",
+        "unauthorized",
+        "forbidden",
+        "permission",
+        "quota",
+        "credit",
+        "billing",
+        "rate limit",
+        "too many requests",
+        "model",
+        "not found",
+        "does not exist",
+        "unsupported model",
+        "overloaded",
+        "unavailable",
+        "capacity",
+        "context length",
+        "prompt is too long",
+        "too many tokens",
+        "max context",
+        "request too large",
+        "body too large",
+        "input is too long",
+    )
+    local_validation_hints = (
+        "messages[",
+        "messages.",
+        "system:",
+        "system ",
+        "max_tokens",
+        "temperature",
+        "invalid type",
+        "expected type",
+        "expected a",
+        "extra inputs",
+        "required",
+        "missing",
+        "malformed",
+        "invalid_request_error",
+        "invalid request",
+        "must be",
+        "schema",
+        "json",
+        "tool_choice",
+        "content block",
+    )
+
+    if status_code == 429 or status_code >= 500:
+        return JsonLlmRouterError(
+            f"{provider_title} could not complete the manager AI request.",
+            code="ai_provider_unavailable",
+            retryable=True,
+            detail=detail,
+        )
+    if status_code in {401, 403}:
+        return JsonLlmRouterError(
+            f"{provider_title} authentication failed for manager AI.",
+            code="ai_provider_unavailable",
+            retryable=True,
+            detail=detail,
+        )
+    if any(hint in lowered for hint in failover_hints):
+        return JsonLlmRouterError(
+            f"{provider_title} could not complete the manager AI request.",
+            code="ai_provider_unavailable",
+            retryable=True,
+            detail=detail,
+        )
+    if any(hint in lowered for hint in local_validation_hints):
+        return JsonLlmRouterError(
+            f"{provider_title} rejected the manager AI request.",
+            code="ai_invalid_response",
+            retryable=False,
+            detail=detail,
+        )
+    if status_code in {404, 409, 413, 422}:
+        return JsonLlmRouterError(
+            f"{provider_title} could not complete the manager AI request.",
+            code="ai_provider_unavailable",
+            retryable=True,
+            detail=detail,
+        )
+    return JsonLlmRouterError(
+        f"{provider_title} rejected the manager AI request.",
+        code="ai_invalid_response",
+        retryable=False,
+        detail=detail,
+    )
 
 
 class MockJsonLlmClient:
@@ -387,7 +541,13 @@ class JsonLlmRouter:
                 retryable=False,
                 attempts=attempts,
             )
-        raise JsonLlmRouterError(str(last_error), code=last_error.code, retryable=last_error.retryable, attempts=attempts)
+        raise JsonLlmRouterError(
+            str(last_error),
+            code=last_error.code,
+            retryable=last_error.retryable,
+            detail=last_error.detail,
+            attempts=attempts,
+        )
 
     def _attempt_provider(
         self,
@@ -422,6 +582,7 @@ class JsonLlmRouter:
                     "Mock AI returned an invalid response payload.",
                     code="ai_invalid_response",
                     retryable=False,
+                    detail=str(exc)[:240],
                     attempts=[attempt],
                 )
             return validated, attempt, False, None
@@ -441,6 +602,7 @@ class JsonLlmRouter:
                 f"{provider.title()} is not configured for manager AI.",
                 code="ai_not_configured",
                 retryable=True,
+                detail="provider_api_key_missing",
                 attempts=[attempt],
             )
             return None, attempt, True, error
@@ -484,6 +646,7 @@ class JsonLlmRouter:
                     f"{provider.title()} returned an invalid response payload.",
                     code="ai_invalid_response",
                     retryable=True,
+                    detail=str(exc)[:240],
                     attempts=[attempt],
                 )
                 return None, attempt, True, error
@@ -497,12 +660,13 @@ class JsonLlmRouter:
                 latency_ms=latency_ms,
                 real_call=True,
                 task=task,
-                error=str(exc)[:240],
+                error=(exc.detail or str(exc))[:240],
             )
             return None, attempt, exc.retryable, JsonLlmRouterError(
                 str(exc),
                 code=exc.code,
                 retryable=exc.retryable,
+                detail=exc.detail,
                 attempts=[attempt],
             )
         except Exception as exc:
@@ -520,6 +684,7 @@ class JsonLlmRouter:
                 f"{provider.title()} is temporarily unavailable.",
                 code="ai_provider_unavailable",
                 retryable=True,
+                detail=str(exc)[:240],
                 attempts=[attempt],
             )
             return None, attempt, True, error
@@ -562,7 +727,14 @@ class JsonLlmRouter:
         if response.status_code >= 500:
             raise JsonLlmRouterError("OpenAI returned a server error.", code="ai_provider_unavailable", retryable=True)
         if response.status_code >= 400:
-            raise JsonLlmRouterError("OpenAI rejected the manager AI request.", code="ai_invalid_response", retryable=False)
+            message, error_type, error_code = _extract_openai_error_fields(response)
+            raise _map_provider_request_error(
+                "openai",
+                status_code=response.status_code,
+                message=message,
+                error_type=error_type,
+                error_code=error_code,
+            )
 
         text_content = _extract_openai_text_content(response.json())
         try:
@@ -607,7 +779,14 @@ class JsonLlmRouter:
         if response.status_code >= 500:
             raise JsonLlmRouterError("Anthropic returned a server error.", code="ai_provider_unavailable", retryable=True)
         if response.status_code >= 400:
-            raise JsonLlmRouterError("Anthropic rejected the manager AI request.", code="ai_invalid_response", retryable=False)
+            message, error_type, error_code = _extract_anthropic_error_fields(response)
+            raise _map_provider_request_error(
+                "anthropic",
+                status_code=response.status_code,
+                message=message,
+                error_type=error_type,
+                error_code=error_code,
+            )
 
         text_content = _extract_anthropic_text_content(response.json())
         try:

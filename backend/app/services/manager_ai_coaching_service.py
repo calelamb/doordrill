@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from collections import Counter, defaultdict
@@ -59,6 +60,7 @@ RUBRIC_CATEGORY_KEYS = {
     "closing_technique": "closing",
     "professionalism": "professionalism",
 }
+logger = logging.getLogger(__name__)
 
 
 class AiCoachingUnavailableError(RuntimeError):
@@ -233,7 +235,7 @@ class ManagerAiCoachingService:
                     code="ai_invalid_response",
                 ) from exc
         try:
-            return self.json_router.generate_json(
+            result = self.json_router.generate_json(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 max_tokens=max_tokens,
@@ -243,6 +245,20 @@ class ManagerAiCoachingService:
                 allow_mock_fallback=self.settings.manager_ai_allow_mock,
                 timeout_seconds=timeout_seconds,
             )
+            attempts = [
+                AiAttemptMeta(
+                    provider=attempt.provider,
+                    model=attempt.model,
+                    outcome=attempt.outcome,
+                    latency_ms=attempt.latency_ms,
+                    real_call=attempt.real_call,
+                    task=attempt.task,
+                    error=attempt.error,
+                )
+                for attempt in result.attempts
+            ]
+            self._log_manager_chat_attempts(task=task, outcome="success", attempts=attempts)
+            return result
         except JsonLlmRouterError as exc:
             attempts = [
                 AiAttemptMeta(
@@ -256,6 +272,7 @@ class ManagerAiCoachingService:
                 )
                 for attempt in exc.attempts
             ]
+            self._log_manager_chat_attempts(task=task, outcome="error", attempts=attempts)
             raise AiCoachingUnavailableError(str(exc), code=exc.code, attempts=attempts) from exc
 
     def _ai_meta_from_result(
@@ -412,19 +429,72 @@ class ManagerAiCoachingService:
             }
         )
 
-    def _system_ai_meta(self, *, generated_at: str, status: str = "no_data", cached: bool = False) -> AiMeta:
+    def _system_ai_meta(
+        self,
+        *,
+        generated_at: str,
+        status: str = "no_data",
+        cached: bool = False,
+        attempts: Sequence[AiAttemptMeta] | None = None,
+        latency_ms: int | None = None,
+    ) -> AiMeta:
+        attempt_list = list(attempts or [])
         return AiMeta(
             provider="system",
             model="deterministic",
-            real_call=False,
+            real_call=any(attempt.real_call for attempt in attempt_list),
             cached=cached,
             status=status,
-            latency_ms=0,
+            latency_ms=latency_ms if latency_ms is not None else sum(attempt.latency_ms for attempt in attempt_list),
             fallback_used=status == "fallback",
             fallback_kind="deterministic" if status == "fallback" else None,
-            attempts=[],
+            attempts=attempt_list,
             generated_at=generated_at,
         )
+
+    def _manager_chat_attempt_payload(self, attempts: Sequence[AiAttemptMeta]) -> str:
+        serialized = [
+            {
+                "provider": attempt.provider,
+                "model": attempt.model,
+                "outcome": attempt.outcome,
+                "latency_ms": attempt.latency_ms,
+                "real_call": attempt.real_call,
+                "task": attempt.task,
+                "error": attempt.error,
+            }
+            for attempt in attempts
+        ]
+        return json.dumps(serialized, ensure_ascii=True)
+
+    def _log_manager_chat_attempts(
+        self,
+        *,
+        task: str,
+        outcome: str,
+        attempts: Sequence[AiAttemptMeta],
+        deterministic_fallback: bool = False,
+    ) -> None:
+        if not task.startswith("manager_chat"):
+            return
+        level = logging.INFO if outcome == "success" else logging.WARNING
+        logger.log(
+            level,
+            "manager_ai_chat task=%s outcome=%s deterministic_fallback=%s attempts=%s",
+            task,
+            outcome,
+            deterministic_fallback,
+            self._manager_chat_attempt_payload(attempts),
+        )
+
+    def _fallback_assignment_suggestion_from_data(self, relevant_data: dict[str, Any]) -> AssignmentSuggestion | None:
+        raw = relevant_data.get("fallback_assignment_suggestion")
+        if raw is None:
+            return None
+        try:
+            return AssignmentSuggestion.model_validate(raw)
+        except Exception:
+            return None
 
     def _build_assignment_suggestion(
         self,
@@ -612,12 +682,304 @@ class ManagerAiCoachingService:
             category_mentioned=None,
         )
 
+    def _deterministic_risk_alert_fallback(
+        self,
+        *,
+        rep_risk_detail: dict[str, Any],
+        assignment_suggestion: AssignmentSuggestion | None,
+    ) -> ManagerChatAnswerContent | None:
+        raw_reps = rep_risk_detail.get("reps")
+        if not isinstance(raw_reps, list):
+            return None
+
+        risk_rank = {"high": 2, "medium": 1, "low": 0}
+        reps: list[dict[str, Any]] = [item for item in raw_reps if isinstance(item, dict) and item.get("rep_name")]
+        if not reps:
+            return None
+
+        high_count = sum(1 for item in reps if str(item.get("risk_level") or "").lower() == "high")
+        medium_count = sum(1 for item in reps if str(item.get("risk_level") or "").lower() == "medium")
+        top_rep = max(
+            reps,
+            key=lambda item: (
+                risk_rank.get(str(item.get("risk_level") or "").lower(), 0),
+                float(item.get("risk_score") or 0.0),
+                -(float(item.get("current_avg_score")) if isinstance(item.get("current_avg_score"), (int, float)) else math.inf),
+                int(item.get("session_count") or 0),
+            ),
+        )
+
+        top_name = str(top_rep.get("rep_name") or "That rep")
+        top_level = str(top_rep.get("risk_level") or "low").lower()
+        top_average = top_rep.get("current_avg_score")
+        vulnerable_category = str(top_rep.get("most_vulnerable_category") or "").replace("_", " ").strip()
+        team_average = rep_risk_detail.get("team_avg_score")
+
+        answer_parts = ["Live AI is unavailable, but the current risk snapshot is still available."]
+        if high_count > 0:
+            answer_parts.append(f"{top_name} is the clearest concern this week and is currently flagged high risk.")
+        elif medium_count > 0:
+            answer_parts.append(f"No rep is currently high risk, but {top_name} is the highest remaining concern at medium risk.")
+        else:
+            answer_parts.append("No reps are currently flagged high risk in the selected window.")
+
+        if isinstance(top_average, (int, float)):
+            answer_parts.append(f"{top_name}'s current average score is {float(top_average):.1f}.")
+        elif isinstance(team_average, (int, float)):
+            answer_parts.append(f"The team average score is {float(team_average):.1f}.")
+        if vulnerable_category and high_count > 0:
+            answer_parts.append(f"The most vulnerable category right now is {vulnerable_category}.")
+
+        if high_count > 0:
+            key_metric = str(high_count)
+            key_metric_label = "High Risk Reps"
+        elif medium_count > 0:
+            key_metric = str(medium_count)
+            key_metric_label = "Medium Risk Reps"
+        elif isinstance(team_average, (int, float)):
+            key_metric = f"{float(team_average):.1f}"
+            key_metric_label = "Team Average Score"
+        else:
+            key_metric = top_name
+            key_metric_label = "Top Rep To Monitor"
+
+        data_points: list[ChatDataPoint] = []
+        if high_count > 0:
+            data_points.append(ChatDataPoint(label="High Risk", value=str(high_count)))
+        elif medium_count > 0:
+            data_points.append(ChatDataPoint(label="Medium Risk", value=str(medium_count)))
+        data_points.append(ChatDataPoint(label="Top Rep", value=top_name))
+        if isinstance(team_average, (int, float)) and len(data_points) < 2:
+            data_points.append(ChatDataPoint(label="Team Avg", value=f"{float(team_average):.1f}"))
+
+        primary_action = (
+            ManagerPrimaryAction(type="assignment_builder", label="Assign Drill", target_url="/manager/assignments/new")
+            if assignment_suggestion is not None
+            else ManagerPrimaryAction(type="route", label="Open Risk View", target_url="/manager/risk")
+        )
+        action_suggestion = (
+            f"Assign {assignment_suggestion.scenario_label} next for {assignment_suggestion.rep_name}."
+            if assignment_suggestion is not None
+            else "Open the risk view and review the highest-risk rep before assigning the next drill."
+        )
+
+        return ManagerChatAnswerContent(
+            answer=_trim_to_three_sentences(" ".join(answer_parts)),
+            key_metric=key_metric,
+            key_metric_label=key_metric_label,
+            follow_up_suggestions=[
+                "Which category is putting that rep most at risk?",
+                "What drill should I assign next to reduce the risk?",
+            ],
+            action_suggestion=action_suggestion,
+            data_points=data_points[:2],
+            data_state=None,
+            primary_action=primary_action,
+            assignment_suggestion=assignment_suggestion,
+        )
+
+    def _deterministic_rep_progress_fallback(
+        self,
+        *,
+        rep_progress: dict[str, Any],
+        assignment_suggestion: AssignmentSuggestion | None,
+    ) -> ManagerChatAnswerContent | None:
+        rep_name = str(rep_progress.get("rep_name") or "").strip()
+        rep_id = str(rep_progress.get("rep_id") or "").strip()
+        if not rep_name:
+            return None
+
+        average_score = rep_progress.get("average_score")
+        scored_session_count = int(rep_progress.get("scored_session_count") or 0)
+        session_count = int(rep_progress.get("session_count") or 0)
+        weak_area_tags = [
+            str(tag).replace("_", " ")
+            for tag in (rep_progress.get("weak_area_tags") or [])
+            if isinstance(tag, str) and tag.strip()
+        ]
+        weakest_area = weak_area_tags[0] if weak_area_tags else None
+        answer_parts = ["Live AI is unavailable, but the latest rep snapshot is still available."]
+        if isinstance(average_score, (int, float)) and scored_session_count > 0:
+            answer_parts.append(
+                f"{rep_name} is averaging {float(average_score):.1f} across {scored_session_count} scored sessions in the selected window."
+            )
+        elif session_count > 0:
+            answer_parts.append(f"{rep_name} has {session_count} sessions in the selected window, but the graded sample is still limited.")
+        else:
+            return None
+        if weakest_area:
+            answer_parts.append(f"The clearest weak area right now is {weakest_area}.")
+
+        primary_action = (
+            ManagerPrimaryAction(type="assignment_builder", label="Assign Drill", target_url="/manager/assignments/new")
+            if assignment_suggestion is not None
+            else ManagerPrimaryAction(type="route", label="Open Rep Progress", target_url=f"/manager/reps/{rep_id}/progress")
+        )
+        action_suggestion = (
+            f"Assign {assignment_suggestion.scenario_label} next for {assignment_suggestion.rep_name}."
+            if assignment_suggestion is not None
+            else f"Open {rep_name}'s progress view and review the next drill recommendation."
+        )
+
+        data_points = [
+            ChatDataPoint(label="Scored Sessions", value=str(scored_session_count)),
+        ]
+        if weakest_area:
+            data_points.append(ChatDataPoint(label="Weak Area", value=weakest_area.title()))
+
+        return ManagerChatAnswerContent(
+            answer=_trim_to_three_sentences(" ".join(answer_parts)),
+            key_metric=f"{float(average_score):.1f}" if isinstance(average_score, (int, float)) else str(scored_session_count),
+            key_metric_label=f"{rep_name} Average Score" if isinstance(average_score, (int, float)) else "Scored Sessions",
+            follow_up_suggestions=[
+                f"How does {rep_name} compare to the team?",
+                "What drill should I assign next?",
+            ],
+            action_suggestion=action_suggestion,
+            data_points=data_points[:2],
+            data_state=None,
+            primary_action=primary_action,
+            assignment_suggestion=assignment_suggestion,
+        )
+
+    def _deterministic_comparison_fallback(
+        self,
+        *,
+        rep_progress_collection: dict[str, Any],
+        command_center: dict[str, Any] | None,
+    ) -> ManagerChatAnswerContent | None:
+        items = rep_progress_collection.get("items")
+        if not isinstance(items, list):
+            return None
+
+        scored: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            progress = item.get("progress")
+            if not isinstance(progress, dict):
+                continue
+            average_score = progress.get("average_score")
+            if not isinstance(average_score, (int, float)):
+                continue
+            scored.append(
+                {
+                    "rep_id": item.get("rep_id") or progress.get("rep_id"),
+                    "rep_name": item.get("rep_name") or progress.get("rep_name"),
+                    "average_score": float(average_score),
+                    "scored_session_count": int(progress.get("scored_session_count") or 0),
+                }
+            )
+
+        if not scored:
+            return None
+
+        team_average = None
+        if isinstance(command_center, dict):
+            summary = command_center.get("summary")
+            if isinstance(summary, dict) and isinstance(summary.get("team_average_score"), (int, float)):
+                team_average = float(summary["team_average_score"])
+
+        if len(scored) == 1:
+            only_rep = scored[0]
+            answer_parts = [
+                "Live AI is unavailable, but only one rep has enough scored activity for a meaningful comparison right now.",
+                f"{only_rep['rep_name']} is averaging {only_rep['average_score']:.1f}.",
+            ]
+            if team_average is not None:
+                answer_parts.append(f"The current team average is {team_average:.1f}.")
+            return ManagerChatAnswerContent(
+                answer=_trim_to_three_sentences(" ".join(answer_parts)),
+                key_metric=f"{only_rep['average_score']:.1f}",
+                key_metric_label=f"{only_rep['rep_name']} Average Score",
+                follow_up_suggestions=[
+                    "Which rep needs more scored sessions first?",
+                    "What drill should I assign next to widen the sample?",
+                ],
+                action_suggestion="Open rep progress and assign the next comparison-ready drill.",
+                data_points=[ChatDataPoint(label="Active Rep", value=str(only_rep["rep_name"]))],
+                data_state=None,
+                primary_action=ManagerPrimaryAction(type="route", label="Open Analytics", target_url="/manager/analytics"),
+                assignment_suggestion=None,
+            )
+
+        ranked = sorted(scored, key=lambda item: item["average_score"], reverse=True)
+        top_rep = ranked[0]
+        bottom_rep = ranked[-1]
+        gap = top_rep["average_score"] - bottom_rep["average_score"]
+        answer_parts = [
+            "Live AI is unavailable, but the comparison snapshot is still available.",
+            f"{top_rep['rep_name']} is leading at {top_rep['average_score']:.1f}, while {bottom_rep['rep_name']} is trailing at {bottom_rep['average_score']:.1f}.",
+            f"The current spread is {gap:.1f} points.",
+        ]
+
+        return ManagerChatAnswerContent(
+            answer=_trim_to_three_sentences(" ".join(answer_parts)),
+            key_metric=f"{gap:.1f}",
+            key_metric_label="Top-to-Bottom Gap",
+            follow_up_suggestions=[
+                f"What is dragging {bottom_rep['rep_name']} down the most?",
+                "Which drill should I assign to close the gap?",
+            ],
+            action_suggestion=f"Open analytics and review {bottom_rep['rep_name']}'s weakest category before assigning the next drill.",
+            data_points=[
+                ChatDataPoint(label="Top Rep", value=str(top_rep["rep_name"])),
+                ChatDataPoint(label="Lowest Rep", value=str(bottom_rep["rep_name"])),
+            ],
+            data_state=None,
+            primary_action=ManagerPrimaryAction(type="route", label="Open Analytics", target_url="/manager/analytics"),
+            assignment_suggestion=None,
+        )
+
     def _deterministic_chat_fallback(
         self,
         *,
         message: str,
         relevant_data: dict[str, Any],
     ) -> ManagerChatAnswerContent | None:
+        del message
+        assignment_suggestion = self._fallback_assignment_suggestion_from_data(relevant_data)
+        classification = relevant_data.get("classification") if isinstance(relevant_data, dict) else None
+        intent = classification.get("intent") if isinstance(classification, dict) else None
+
+        if intent == "risk_alerts":
+            rep_risk_detail = relevant_data.get("rep_risk_detail") if isinstance(relevant_data, dict) else None
+            if isinstance(rep_risk_detail, dict):
+                answer = self._deterministic_risk_alert_fallback(
+                    rep_risk_detail=rep_risk_detail,
+                    assignment_suggestion=assignment_suggestion,
+                )
+                if answer is not None:
+                    return answer
+
+        if intent == "rep_specific":
+            rep_progress = next(
+                (
+                    value
+                    for key, value in relevant_data.items()
+                    if isinstance(key, str) and key.startswith("rep_progress:") and isinstance(value, dict)
+                ),
+                None,
+            )
+            if isinstance(rep_progress, dict):
+                answer = self._deterministic_rep_progress_fallback(
+                    rep_progress=rep_progress,
+                    assignment_suggestion=assignment_suggestion,
+                )
+                if answer is not None:
+                    return answer
+
+        if intent == "comparison":
+            rep_progress_collection = relevant_data.get("rep_progress_collection") if isinstance(relevant_data, dict) else None
+            command_center = relevant_data.get("command_center") if isinstance(relevant_data, dict) else None
+            if isinstance(rep_progress_collection, dict):
+                answer = self._deterministic_comparison_fallback(
+                    rep_progress_collection=rep_progress_collection,
+                    command_center=command_center if isinstance(command_center, dict) else None,
+                )
+                if answer is not None:
+                    return answer
+
         command_center = relevant_data.get("command_center") if isinstance(relevant_data, dict) else None
         if isinstance(command_center, dict):
             summary = command_center.get("summary", {}) if isinstance(command_center.get("summary"), dict) else {}
@@ -839,11 +1201,21 @@ Respond with JSON:
                 data_points=content.data_points[:4],
             )
             return answer, self._ai_meta_from_result(result, generated_at=generated_at)
-        except AiCoachingUnavailableError:
+        except AiCoachingUnavailableError as exc:
             deterministic = self._deterministic_chat_fallback(message=message, relevant_data=relevant_data)
             if deterministic is None:
                 raise
-            return deterministic, self._system_ai_meta(generated_at=generated_at, status="fallback")
+            self._log_manager_chat_attempts(
+                task="manager_chat_answer",
+                outcome="fallback",
+                attempts=exc.attempts,
+                deterministic_fallback=True,
+            )
+            return deterministic, self._system_ai_meta(
+                generated_at=generated_at,
+                status="fallback",
+                attempts=exc.attempts,
+            )
 
     def answer_company_material_question(
         self,

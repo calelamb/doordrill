@@ -6,6 +6,7 @@ import pytest
 import websockets
 from websockets.frames import Close
 
+import app.services.provider_clients as provider_clients_module
 from app.services.provider_clients import (
     AnthropicLlmClient,
     DeepgramSttClient,
@@ -461,6 +462,123 @@ def test_json_router_does_not_fallback_on_non_retryable_provider_request_error(m
 
     assert exc.value.code == "ai_invalid_response"
     assert anthropic_called["value"] is False
+
+
+def test_json_router_falls_back_on_retryable_provider_request_error(monkeypatch):
+    settings = SimpleNamespace(
+        environment="production",
+        llm_provider="openai",
+        manager_ai_fallback_provider=None,
+        manager_ai_model=None,
+        manager_ai_fast_model=None,
+        manager_ai_fallback_model=None,
+        manager_ai_fallback_fast_model=None,
+        openai_api_key="oa-key",
+        openai_model="gpt-4o-mini",
+        openai_base_url="https://api.openai.com/v1",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-3-5-sonnet-latest",
+        anthropic_chat_classification_model="claude-3-5-haiku-latest",
+        anthropic_chat_answer_model="claude-3-5-sonnet-latest",
+        anthropic_base_url="https://api.anthropic.com",
+        provider_timeout_seconds=5.0,
+    )
+    router = JsonLlmRouter(settings)
+    anthropic_called = {"value": False}
+
+    monkeypatch.setattr(
+        router,
+        "_call_openai_json",
+        lambda **kwargs: (_ for _ in ()).throw(
+            JsonLlmRouterError(
+                "OpenAI authentication failed for manager AI.",
+                code="ai_provider_unavailable",
+                retryable=True,
+                detail="status=401; code=invalid_api_key",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        router,
+        "_call_anthropic_json",
+        lambda **kwargs: anthropic_called.__setitem__("value", True) or {"answer": "fallback success"},
+    )
+
+    result = router.generate_json(
+        system_prompt="Return JSON.",
+        user_prompt='{"answer":"string"}',
+        max_tokens=100,
+        validator=lambda payload: payload,
+        task="manager_chat_answer",
+    )
+
+    assert result.provider == "anthropic"
+    assert result.fallback_used is True
+    assert anthropic_called["value"] is True
+
+
+def test_openai_request_error_mapping_marks_auth_failures_retryable(monkeypatch):
+    settings = SimpleNamespace(
+        environment="production",
+        llm_provider="openai",
+        manager_ai_fallback_provider=None,
+        manager_ai_model=None,
+        manager_ai_fast_model=None,
+        manager_ai_fallback_model=None,
+        manager_ai_fallback_fast_model=None,
+        openai_api_key="oa-key",
+        openai_model="gpt-4o-mini",
+        openai_base_url="https://api.openai.com/v1",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-3-5-sonnet-latest",
+        anthropic_chat_classification_model="claude-3-5-haiku-latest",
+        anthropic_chat_answer_model="claude-3-5-sonnet-latest",
+        anthropic_base_url="https://api.anthropic.com",
+        provider_timeout_seconds=5.0,
+    )
+    router = JsonLlmRouter(settings)
+
+    class _FakeResponse:
+        status_code = 401
+
+        def json(self):
+            return {
+                "error": {
+                    "message": "Incorrect API key provided.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key",
+                }
+            }
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def post(self, *args, **kwargs):
+            del args, kwargs
+            return _FakeResponse()
+
+    monkeypatch.setattr(provider_clients_module.httpx, "Client", _FakeClient)
+
+    with pytest.raises(JsonLlmRouterError) as exc:
+        router._call_openai_json(
+            api_key="oa-key",
+            model="gpt-4o-mini",
+            system_prompt="Return JSON.",
+            user_prompt='{"answer":"string"}',
+            max_tokens=100,
+        )
+
+    assert exc.value.code == "ai_provider_unavailable"
+    assert exc.value.retryable is True
+    assert exc.value.detail == "status=401; type=invalid_request_error; code=invalid_api_key; message=Incorrect API key provided."
 
 
 def test_json_router_respects_explicit_mock_disable():

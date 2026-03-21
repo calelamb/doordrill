@@ -755,6 +755,29 @@ def _resolve_manager_ai_data_state(*, snapshot: dict[str, int], intent: str) -> 
     return None
 
 
+def _manager_chat_risk_rank(level: str | None) -> int:
+    normalized = (level or "").strip().lower()
+    return {"high": 2, "medium": 1, "low": 0}.get(normalized, 0)
+
+
+def _pick_manager_chat_risk_rep(db: Session, risk_detail: RepRiskDetailResponse) -> User | None:
+    ranked = sorted(
+        risk_detail.reps,
+        key=lambda item: (
+            _manager_chat_risk_rank(item.risk_level),
+            float(item.risk_score or 0.0),
+            -(float(item.current_avg_score) if item.current_avg_score is not None else float("inf")),
+            int(item.session_count or 0),
+        ),
+        reverse=True,
+    )
+    for item in ranked:
+        rep = db.scalar(select(User).where(User.id == item.rep_id, User.role == UserRole.REP))
+        if rep is not None:
+            return rep
+    return None
+
+
 def _build_rep_risk_detail_response(
     db: Session,
     *,
@@ -2199,6 +2222,9 @@ def chat_with_manager_ai(
         resolved_rep = _resolve_rep_for_chat(db, manager, classification.rep_name_mentioned or payload.message)
         if resolved_rep is not None:
             relevant_data["resolved_rep"] = {"rep_id": resolved_rep.id, "rep_name": resolved_rep.name}
+            assignment_suggestion = manager_ai_service._build_assignment_suggestion(db, rep=resolved_rep)
+            if assignment_suggestion is not None:
+                relevant_data["fallback_assignment_suggestion"] = assignment_suggestion.model_dump(mode="json")
         else:
             relevant_data["rep_lookup"] = {
                 "requested_name": classification.rep_name_mentioned or payload.message,
@@ -2309,15 +2335,22 @@ def chat_with_manager_ai(
             ),
         )
     elif classification.intent == "risk_alerts":
+        risk_detail = _build_rep_risk_detail_response(
+            db,
+            manager_id=payload.manager_id,
+            manager=manager,
+            period=payload.period_days,
+        )
         attach_source(
             "rep_risk_detail",
-            _build_rep_risk_detail_response(
-                db,
-                manager_id=payload.manager_id,
-                manager=manager,
-                period=payload.period_days,
-            ).model_dump(mode="json"),
+            risk_detail.model_dump(mode="json"),
         )
+        focus_rep = _pick_manager_chat_risk_rep(db, risk_detail)
+        if focus_rep is not None:
+            relevant_data["risk_focus_rep"] = {"rep_id": focus_rep.id, "rep_name": focus_rep.name}
+            assignment_suggestion = manager_ai_service._build_assignment_suggestion(db, rep=focus_rep)
+            if assignment_suggestion is not None:
+                relevant_data["fallback_assignment_suggestion"] = assignment_suggestion.model_dump(mode="json")
     elif classification.intent == "comparison":
         team_reps = _list_manager_team_reps(db, manager)
         attach_source(
