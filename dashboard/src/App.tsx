@@ -5,6 +5,8 @@ import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "rea
 import { Sidebar } from "./components/Sidebar";
 import { clearStoredAuth, getValidStoredAuth } from "./lib/auth";
 import { LoginPage } from "./pages/LoginPage";
+import { LandingPage } from "./pages/LandingPage";
+import { ShowcasePage } from "./pages/ShowcasePage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 
 const ManagerFeedPage = lazy(async () => ({ default: (await import("./pages/ManagerFeedPage")).ManagerFeedPage }));
@@ -39,11 +41,6 @@ const ScenarioIntelligencePage = lazy(
 const ManagerChatPanel = lazy(
   async () => ({ default: (await import("./components/ManagerChatPanel")).ManagerChatPanel })
 );
-
-function RootRedirect() {
-  const auth = getValidStoredAuth();
-  return <Navigate to={auth ? "/manager/feed" : "/login"} replace />;
-}
 
 function getModifierKeyLabel(): string {
   if (typeof navigator === "undefined") {
@@ -155,8 +152,9 @@ export function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<RootRedirect />} />
+        <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/showcase/:id" element={<ShowcasePage />} />
         <Route element={<ProtectedLayout />}>
           <Route path="/manager/feed" element={<ManagerFeedPage />} />
           <Route path="/manager/sessions/:id/live" element={<LiveSessionPage />} />
