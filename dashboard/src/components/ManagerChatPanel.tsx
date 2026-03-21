@@ -5,7 +5,9 @@ import { ArrowRight, Lightbulb, MessageSquareText, RefreshCw, Sparkles, X } from
 import { useNavigate } from "react-router-dom";
 
 import { sendManagerChatMessage } from "../lib/api";
+import { describeAiError } from "../lib/aiStatus";
 import type { ChatMessage, ManagerChatResponse } from "../lib/types";
+import { AiMetaStrip } from "./shared/AiMetaStrip";
 
 type ChatRole = "user" | "assistant";
 
@@ -18,6 +20,7 @@ type ChatPanelProps = {
 
 type ChatUiMessage = ChatMessage & {
   error?: boolean;
+  errorLabel?: string;
   failedPrompt?: string;
   failedHistory?: Array<{ role: ChatRole; content: string }>;
 };
@@ -149,13 +152,15 @@ export function ManagerChatPanel({ isOpen, managerId, onClose, onToggle }: ChatP
         timestamp: new Date().toISOString(),
       };
       setMessages((current) => [...current, assistantMessage]);
-    } catch {
+    } catch (error) {
+      const presentation = describeAiError(error);
       const errorMessage: ChatUiMessage = {
         id: createMessageId(),
         role: "assistant",
-        content: "Couldn't reach the AI. Try again.",
+        content: error instanceof Error ? error.message : "Couldn't reach the AI. Try again.",
         timestamp: new Date().toISOString(),
         error: true,
+        errorLabel: presentation?.label ?? "Unavailable",
         failedPrompt: trimmedPrompt,
         failedHistory: history,
       };
@@ -318,6 +323,8 @@ export function ManagerChatPanel({ isOpen, managerId, onClose, onToggle }: ChatP
 
                         {message.role === "assistant" && message.response ? (
                           <div className="mt-4 space-y-3">
+                            <AiMetaStrip meta={message.response.ai_meta} />
+
                             {message.response.key_metric ? (
                               <div className="rounded-2xl bg-accent-soft/70 px-4 py-3">
                                 <div className="text-xl font-black tracking-tight text-accent">{message.response.key_metric}</div>
@@ -380,19 +387,42 @@ export function ManagerChatPanel({ isOpen, managerId, onClose, onToggle }: ChatP
                                 </div>
                               </div>
                             ) : null}
+
+                            {message.response.sources_used.length > 0 ? (
+                              <div className="space-y-2">
+                                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Sources</div>
+                                <div className="flex flex-wrap gap-2">
+                                  {message.response.sources_used.slice(0, 4).map((source) => (
+                                    <span
+                                      key={`${message.id}-${source}`}
+                                      className="rounded-full border border-white/35 bg-white/80 px-3 py-1.5 text-[11px] font-medium text-muted"
+                                    >
+                                      {source.replace(/_/g, " ")}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         ) : null}
 
                         {message.error ? (
-                          <button
-                            type="button"
-                            onClick={() => handleRetry(message)}
-                            aria-label="Retry failed AI request"
-                            className="mt-3 inline-flex items-center gap-2 rounded-full border border-red-200/70 bg-white/80 px-3 py-1.5 text-xs font-semibold text-red-800 transition hover:bg-white"
-                          >
-                            <RefreshCw className="h-3.5 w-3.5" />
-                            Retry
-                          </button>
+                          <div className="mt-3 space-y-3">
+                            {message.errorLabel ? (
+                              <span className="inline-flex rounded-full border border-red-200/70 bg-red-50 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-red-800">
+                                {message.errorLabel}
+                              </span>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => handleRetry(message)}
+                              aria-label="Retry failed AI request"
+                              className="inline-flex items-center gap-2 rounded-full border border-red-200/70 bg-white/80 px-3 py-1.5 text-xs font-semibold text-red-800 transition hover:bg-white"
+                            >
+                              <RefreshCw className="h-3.5 w-3.5" />
+                              Retry
+                            </button>
+                          </div>
                         ) : null}
                       </div>
                     </div>

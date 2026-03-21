@@ -6,7 +6,16 @@ import pytest
 import websockets
 from websockets.frames import Close
 
-from app.services.provider_clients import AnthropicLlmClient, DeepgramSttClient, ElevenLabsTtsClient, OpenAiLlmClient, ProviderSuite, _DeepgramSessionState
+from app.services.provider_clients import (
+    AnthropicLlmClient,
+    DeepgramSttClient,
+    ElevenLabsTtsClient,
+    JsonLlmRouter,
+    JsonLlmRouterError,
+    OpenAiLlmClient,
+    ProviderSuite,
+    _DeepgramSessionState,
+)
 
 
 @pytest.mark.asyncio
@@ -383,3 +392,93 @@ class TestExpandedHistoryWindow:
         history = client._history_for_current_task()
         # Should retain 24, not 12
         assert len(history) == 24
+
+
+
+def test_json_router_falls_back_to_secondary_provider(monkeypatch):
+    settings = SimpleNamespace(
+        environment="production",
+        llm_provider="openai",
+        manager_ai_fallback_provider=None,
+        manager_ai_model=None,
+        manager_ai_fast_model=None,
+        manager_ai_fallback_model=None,
+        manager_ai_fallback_fast_model=None,
+        openai_api_key="oa-key",
+        openai_model="gpt-4o-mini",
+        openai_base_url="https://api.openai.com/v1",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-3-5-sonnet-latest",
+        anthropic_chat_classification_model="claude-3-5-haiku-latest",
+        anthropic_chat_answer_model="claude-3-5-sonnet-latest",
+        anthropic_base_url="https://api.anthropic.com",
+        provider_timeout_seconds=5.0,
+    )
+    router = JsonLlmRouter(settings)
+
+    monkeypatch.setattr(
+        router,
+        "_call_openai_json",
+        lambda **kwargs: (_ for _ in ()).throw(JsonLlmRouterError("OpenAI timed out during manager AI generation.", code="ai_timeout", retryable=True)),
+    )
+    monkeypatch.setattr(router, "_call_anthropic_json", lambda **kwargs: {"answer": "fallback worked"})
+
+    result = router.generate_json(
+        system_prompt="Return JSON.",
+        user_prompt='{"answer":"string"}',
+        max_tokens=100,
+        validator=lambda payload: payload,
+        task="manager_chat_answer",
+    )
+
+    assert result.provider == "anthropic"
+    assert result.fallback_used is True
+    assert [attempt.provider for attempt in result.attempts] == ["openai", "anthropic"]
+    assert result.attempts[0].outcome == "ai_timeout"
+    assert result.attempts[1].outcome == "success"
+
+
+def test_json_router_does_not_fallback_on_non_retryable_provider_request_error(monkeypatch):
+    settings = SimpleNamespace(
+        environment="production",
+        llm_provider="openai",
+        manager_ai_fallback_provider=None,
+        manager_ai_model=None,
+        manager_ai_fast_model=None,
+        manager_ai_fallback_model=None,
+        manager_ai_fallback_fast_model=None,
+        openai_api_key="oa-key",
+        openai_model="gpt-4o-mini",
+        openai_base_url="https://api.openai.com/v1",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-3-5-sonnet-latest",
+        anthropic_chat_classification_model="claude-3-5-haiku-latest",
+        anthropic_chat_answer_model="claude-3-5-sonnet-latest",
+        anthropic_base_url="https://api.anthropic.com",
+        provider_timeout_seconds=5.0,
+    )
+    router = JsonLlmRouter(settings)
+    anthropic_called = {"value": False}
+
+    monkeypatch.setattr(
+        router,
+        "_call_openai_json",
+        lambda **kwargs: (_ for _ in ()).throw(JsonLlmRouterError("OpenAI rejected the manager AI request.", code="ai_invalid_response", retryable=False)),
+    )
+    monkeypatch.setattr(
+        router,
+        "_call_anthropic_json",
+        lambda **kwargs: anthropic_called.__setitem__("value", True) or {"answer": "should not run"},
+    )
+
+    with pytest.raises(JsonLlmRouterError) as exc:
+        router.generate_json(
+            system_prompt="Return JSON.",
+            user_prompt='{"answer":"string"}',
+            max_tokens=100,
+            validator=lambda payload: payload,
+            task="manager_chat_answer",
+        )
+
+    assert exc.value.code == "ai_invalid_response"
+    assert anthropic_called["value"] is False

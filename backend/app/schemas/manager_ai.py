@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.ai_meta import AiMeta
+
 
 class RepInsightRequest(BaseModel):
     manager_id: str
@@ -30,6 +32,7 @@ class RepInsightResponse(RepInsightContent):
     rep_name: str
     generated_at: str
     data_summary: dict[str, Any] = Field(default_factory=dict)
+    ai_meta: AiMeta | None = None
 
 
 class OneOnOnePrepRequest(BaseModel):
@@ -75,6 +78,7 @@ class OneOnOnePrepResponse(OneOnOnePrepContent):
     period_days: int
     generated_at: str
     data_summary: dict[str, Any] = Field(default_factory=dict)
+    ai_meta: AiMeta | None = None
 
 
 class WeeklyTeamBriefingRequest(BaseModel):
@@ -102,16 +106,20 @@ class WeeklyTeamBriefingHuddleTopic(BaseModel):
     suggested_talking_points: list[str] = Field(default_factory=list, min_length=3, max_length=3)
 
 
-class WeeklyTeamBriefingResponse(BaseModel):
-    manager_id: str
-    generated_at: str
+class WeeklyTeamBriefingContent(BaseModel):
     team_pulse: str = Field(min_length=1, max_length=500)
     standout_rep: WeeklyTeamBriefingStandoutRep
     needs_attention: list[WeeklyTeamBriefingNeedsAttentionItem] = Field(default_factory=list, max_length=2)
     shared_weakness: WeeklyTeamBriefingSharedWeakness
     huddle_topic: WeeklyTeamBriefingHuddleTopic
     manager_action_items: list[str] = Field(default_factory=list, min_length=1, max_length=4)
+
+
+class WeeklyTeamBriefingResponse(WeeklyTeamBriefingContent):
+    manager_id: str
+    generated_at: str
     data_summary: dict[str, Any] = Field(default_factory=dict)
+    ai_meta: AiMeta | None = None
 
 
 class SessionAnnotationRequest(BaseModel):
@@ -131,6 +139,7 @@ class SessionAnnotationsResponse(BaseModel):
     session_id: str
     generated_at: str
     annotations: list[SessionAnnotation] = Field(default_factory=list)
+    ai_meta: AiMeta | None = None
 
 
 class TeamCoachingSummaryRequest(BaseModel):
@@ -147,6 +156,7 @@ class TeamCoachingSummaryResponse(TeamCoachingSummaryContent):
     period_days: int
     generated_at: str
     data_summary: dict[str, Any] = Field(default_factory=dict)
+    ai_meta: AiMeta | None = None
 
 
 class ManagerChatHistoryItem(BaseModel):
@@ -193,3 +203,4 @@ class ManagerChatAnswerContent(BaseModel):
 class ManagerChatResponse(ManagerChatAnswerContent):
     intent_detected: str
     sources_used: list[str] = Field(default_factory=list)
+    ai_meta: AiMeta | None = None

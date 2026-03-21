@@ -14,6 +14,7 @@ import {
 
 import { ChartSkeleton } from "../components/shared/ChartSkeleton";
 import { EmptyState } from "../components/shared/EmptyState";
+import { AiMetaStrip } from "../components/shared/AiMetaStrip";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchManagerCoachingAnalytics, fetchTeamCoachingSummary, fetchWeeklyTeamBriefing } from "../lib/api";
 import { cardVariants, pageVariants } from "../lib/motion";
@@ -152,7 +153,6 @@ export function CoachingLabPage() {
         navigate("/login", { replace: true });
         return;
       }
-      setSummary(null);
       setSummaryError(result.reason instanceof Error ? result.reason.message : "Failed to generate team coaching summary");
     } finally {
       if (summaryRequestRef.current === requestId) {
@@ -181,7 +181,6 @@ export function CoachingLabPage() {
       if (weeklyBriefingRequestRef.current !== requestId) {
         return;
       }
-      setWeeklyBriefing(null);
       setWeeklyBriefingError(loadError instanceof Error ? loadError.message : "Failed to load weekly briefing");
     } finally {
       if (weeklyBriefingRequestRef.current === requestId) {
@@ -334,22 +333,35 @@ export function CoachingLabPage() {
         </div>
 
         <div className="mt-6">
-          {weeklyBriefingLoading ? <WeeklyBriefingSkeleton /> : null}
+          {weeklyBriefingLoading && !weeklyBriefing ? <WeeklyBriefingSkeleton /> : null}
 
-          {!weeklyBriefingLoading && weeklyBriefingError && isEmptyDataError(weeklyBriefingError) ? (
+          {!weeklyBriefingLoading && !weeklyBriefing && weeklyBriefingError && isEmptyDataError(weeklyBriefingError) ? (
             <EmptyState variant="empty" message="No weekly team briefing is available yet." />
           ) : null}
 
-          {!weeklyBriefingLoading && weeklyBriefingError && !isEmptyDataError(weeklyBriefingError) ? (
+          {!weeklyBriefingLoading && !weeklyBriefing && weeklyBriefingError && !isEmptyDataError(weeklyBriefingError) ? (
             <div className="rounded-[28px] border border-error/15 bg-error/[0.06] px-5 py-5 text-sm text-error">
               {weeklyBriefingError}
             </div>
           ) : null}
 
-          {!weeklyBriefingLoading && !weeklyBriefingError && weeklyBriefing ? (
+          {weeklyBriefing ? (
             <div className="space-y-5">
+              {weeklyBriefingLoading ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-900">
+                  Refreshing weekly briefing...
+                </div>
+              ) : null}
+
+              {!weeklyBriefingLoading && weeklyBriefingError ? (
+                <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-4 py-3 text-sm text-error">
+                  {weeklyBriefingError}
+                </div>
+              ) : null}
+
               <div className="rounded-[28px] border border-white/30 bg-white/60 p-5">
                 <p className="text-lg font-semibold leading-8 text-ink">{weeklyBriefing.team_pulse}</p>
+                <AiMetaStrip meta={weeklyBriefing.ai_meta} />
               </div>
 
               <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
@@ -492,7 +504,7 @@ export function CoachingLabPage() {
         </div>
 
         <div className="mt-5">
-          {summaryLoading ? (
+          {summaryLoading && !summary ? (
             <div className="space-y-3">
               <div className="h-4 w-full animate-pulse rounded-full bg-white/35" />
               <div className="h-4 w-11/12 animate-pulse rounded-full bg-white/35" />
@@ -500,14 +512,29 @@ export function CoachingLabPage() {
             </div>
           ) : null}
 
-          {!summaryLoading && summaryError ? (
+          {!summaryLoading && !summary && summaryError ? (
             <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-4 py-4 text-sm text-error">
               {summaryError}
             </div>
           ) : null}
 
-          {!summaryLoading && !summaryError && summary ? (
-            <p className="text-base leading-7 text-ink">{summary.summary}</p>
+          {summary ? (
+            <div className="space-y-4">
+              {summaryLoading ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-900">
+                  Refreshing team coaching summary...
+                </div>
+              ) : null}
+
+              {!summaryLoading && summaryError ? (
+                <div className="rounded-2xl border border-error/15 bg-error/[0.06] px-4 py-4 text-sm text-error">
+                  {summaryError}
+                </div>
+              ) : null}
+
+              <p className="text-base leading-7 text-ink">{summary.summary}</p>
+              <AiMetaStrip meta={summary.ai_meta} />
+            </div>
           ) : null}
         </div>
       </motion.section>

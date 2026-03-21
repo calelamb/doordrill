@@ -1,5 +1,7 @@
 import { clearStoredAuth, createAuthRequiredError, getValidStoredAuth } from "./auth";
+import { ApiError, extractApiErrorCode, formatApiErrorDetail } from "./apiError";
 import type {
+  KnowledgeAnswerResponse,
   KnowledgeDeleteResponse,
   KnowledgeDocument,
   KnowledgeDocumentListResponse,
@@ -21,13 +23,6 @@ function buildAuthHeaders(managerId: string): Headers {
   headers.set("x-user-id", managerId || auth.user.id);
   headers.set("x-user-role", "manager");
   return headers;
-}
-
-function formatError(detail: unknown, status: number, fallback: string): string {
-  if (typeof detail === "string" && detail.trim()) {
-    return detail;
-  }
-  return `${fallback}: ${status}`;
 }
 
 async function requestJson<T>(managerId: string, path: string, init: RequestInit): Promise<T> {
@@ -54,7 +49,12 @@ async function requestJson<T>(managerId: string, path: string, init: RequestInit
     } catch {
       detail = null;
     }
-    throw new Error(formatError(detail, response.status, path));
+    throw new ApiError(
+      formatApiErrorDetail(detail, response.status, path),
+      response.status,
+      extractApiErrorCode(detail),
+      detail,
+    );
   }
 
   return response.json() as Promise<T>;
@@ -127,7 +127,14 @@ export function uploadDocument(
           parsed && typeof parsed === "object" && parsed !== null && "detail" in parsed
             ? (parsed as { detail?: unknown }).detail
             : null;
-        reject(new Error(formatError(detail, request.status, "/manager/documents")));
+        reject(
+          new ApiError(
+            formatApiErrorDetail(detail, request.status, "/manager/documents"),
+            request.status,
+            extractApiErrorCode(detail),
+            detail,
+          )
+        );
         return;
       }
 
@@ -171,6 +178,21 @@ export async function queryDocuments(
     {
       method: "POST",
       body: JSON.stringify({ manager_id: managerId, query, k }),
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
+export async function askDocuments(
+  managerId: string,
+  question: string,
+): Promise<KnowledgeAnswerResponse> {
+  return requestJson<KnowledgeAnswerResponse>(
+    managerId,
+    "/manager/ai/knowledge-answer",
+    {
+      method: "POST",
+      body: JSON.stringify({ manager_id: managerId, question }),
       headers: { "content-type": "application/json" },
     },
   );

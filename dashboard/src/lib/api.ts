@@ -1,5 +1,6 @@
 import { clearStoredAuth, createAuthRequiredError, getValidStoredAuth, storeAuth } from "./auth";
 import type { AuthSession } from "./auth";
+import { ApiError, extractApiErrorCode, formatApiErrorDetail } from "./apiError";
 import type {
   AlertItem,
   AnalyticsMetricDefinition,
@@ -66,13 +67,6 @@ type ManagerSessionDetailResponse = {
 
 type AuthLoginResponse = AuthSession;
 
-function formatErrorDetail(detail: unknown, status: number, fallback: string): string {
-  if (typeof detail === "string" && detail.trim()) {
-    return detail;
-  }
-  return `${fallback}: ${status}`;
-}
-
 function buildHeaders({ userId, role, public: isPublic }: AuthOptions = {}): Headers {
   const headers = new Headers({ "content-type": "application/json" });
   if (isPublic) {
@@ -110,7 +104,12 @@ async function requestJson<T>(path: string, init: RequestInit = {}, authOptions:
     } catch {
       detail = null;
     }
-    throw new Error(formatErrorDetail(detail, response.status, path));
+    throw new ApiError(
+      formatApiErrorDetail(detail, response.status, path),
+      response.status,
+      extractApiErrorCode(detail),
+      detail,
+    );
   }
 
   return response.json() as Promise<T>;

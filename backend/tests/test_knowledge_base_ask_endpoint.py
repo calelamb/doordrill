@@ -4,6 +4,7 @@ from app.api import manager as manager_api
 from app.db.session import SessionLocal
 from app.models.knowledge import OrgDocument, OrgDocumentChunk
 from app.models.types import OrgDocumentFileType, OrgDocumentStatus
+from app.schemas.ai_meta import AiMeta
 from app.services.document_retrieval_service import DocumentRetrievalService
 
 
@@ -43,15 +44,26 @@ def test_knowledge_base_ask_endpoint_returns_grounded_answer_and_sources(client,
     finally:
         db.close()
 
-    def fake_claude(*, system_prompt: str, user_prompt: str, max_tokens: int, model: str | None = None):
-        assert "Answer the manager's question using only the provided company training material." in user_prompt
-        assert "Retention Script" in user_prompt
-        assert "show the gaps before comparing price" in user_prompt
-        return {
-            "answer": "The script says to confirm coverage matters, ask what they wish were better, and show service gaps before comparing price."
-        }
+    def fake_answer(*, question: str, sources):
+        assert "already have pest control" in question
+        assert sources[0].document_name == "Retention Script"
+        assert "show the gaps before comparing price" in sources[0].text
+        return (
+            "The script says to confirm coverage matters, ask what they wish were better, and show service gaps before comparing price.",
+            AiMeta(
+                provider="openai",
+                model="gpt-4o-mini",
+                real_call=True,
+                cached=False,
+                status="live",
+                latency_ms=42,
+                fallback_used=False,
+                attempts=[],
+                generated_at="2026-03-20T00:00:00Z",
+            ),
+        )
 
-    monkeypatch.setattr(manager_api.manager_ai_service, "_call_claude_json", fake_claude)
+    monkeypatch.setattr(manager_api.manager_ai_service, "answer_company_material_question", fake_answer)
 
     response = client.post(
         "/manager/documents/ask",
@@ -68,3 +80,5 @@ def test_knowledge_base_ask_endpoint_returns_grounded_answer_and_sources(client,
     assert len(body["sources"]) == 1
     assert body["sources"][0]["document_name"] == "Retention Script"
     assert "already have pest control" in body["sources"][0]["text"]
+    assert body["chunks_used"] == 1
+    assert body["ai_meta"]["status"] == "live"

@@ -241,7 +241,9 @@ def test_weekly_team_briefing_structure(client, seed_org, monkeypatch):
         json={"manager_id": seed_org["manager_id"]},
     )
     assert cached.status_code == 200
-    assert cached.json() == body
+    assert cached.json()["team_pulse"] == body["team_pulse"]
+    assert cached.json()["ai_meta"]["cached"] is True
+    assert cached.json()["ai_meta"]["status"] == "cached"
     assert call_count["value"] == 1
 
 

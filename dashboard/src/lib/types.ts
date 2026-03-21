@@ -38,6 +38,28 @@ export type GradingMeta = {
   message?: string | null;
 };
 
+export type AiAttemptMeta = {
+  provider: string;
+  model: string;
+  outcome: string;
+  latency_ms: number;
+  real_call: boolean;
+  task?: string | null;
+  error?: string | null;
+};
+
+export type AiMeta = {
+  provider: string;
+  model: string;
+  real_call: boolean;
+  cached: boolean;
+  status: string;
+  latency_ms: number;
+  fallback_used: boolean;
+  attempts: AiAttemptMeta[];
+  generated_at: string;
+};
+
 export type FeedItem = {
   session_id: string;
   rep_id: string;
@@ -218,6 +240,7 @@ export type RepInsightResponse = {
     contributing_metrics?: string[];
   }>;
   data_summary: Record<string, unknown>;
+  ai_meta?: AiMeta | null;
 };
 
 export type OneOnOnePrepResponse = {
@@ -247,6 +270,7 @@ export type OneOnOnePrepResponse = {
   };
   readiness_summary: string;
   data_summary: Record<string, unknown>;
+  ai_meta?: AiMeta | null;
 };
 
 export type RepRiskDetail = {
@@ -290,6 +314,7 @@ export type SessionAnnotationsResponse = {
   session_id: string;
   generated_at: string;
   annotations: SessionAnnotation[];
+  ai_meta?: AiMeta | null;
 };
 
 export type KnowledgeDocumentStatus = "pending" | "processing" | "ready" | "failed";
@@ -321,11 +346,19 @@ export type KnowledgeQueryChunk = {
   document_name: string;
   text: string;
   similarity_score: number;
+  is_universal?: boolean;
 };
 
 export type KnowledgeQueryResponse = {
   chunks: KnowledgeQueryChunk[];
   has_documents: boolean;
+};
+
+export type KnowledgeAnswerResponse = {
+  answer: string;
+  sources: KnowledgeQueryChunk[];
+  chunks_used: number;
+  ai_meta?: AiMeta | null;
 };
 
 export type TeamCoachingSummaryResponse = {
@@ -334,6 +367,7 @@ export type TeamCoachingSummaryResponse = {
   generated_at: string;
   summary: string;
   data_summary: Record<string, unknown>;
+  ai_meta?: AiMeta | null;
 };
 
 export type WeeklyTeamBriefingResponse = {
@@ -359,6 +393,7 @@ export type WeeklyTeamBriefingResponse = {
   };
   manager_action_items: string[];
   data_summary: Record<string, unknown>;
+  ai_meta?: AiMeta | null;
 };
 
 export type ChatDataPoint = {
@@ -375,6 +410,7 @@ export type ManagerChatResponse = {
   data_points: ChatDataPoint[];
   intent_detected: string;
   sources_used: string[];
+  ai_meta?: AiMeta | null;
 };
 
 export type ChatMessage = {

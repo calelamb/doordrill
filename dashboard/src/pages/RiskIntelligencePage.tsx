@@ -15,6 +15,7 @@ import { ChartSkeleton } from "../components/shared/ChartSkeleton";
 import { DataTable } from "../components/shared/DataTable";
 import { EmptyState } from "../components/shared/EmptyState";
 import { ScoreTrajectoryBar } from "../components/shared/ScoreTrajectoryBar";
+import { AiMetaStrip } from "../components/shared/AiMetaStrip";
 import { clearStoredAuth, getValidStoredAuth, isAuthError } from "../lib/auth";
 import { fetchRepInsight, fetchRepRiskDetail } from "../lib/api";
 import { getCategoryLabel, normalizeCategoryKey } from "../lib/analytics";
@@ -157,7 +158,6 @@ function RepInsightDrawer({ managerId, period, rep, onClose }: RepInsightDrawerP
     const repId = rep.rep_id;
 
     async function loadInsight() {
-      setInsight(null);
       setLoading(true);
       setError(null);
       try {
@@ -172,7 +172,6 @@ function RepInsightDrawer({ managerId, period, rep, onClose }: RepInsightDrawerP
           return;
         }
         if (!cancelled) {
-          setInsight(null);
           setError(loadError instanceof Error ? loadError.message : "Could not load AI coach insight.");
         }
       } finally {
@@ -224,7 +223,7 @@ function RepInsightDrawer({ managerId, period, rep, onClose }: RepInsightDrawerP
             </div>
 
             <div className="mt-6 flex-1 space-y-5 overflow-y-auto pr-1">
-              {loading ? (
+              {loading && !insight ? (
                 <div className="space-y-4">
                   <ChartSkeleton heightClass="h-6" className="max-w-[180px]" />
                   <ChartSkeleton heightClass="h-20" className="rounded-2xl" />
@@ -233,15 +232,28 @@ function RepInsightDrawer({ managerId, period, rep, onClose }: RepInsightDrawerP
                 </div>
               ) : null}
 
-              {!loading && error ? (
+              {!loading && !insight && error ? (
                 <div className="rounded-3xl border border-red-200 bg-red-50/80 p-5 text-sm text-red-700">{error}</div>
               ) : null}
 
-              {!loading && !error && insight ? (
+              {insight ? (
                 <>
+                  {loading ? (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-900">
+                      Refreshing AI coach insight...
+                    </div>
+                  ) : null}
+
+                  {!loading && error ? (
+                    <div className="rounded-2xl border border-red-200 bg-red-50/80 px-4 py-3 text-sm text-red-700">
+                      {error}
+                    </div>
+                  ) : null}
+
                   <div className="rounded-[28px] border border-white/35 bg-white/55 p-5 backdrop-blur-2xl">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">Diagnosis</div>
                     <p className="mt-3 text-2xl font-black tracking-tight text-ink">{insight.headline}</p>
+                    <AiMetaStrip meta={insight.ai_meta} />
                   </div>
 
                   <div className="grid gap-4 md:grid-cols-2">

@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.schemas.ai_meta import AiMeta
+
 
 class OrgDocumentResponse(BaseModel):
     id: str
@@ -57,3 +59,5 @@ class DocumentAskRequest(BaseModel):
 class DocumentAskResponse(BaseModel):
     answer: str
     sources: list[RetrievedChunk] = Field(default_factory=list)
+    chunks_used: int = 0
+    ai_meta: AiMeta | None = None
