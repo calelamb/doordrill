@@ -36,10 +36,11 @@ from app.services.micro_behavior_engine import (
     MicroBehaviorPlan,
     MicroBehaviorSegment,
 )
-from app.services.provider_clients import ProviderSuite
+from app.services.provider_clients import ProviderSuite, SttTranscript
 from app.services.session_postprocess_service import SessionPostprocessService
 from app.services.storage_service import StorageService
 from app.services.transcript_normalization_service import TranscriptNormalizationResult, TranscriptNormalizationService
+from app.services.transcript_repair_service import TranscriptRepairService
 from app.utils.latency import TurnLatencyRecord
 
 router = APIRouter(tags=["voice"])
@@ -61,12 +62,13 @@ postprocess_service = SessionPostprocessService()
 providers = ProviderSuite.from_settings(settings)
 storage_service = StorageService()
 transcript_normalizer = TranscriptNormalizationService()
+transcript_repair = TranscriptRepairService()
 
 SILENCE_FILLER_SECONDS = 9.0  # Reps need time to think — 4s was cutting them off mid-thought
 VAD_FINALIZE_DEBOUNCE_MS = settings.stt_vad_finalize_debounce_ms
 FLUSH_INTERVAL_ACTIVE_MS = 200
 FLUSH_INTERVAL_IDLE_MS = 400
-MAX_RUNTIME_PAUSE_MS = 60
+MAX_RUNTIME_PAUSE_MS = 300
 TTS_STREAM_TIMEOUT_SECONDS = 6
 WS_KEEPALIVE_TIMEOUT_SECONDS = 120
 WS_KEEPALIVE_INTERVAL_SECONDS = 30
@@ -112,7 +114,11 @@ class SessionRuntimeState:
     barge_in_started_at: float | None = None
 
 
+HOMEOWNER_MAX_TOKENS = 100  # generous ceiling, prompt guides natural length
+
+
 def homeowner_token_budget(stage: str) -> int:
+    """Deprecated: use HOMEOWNER_MAX_TOKENS instead. Kept for backward compatibility."""
     stage_budgets = {
         "door_knock": 30,
         "initial_pitch": 55,
@@ -122,6 +128,39 @@ def homeowner_token_budget(stage: str) -> int:
         "ended": 24,
     }
     return stage_budgets.get(stage, 65)
+
+
+def check_response_relevance(rep_text: str, ai_response: str, emotion: str) -> str:
+    """Score whether the AI response engages with what the rep said.
+    Returns: 'engaged', 'deflection', or 'disconnected'.
+    """
+    dismissal_phrases = {"i need to go", "no thanks", "not interested", "i'm busy", "look, i'm busy", "gotta go"}
+    response_lower = ai_response.lower().strip().rstrip(".")
+    if emotion in ("hostile", "annoyed") and (
+        len(ai_response.split()) <= 8
+        or any(phrase in response_lower for phrase in dismissal_phrases)
+    ):
+        return "deflection"
+
+    stop_words = {"the", "and", "that", "this", "with", "from", "your", "have",
+                  "been", "will", "would", "could", "about", "just", "like",
+                  "here", "there", "what", "they", "them", "some", "more"}
+    rep_words = {
+        w.lower().strip(".,!?;:'\"")
+        for w in rep_text.split()
+        if len(w.strip(".,!?;:'\"")) >= 4 and w.lower().strip(".,!?;:'\"") not in stop_words
+    }
+
+    response_lower_full = ai_response.lower()
+    overlap = sum(1 for w in rep_words if w in response_lower_full)
+
+    if overlap >= 1:
+        return "engaged"
+
+    if "?" in ai_response and emotion in ("curious", "interested", "neutral", "skeptical"):
+        return "engaged"
+
+    return "disconnected"
 
 
 def _dedupe_retrieved_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
@@ -361,6 +400,13 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         company_context=company_context,
     )
     orchestrator.update_objection_brief_cache(session_id, objection_brief_cache)
+    # Keep STT session-scoped to avoid Deepgram websocket cold starts on every rep turn.
+    boost_terms = transcript_repair.get_boost_terms()
+    if scenario and isinstance(scenario.persona, dict):
+        company = scenario.persona.get("company_name", "")
+        if company:
+            boost_terms.append(company)
+    await providers.stt.start_session(session_id, vocabulary=boost_terms)
     micro_behavior_engine.initialize_session(
         session_id,
         persona=scenario.persona if scenario is not None and isinstance(scenario.persona, dict) else None,
@@ -976,7 +1022,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 rep_text=prompt_text,
                 stage=stage,
                 system_prompt=system_prompt,
-                max_tokens=homeowner_token_budget(stage),
+                max_tokens=HOMEOWNER_MAX_TOKENS,
             ):
                 if interrupt_signal_at is not None:
                     ai_interrupted = True
@@ -1007,6 +1053,61 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
         if sentence_buffer.strip() and not ai_interrupted:
             await process_sentence(sentence_buffer.strip())
+
+        full_ai_text = "".join(ai_text_parts).strip()
+        if (
+            settings.response_quality_gate_enabled
+            and full_ai_text
+            and len(tts_tasks) > 0
+            and not ai_interrupted
+        ):
+            relevance = check_response_relevance(prompt_text, full_ai_text, emotion_after)
+            if relevance == "disconnected":
+                # If single sentence and TTS already done, accept it — audio is already playing
+                if len(tts_tasks) == 1 and tts_tasks[0].done():
+                    logger.info("quality_gate_skipped_single_sentence", extra={
+                        "session_id": session_id, "ai_response": full_ai_text,
+                    })
+                else:
+                    logger.warning("response_quality_gate_triggered", extra={
+                        "session_id": session_id, "rep_text": prompt_text,
+                        "ai_response": full_ai_text, "emotion": emotion_after,
+                    })
+                    for task in tts_tasks:
+                        if not task.done():
+                            task.cancel()
+                    if tts_tasks:
+                        await asyncio.gather(*tts_tasks, return_exceptions=True)
+                    tts_tasks.clear()
+                    ai_text_parts.clear()
+
+                    augmented_system = (
+                        system_prompt + "\n\nCRITICAL: The rep just said: '"
+                        + prompt_text
+                        + "'. Your response MUST directly address what they said. "
+                        "React to their specific words, not to a generic pitch."
+                    )
+                    sentence_buffer = ""
+                    async for chunk in providers.llm.stream_reply(
+                        rep_text=prompt_text, stage=stage,
+                        system_prompt=augmented_system, max_tokens=HOMEOWNER_MAX_TOKENS,
+                    ):
+                        if interrupt_signal_at is not None:
+                            ai_interrupted = True
+                            break
+                        if not chunk:
+                            continue
+                        sentence_buffer += str(chunk)
+                        while True:
+                            match = re.search(r"[.?!](?:\s|$)", sentence_buffer)
+                            if match is None:
+                                break
+                            sentence = sentence_buffer[:match.end()].strip()
+                            sentence_buffer = sentence_buffer[match.end():]
+                            if sentence:
+                                await process_sentence(sentence)
+                    if sentence_buffer.strip() and not ai_interrupted:
+                        await process_sentence(sentence_buffer.strip())
 
         logger.info(
             "emitting_text_done",
@@ -1552,6 +1653,34 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 runtime_state.barge_in_started_at = None
                 continue
             runtime_state.barge_in_started_at = None
+
+            # --- Transcript repair (our feature) ---
+            if stt_result and stt_result.text and settings.transcript_repair_enabled:
+                repair_result = transcript_repair.deterministic_repair(stt_result.text)
+                repaired_text = repair_result.repaired_text
+
+                if not repair_result.all_confident:
+                    conversation_context = []
+                    try:
+                        repaired_text = await transcript_repair.llm_repair(
+                            repair_result.repaired_text, conversation_context, providers.llm,
+                            model=settings.transcript_repair_model,
+                        )
+                    except Exception as exc:
+                        logger.warning("LLM transcript repair failed: %s", exc)
+
+                if repair_result.repairs or repaired_text != stt_result.text:
+                    logger.info("transcript_repaired", extra={
+                        "session_id": session_id, "original": stt_result.text,
+                        "repaired": repaired_text, "repairs": repair_result.repairs,
+                        "used_llm": not repair_result.all_confident,
+                    })
+                stt_result = SttTranscript(
+                    text=repaired_text, confidence=stt_result.confidence,
+                    is_final=stt_result.is_final, source=stt_result.source,
+                )
+
+            # --- Transcript normalization (main's pipeline) ---
             context = orchestrator.get_context(session_id)
             state_before_turn = orchestrator.get_state(session_id)
             transcript_result = transcript_normalizer.normalize(

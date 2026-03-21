@@ -28,8 +28,7 @@ class SttTranscript:
 class BaseSttClient:
     provider_name = "base"
 
-    async def start_session(self, session_id: str, payload: dict | None = None) -> None:
-        del payload
+    async def start_session(self, session_id: str, *, vocabulary: list[str] | None = None, payload: dict | None = None) -> None:
         return None
 
     async def end_session(self, session_id: str) -> None:
@@ -138,13 +137,16 @@ class _TaskConversationHistoryMixin:
                 {"role": "assistant", "content": assistant_text},
             ]
         )
-        # Keep the last 16 messages (8 exchanges) to bound context size.
-        if len(history) > 16:
-            del history[:-16]
+        # Keep the last 24 messages (12 exchanges) to bound context size.
+        if len(history) > 24:
+            del history[:-24]
 
 
 class MockSttClient(BaseSttClient):
     provider_name = "mock_stt"
+
+    async def start_session(self, session_id: str, *, vocabulary: list[str] | None = None, payload: dict | None = None) -> None:
+        return None
 
     async def finalize_utterance(self, payload: dict) -> SttTranscript:
         hint = str(payload.get("transcript_hint", "")).strip()
@@ -194,7 +196,7 @@ class DeepgramSttClient(BaseSttClient):
                 return SttTranscript(text=hint, confidence=0.98, is_final=True, source=self.provider_name)
             return await self._fallback.finalize_utterance(payload)
 
-    async def start_session(self, session_id: str, payload: dict | None = None) -> None:
+    async def start_session(self, session_id: str, *, vocabulary: list[str] | None = None, payload: dict | None = None) -> None:
         if not self.api_key:
             return
         self._session_ids.add(session_id)
@@ -209,6 +211,8 @@ class DeepgramSttClient(BaseSttClient):
             "channels": 1,
             "session_id": session_id,
         }
+        if vocabulary:
+            default_payload["vocabulary_hints"] = vocabulary
         with contextlib.suppress(Exception):
             await self._get_or_open_session(session_id, payload=default_payload)
 
@@ -452,6 +456,79 @@ class DeepgramSttClient(BaseSttClient):
                 is_final=bool(final_segments) or bool(transcript),
                 source=self.provider_name,
             )
+
+
+class AssemblyAiSttClient(BaseSttClient):
+    provider_name = "assemblyai"
+
+    def __init__(self, api_key: str) -> None:
+        self._api_key = api_key
+        self._sessions: dict[str, Any] = {}
+        self._vocabulary: list[str] = []
+        self._fallback = MockSttClient()
+
+    async def start_session(self, session_id: str, *, vocabulary: list[str] | None = None, payload: dict | None = None) -> None:
+        self._vocabulary = vocabulary or []
+        self._sessions[session_id] = {"vocabulary": self._vocabulary}
+
+    async def end_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
+    async def finalize_utterance(self, payload: dict) -> SttTranscript:
+        import assemblyai as aai
+        aai.settings.api_key = self._api_key
+        audio_bytes = _decode_base64_audio(payload)
+        on_partial = payload.get("on_partial")
+        hint = str(payload.get("transcript_hint", "")).strip()
+
+        if not audio_bytes:
+            if hint:
+                if on_partial:
+                    on_partial(hint, True)
+                return SttTranscript(text=hint, confidence=0.95, is_final=True, source="assemblyai_hint")
+            return await self._fallback.finalize_utterance(payload)
+
+        try:
+            final_text = ""
+            final_confidence = 0.9
+
+            def on_data(transcript: aai.RealtimeTranscript) -> None:
+                nonlocal final_text, final_confidence
+                if isinstance(transcript, aai.RealtimeFinalTranscript):
+                    final_text = transcript.text
+                    final_confidence = transcript.confidence or 0.9
+                    if on_partial:
+                        on_partial(transcript.text, True)
+                elif isinstance(transcript, aai.RealtimePartialTranscript):
+                    if on_partial and transcript.text:
+                        on_partial(transcript.text, False)
+
+            transcriber = aai.RealtimeTranscriber(
+                sample_rate=16_000,
+                word_boost=self._vocabulary[:1000] if self._vocabulary else None,
+                on_data=on_data,
+                on_error=lambda err: logger.error("AssemblyAI RT error: %s", err),
+            )
+            # Wrap synchronous SDK calls in executor to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, transcriber.connect)
+            chunk_size = 8192
+
+            def _stream_chunks() -> None:
+                for i in range(0, len(audio_bytes), chunk_size):
+                    transcriber.stream(audio_bytes[i:i + chunk_size])
+
+            await loop.run_in_executor(None, _stream_chunks)
+            await loop.run_in_executor(None, transcriber.close)
+
+            if not final_text and hint:
+                return SttTranscript(text=hint, confidence=0.5, is_final=True, source="assemblyai_hint_fallback")
+            return SttTranscript(text=final_text, confidence=final_confidence, is_final=True, source="assemblyai")
+        except Exception as exc:
+            logger.exception("AssemblyAI finalize_utterance failed: %s", exc)
+            if hint:
+                return SttTranscript(text=hint, confidence=0.5, is_final=True, source="assemblyai_fallback")
+            return await self._fallback.finalize_utterance(payload)
 
 
 class MockLlmClient(BaseLlmClient):
@@ -768,16 +845,17 @@ class ProviderSuite:
         llm_provider = (settings.llm_provider or "mock").lower()
         tts_provider = (settings.tts_provider or "mock").lower()
 
-        stt = (
-            DeepgramSttClient(
+        if stt_provider == "assemblyai" and settings.assemblyai_api_key:
+            stt: BaseSttClient = AssemblyAiSttClient(api_key=settings.assemblyai_api_key)
+        elif stt_provider == "deepgram":
+            stt = DeepgramSttClient(
                 settings.deepgram_api_key,
                 base_url=settings.deepgram_base_url,
                 model=settings.deepgram_model,
                 timeout_seconds=settings.provider_timeout_seconds,
             )
-            if stt_provider == "deepgram"
-            else MockSttClient()
-        )
+        else:
+            stt = MockSttClient()
 
         llm = (
             AnthropicLlmClient(

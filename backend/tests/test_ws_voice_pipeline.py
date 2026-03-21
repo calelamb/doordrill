@@ -171,7 +171,7 @@ class _PayloadRecordingSttClient(MockSttClient):
         self.start_payloads: list[dict] = []
         self.finalize_payloads: list[dict] = []
 
-    async def start_session(self, session_id: str, payload: dict | None = None) -> None:
+    async def start_session(self, session_id: str, *, vocabulary: list[str] | None = None, payload: dict | None = None) -> None:
         del session_id
         if payload is not None:
             self.start_payloads.append(dict(payload))
@@ -389,8 +389,8 @@ def test_ws_phase_latency_breakdown_stays_within_deterministic_budgets(client, s
     assert phase_latency["stt_ms"] <= 150
     assert phase_latency["analysis_ms"] <= 75
     assert phase_latency["llm_first_token_ms"] <= 180
-    assert phase_latency["tts_first_audio_ms"] <= 150
-    assert phase_latency["total_turn_ms"] <= 450
+    assert phase_latency["tts_first_audio_ms"] <= 450  # increased from 150 — MAX_RUNTIME_PAUSE_MS raised to 300
+    assert phase_latency["total_turn_ms"] <= 750  # increased to account for longer pauses
 
 
 def test_ws_barge_in_emits_audio_interrupt(client, seed_org, monkeypatch):
