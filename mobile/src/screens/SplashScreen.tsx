@@ -8,7 +8,7 @@ export function SplashScreen() {
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.content}>
           <View style={styles.iconShell}>
-            <TreePine color="#166534" size={38} strokeWidth={2.5} />
+            <TreePine color="#144227" size={38} strokeWidth={2.5} />
           </View>
           <Text style={styles.title}>DoorDrill</Text>
           <Text style={styles.subtitle}>Sharper reps. Better conversations.</Text>

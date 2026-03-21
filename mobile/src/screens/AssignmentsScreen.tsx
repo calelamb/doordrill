@@ -160,7 +160,7 @@ export function AssignmentsScreen({ navigation }: Props) {
   }, [progress?.last_scored_session_at, progress?.streak_days]);
 
   return (
-    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+    <LinearGradient colors={["#FBF9F5", "#EFEEEA", "#E4E2DE"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.content}>
           <View style={styles.headerRow}>
@@ -252,7 +252,7 @@ export function AssignmentsScreen({ navigation }: Props) {
                 style={({ pressed }) => [styles.quickTrainCard, pressed && styles.quickTrainCardPressed]}
                 onPress={navigateToScenarioPicker}
               >
-                <LinearGradient colors={["#166534", "#15803d"]} style={styles.quickTrainGradient} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}>
+                <LinearGradient colors={["#144227", "#2D5A3D"]} style={styles.quickTrainGradient} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}>
                   <View style={styles.quickTrainIcon}>
                     <Zap size={24} color="#fff" fill="#fff" />
                   </View>

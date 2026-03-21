@@ -1246,7 +1246,7 @@ export function ScoreScreen({ route, navigation }: Props) {
 
   if (loading && !data) {
     return (
-      <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+      <LinearGradient colors={["#FBF9F5", "#EFEEEA", "#E4E2DE"]} style={styles.container}>
         <SafeAreaView style={styles.safeArea}>
           <LoadingSkeleton />
         </SafeAreaView>
@@ -1255,7 +1255,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   }
 
   return (
-    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+    <LinearGradient colors={["#FBF9F5", "#EFEEEA", "#E4E2DE"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.screenBody}>
           <View style={styles.headerShell}>

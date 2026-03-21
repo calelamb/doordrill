@@ -192,7 +192,7 @@ export function PreSessionScreen({ route, navigation }: Props) {
   };
 
   return (
-    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+    <LinearGradient colors={["#FBF9F5", "#EFEEEA", "#E4E2DE"]} style={styles.container}>
       <BottomSheet
         ref={bottomSheetRef}
         index={0}
@@ -267,7 +267,7 @@ export function PreSessionScreen({ route, navigation }: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   sheetBackground: {
-    backgroundColor: "#FDFDFD",
+    backgroundColor: "#FBF9F5",
     borderRadius: 32,
     borderWidth: 1,
     borderColor: colors.line,

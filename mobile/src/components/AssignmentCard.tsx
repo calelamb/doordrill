@@ -28,7 +28,7 @@ function statusStyles(status: string): { chip: object; label: object } {
   if (normalized === "completed") {
     return {
       chip: { backgroundColor: "rgba(74, 222, 128, 0.15)", borderWidth: 1, borderColor: "rgba(74, 222, 128, 0.3)" },
-      label: { color: "#4ade80" }
+      label: { color: "#a1d2ad" }
     };
   }
   if (normalized === "in_progress") {

@@ -91,13 +91,13 @@ export function ForgotPasswordScreen({ navigation, route }: Props) {
   };
 
   return (
-    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+    <LinearGradient colors={["#FBF9F5", "#EFEEEA", "#E4E2DE"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.keyboardView}>
           <View style={styles.content}>
             <View style={styles.brandContainer}>
               <View style={styles.iconWrapper}>
-                <TreePine size={32} color="#4ade80" strokeWidth={2.5} />
+                <TreePine size={32} color="#a1d2ad" strokeWidth={2.5} />
               </View>
               <Text style={styles.title}>{isResetState ? "Set New Password" : "Forgot Password"}</Text>
               <Text style={styles.subtitle}>
@@ -123,7 +123,7 @@ export function ForgotPasswordScreen({ navigation, route }: Props) {
                         autoComplete="email"
                         keyboardType="email-address"
                         textContentType="emailAddress"
-                        selectionColor="#22c55e"
+                        selectionColor="#516354"
                       />
                     </View>
                   </View>
@@ -161,7 +161,7 @@ export function ForgotPasswordScreen({ navigation, route }: Props) {
                         autoCorrect={false}
                         autoComplete="new-password"
                         textContentType="newPassword"
-                        selectionColor="#22c55e"
+                        selectionColor="#516354"
                       />
                     </View>
                   </View>
@@ -181,7 +181,7 @@ export function ForgotPasswordScreen({ navigation, route }: Props) {
                         autoCorrect={false}
                         autoComplete="new-password"
                         textContentType="newPassword"
-                        selectionColor="#22c55e"
+                        selectionColor="#516354"
                       />
                     </View>
                   </View>
@@ -299,12 +299,12 @@ const styles = StyleSheet.create({
   },
   button: {
     marginTop: 12,
-    backgroundColor: "#166534",
+    backgroundColor: "#144227",
     borderRadius: 14,
     height: 56,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#166534",
+    shadowColor: "#144227",
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
     shadowRadius: 10,
@@ -332,12 +332,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   secondaryActionText: {
-    color: "#166534",
+    color: "#144227",
     fontWeight: "700",
     fontSize: 15,
   },
   successText: {
-    color: "#166534",
+    color: "#144227",
     marginBottom: 16,
     textAlign: "center",
     fontWeight: "600",

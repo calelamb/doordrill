@@ -23,9 +23,9 @@ export function PerformancePanel({ analytics, repProgress, actions }: Props) {
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, ease: "easeOut" }}
-        className="lg:col-span-2 bg-white/50 backdrop-blur-2xl border border-white/50 shadow-xl shadow-black/5 rounded-3xl p-6 flex flex-col hover:shadow-2xl transition-all duration-300"
+        className="lg:col-span-2 bg-white/60 backdrop-blur-2xl border border-white/40 shadow-xl shadow-black/5 rounded-3xl p-6 flex flex-col hover:shadow-2xl transition-all duration-300"
       >
-        <h2 className="text-xl font-bold tracking-tight text-ink mb-6 flex items-center gap-2">
+        <h2 className="text-xl font-display font-bold tracking-tight text-ink mb-6 flex items-center gap-2">
           <Activity className="w-6 h-6 text-accent" />
           Performance
         </h2>
@@ -73,9 +73,9 @@ export function PerformancePanel({ analytics, repProgress, actions }: Props) {
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.1, ease: "easeOut" }}
-          className="bg-white/50 backdrop-blur-2xl border border-white/50 shadow-xl shadow-black/5 rounded-3xl p-6 hover:shadow-2xl transition-all duration-300"
+          className="bg-white/60 backdrop-blur-2xl border border-white/40 shadow-xl shadow-black/5 rounded-3xl p-6 hover:shadow-2xl transition-all duration-300"
         >
-          <h3 className="text-sm font-bold uppercase tracking-widest text-muted mb-4 flex items-center gap-2">
+          <h3 className="text-sm font-display font-bold uppercase tracking-widest text-muted mb-4 flex items-center gap-2">
             <TrendingUp className="w-4 h-4" />
             Rep Progress
           </h3>
@@ -124,10 +124,10 @@ export function PerformancePanel({ analytics, repProgress, actions }: Props) {
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.2, ease: "easeOut" }}
-          className="bg-white/50 backdrop-blur-2xl border border-white/50 shadow-xl shadow-black/5 rounded-3xl p-6 flex-1 hover:shadow-2xl transition-all duration-300 relative overflow-hidden"
+          className="bg-white/60 backdrop-blur-2xl border border-white/40 shadow-xl shadow-black/5 rounded-3xl p-6 flex-1 hover:shadow-2xl transition-all duration-300 relative overflow-hidden"
         >
           <div className="absolute top-0 right-0 w-32 h-32 bg-accent/5 rounded-bl-full pointer-events-none" />
-          <h3 className="text-sm font-bold uppercase tracking-widest text-muted mb-4 relative z-10">
+          <h3 className="text-sm font-display font-bold uppercase tracking-widest text-muted mb-4 relative z-10">
             Recent Actions
           </h3>
           <ul className="flex flex-col gap-2 relative z-10">

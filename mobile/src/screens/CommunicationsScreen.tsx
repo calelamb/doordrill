@@ -24,7 +24,7 @@ export function CommunicationsScreen({ navigation }: Props) {
   };
 
   return (
-    <LinearGradient colors={["#FDFDFD", "#F7F4EE", "#EBE5D9"]} style={styles.container}>
+    <LinearGradient colors={["#FBF9F5", "#EFEEEA", "#E4E2DE"]} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.content}>
           <View style={styles.headerRow}>
@@ -189,7 +189,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   newBadgeText: {
-    color: "#15803d",
+    color: "#2D5A3D",
     fontSize: 10,
     fontWeight: "800",
     letterSpacing: 0.5,

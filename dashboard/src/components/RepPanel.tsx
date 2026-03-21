@@ -267,13 +267,13 @@ export function RepPanel() {
       <motion.header
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
-        className="bg-white/40 backdrop-blur-2xl border border-white/30 shadow-xl shadow-black/5 rounded-2xl p-6 flex items-center justify-between"
+        className="bg-white/60 backdrop-blur-2xl border border-white/40 shadow-xl shadow-black/5 rounded-3xl p-6 flex items-center justify-between"
       >
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center">
             <Radio className="w-5 h-5 text-accent" />
           </div>
-          <h1 className="text-xl font-bold tracking-tight text-ink">DoorDrill Rep Console</h1>
+          <h1 className="text-xl font-display font-bold tracking-tight text-ink">DoorDrill Rep Console</h1>
         </div>
         <div className="flex items-center gap-3">
           <div className="relative">
@@ -317,11 +317,11 @@ export function RepPanel() {
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-white/40 backdrop-blur-2xl border border-white/30 shadow-xl shadow-black/5 rounded-2xl p-6"
+          className="bg-white/60 backdrop-blur-2xl border border-white/40 shadow-xl shadow-black/5 rounded-3xl p-6"
         >
           <div className="flex items-center gap-2 mb-4">
             <ClipboardList className="w-4.5 h-4.5 text-accent" />
-            <h2 className="text-base font-semibold tracking-tight text-ink">Assignments</h2>
+            <h2 className="text-base font-display font-bold tracking-tight text-ink">Assignments</h2>
           </div>
           <ul className="space-y-2">
             {assignments.length === 0 ? (
@@ -352,11 +352,11 @@ export function RepPanel() {
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-white/40 backdrop-blur-2xl border border-white/30 shadow-xl shadow-black/5 rounded-2xl p-6"
+          className="bg-white/60 backdrop-blur-2xl border border-white/40 shadow-xl shadow-black/5 rounded-3xl p-6"
         >
           <div className="flex items-center gap-2 mb-4">
             <Activity className="w-4.5 h-4.5 text-accent" />
-            <h2 className="text-base font-semibold tracking-tight text-ink">Latest Session</h2>
+            <h2 className="text-base font-display font-bold tracking-tight text-ink">Latest Session</h2>
           </div>
           {!activeSession ? (
             <p className="text-muted text-sm py-4 text-center">Start a session to load feedback.</p>
@@ -391,13 +391,13 @@ export function RepPanel() {
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-white/40 backdrop-blur-2xl border border-white/30 shadow-xl shadow-black/5 rounded-2xl p-6 space-y-5"
+          className="bg-white/60 backdrop-blur-2xl border border-white/40 shadow-xl shadow-black/5 rounded-3xl p-6 space-y-5"
         >
           {/* Console Header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Mic className="w-4.5 h-4.5 text-accent" />
-              <h2 className="text-base font-semibold tracking-tight text-ink">Live Drill Console</h2>
+              <h2 className="text-base font-display font-bold tracking-tight text-ink">Live Drill Console</h2>
             </div>
             <span className="flex items-center gap-2 text-xs font-medium rounded-full px-3 py-1 bg-white/50 border border-white/30">
               <span
@@ -485,11 +485,11 @@ export function RepPanel() {
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-white/40 backdrop-blur-2xl border border-white/30 shadow-xl shadow-black/5 rounded-2xl p-6"
+          className="bg-white/60 backdrop-blur-2xl border border-white/40 shadow-xl shadow-black/5 rounded-3xl p-6"
         >
           <div className="flex items-center gap-2 mb-4">
             <MessageCircle className="w-4.5 h-4.5 text-accent" />
-            <h2 className="text-base font-semibold tracking-tight text-ink">Live Event Stream</h2>
+            <h2 className="text-base font-display font-bold tracking-tight text-ink">Live Event Stream</h2>
           </div>
           <ul className="space-y-1 max-h-[28rem] overflow-y-auto pr-1">
             {liveEvents.length === 0 ? (

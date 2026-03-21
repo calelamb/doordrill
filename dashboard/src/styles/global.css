@@ -1,16 +1,22 @@
 @import "tailwindcss";
 
 @theme {
-  --color-background: #e6e3dd;
+  --font-sans: "Inter", sans-serif;
+  --font-display: "Manrope", sans-serif;
+  
+  --color-background: #fbf9f5;
   --color-surface: rgba(255, 255, 255, 0.85);
   --color-surface-solid: #ffffff;
   --color-ink: #1a2e1a;
   --color-muted: #5a6e5a;
+  
   --color-accent: #2d5a3d;
-  --color-accent-hover: #1f4a2e;
+  --color-accent-hover: #144227;
   --color-accent-soft: #d4e6d4;
-  --color-border: rgba(45, 90, 61, 0.20);
-  --color-border-strong: rgba(45, 90, 61, 0.35);
+  
+  --color-border: rgba(45, 90, 61, 0.15);
+  --color-border-strong: rgba(45, 90, 61, 0.25);
+  
   --color-error: #b5331e;
   --color-rep: #2d5a3d;
   --color-ai: #8b6914;
@@ -22,9 +28,9 @@
 
 body {
   margin: 0;
-  font-family: "Avenir Next", "Poppins", "Segoe UI", sans-serif;
-  background: #eae7e0;
-  color: #1a2e1a;
+  font-family: var(--font-sans);
+  background: var(--color-background);
+  color: var(--color-ink);
   min-height: 100vh;
   position: relative;
   overflow-x: hidden;
@@ -37,11 +43,11 @@ body::before {
   inset: 0;
   z-index: -2;
   background:
-    radial-gradient(ellipse 80% 60% at 10% 10%, rgba(45, 90, 61, 0.15) 0%, transparent 60%),
-    radial-gradient(ellipse 60% 80% at 85% 20%, rgba(212, 230, 212, 0.5) 0%, transparent 55%),
-    radial-gradient(ellipse 70% 50% at 50% 80%, rgba(45, 90, 61, 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse 40% 40% at 30% 50%, rgba(139, 105, 20, 0.06) 0%, transparent 50%),
-    linear-gradient(160deg, #f0ede6 0%, #e8e4db 30%, #dfe8df 60%, #eae7e0 100%);
+    radial-gradient(ellipse 80% 60% at 10% 10%, rgba(45, 90, 61, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 80% at 85% 20%, rgba(212, 230, 212, 0.3) 0%, transparent 55%),
+    radial-gradient(ellipse 70% 50% at 50% 80%, rgba(45, 90, 61, 0.04) 0%, transparent 50%),
+    radial-gradient(ellipse 40% 40% at 30% 50%, rgba(139, 105, 20, 0.04) 0%, transparent 50%),
+    linear-gradient(160deg, #FDFDFD 0%, #F7F4EE 30%, #F0EDE6 60%, #EBE5D9 100%);
 }
 
 /* Floating accent orb – top right */

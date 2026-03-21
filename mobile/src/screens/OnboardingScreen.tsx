@@ -79,12 +79,12 @@ function OnboardingSlide({ slide, index, total, onNext, onSkip }: OnboardingSlid
       </Pressable>
 
       <Animated.View entering={FadeInDown.delay(40).duration(320)} style={styles.brandPill}>
-        <TreePine color="#166534" size={16} strokeWidth={2.5} />
+        <TreePine color="#144227" size={16} strokeWidth={2.5} />
         <Text style={styles.brandPillText}>DoorDrill</Text>
       </Animated.View>
 
       <Animated.View entering={FadeIn.delay(80).duration(320)} style={styles.slideIconShell}>
-        <Icon color="#166534" size={38} strokeWidth={2.4} />
+        <Icon color="#144227" size={38} strokeWidth={2.4} />
       </Animated.View>
 
       <Animated.Text entering={FadeInDown.delay(120).duration(320)} style={styles.slideTitle}>
@@ -177,7 +177,7 @@ export function OnboardingScreen({ onComplete }: OnboardingScreenProps) {
               style={styles.permissionCard}
             >
               <View style={styles.permissionIconShell}>
-                <Bell color="#166534" size={40} strokeWidth={2.3} />
+                <Bell color="#144227" size={40} strokeWidth={2.3} />
               </View>
               <Text style={styles.permissionTitle}>Stay in the loop</Text>
               <Text style={styles.permissionBody}>
@@ -329,7 +329,7 @@ const styles = StyleSheet.create({
   },
   dotActive: {
     width: 26,
-    backgroundColor: "#166534",
+    backgroundColor: "#144227",
   },
   dotInactive: {
     width: 10,
@@ -339,10 +339,10 @@ const styles = StyleSheet.create({
     width: "100%",
     height: 58,
     borderRadius: 18,
-    backgroundColor: "#166534",
+    backgroundColor: "#144227",
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#166534",
+    shadowColor: "#144227",
     shadowOffset: { width: 0, height: 10 },
     shadowOpacity: 0.24,
     shadowRadius: 18,
