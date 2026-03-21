@@ -89,6 +89,16 @@ class Settings(BaseSettings):
     provider_timeout_seconds: float = Field(default=10.0, alias="PROVIDER_TIMEOUT_SECONDS")
     grading_timeout_seconds: float = Field(default=20.0, alias="GRADING_TIMEOUT_SECONDS")
 
+    # AssemblyAI
+    assemblyai_api_key: str | None = Field(default=None, alias="ASSEMBLYAI_API_KEY")
+
+    # Transcript repair
+    transcript_repair_enabled: bool = Field(default=True, alias="TRANSCRIPT_REPAIR_ENABLED")
+    transcript_repair_model: str = Field(default="gpt-4o-mini", alias="TRANSCRIPT_REPAIR_MODEL")
+
+    # Response quality gate
+    response_quality_gate_enabled: bool = Field(default=True, alias="RESPONSE_QUALITY_GATE_ENABLED")
+
     use_celery: bool = Field(default=False, alias="USE_CELERY")
     celery_broker_url: str = Field(default="redis://localhost:6379/0", alias="CELERY_BROKER_URL")
     celery_result_backend: str = Field(default="redis://localhost:6379/1", alias="CELERY_RESULT_BACKEND")

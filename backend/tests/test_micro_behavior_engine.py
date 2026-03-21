@@ -1,7 +1,7 @@
 from app.services.micro_behavior_engine import HESITATION_VARIANTS, ConversationalMicroBehaviorEngine
 
 
-def test_hesitation_and_filler_are_injected_for_skeptical_response():
+def test_hesitation_metadata_present_for_skeptical_response():
     engine = ConversationalMicroBehaviorEngine()
     engine.initialize_session("session-1", persona={"attitude": "skeptical"})
 
@@ -14,7 +14,7 @@ def test_hesitation_and_filler_are_injected_for_skeptical_response():
         active_objections=["incumbent_provider"],
     )
 
-    assert any(plan.transformed_text.startswith(variant) for variant in HESITATION_VARIANTS["skeptical"])
+    assert plan.transformed_text == "I am not sure that changing providers makes sense for us right now."
     assert any(behavior == "hesitation_mode" for behavior in plan.behaviors)
     assert any("tone:" in behavior for behavior in plan.behaviors)
     assert 300 <= plan.pause_profile["opening_pause_ms"] <= 450
@@ -38,6 +38,7 @@ def test_interruptive_behavior_is_used_when_homeowner_is_hostile():
     assert any(behavior == "homeowner_cuts_off_rep" for behavior in plan.behaviors)
     assert plan.tone in {"cutting", "confrontational", "sharp"}
     assert plan.sentence_length == "short"
+    assert plan.transformed_text == "We already have someone for that and we are not switching."
 
 
 def test_sentence_length_and_pause_profiles_vary_by_emotion():
@@ -76,7 +77,7 @@ def test_sentence_length_and_pause_profiles_vary_by_emotion():
     assert hostile_plan.pause_profile["opening_pause_ms"] < 100
 
 
-def test_recent_variants_are_not_reused_immediately():
+def test_transformed_text_is_always_equal_to_input():
     engine = ConversationalMicroBehaviorEngine()
     engine.initialize_session("session-4", persona={"attitude": "neutral"})
 
@@ -97,58 +98,63 @@ def test_recent_variants_are_not_reused_immediately():
         active_objections=["trust"],
     )
 
-    assert first.transformed_text != second.transformed_text
+    assert first.transformed_text == "I need a minute to think about that because it is new to me."
+    assert second.transformed_text == "I need a minute to think about that because it is new to me."
 
 
-def test_curious_turns_do_not_use_hesitation_openers():
-    engine = ConversationalMicroBehaviorEngine()
-    engine.initialize_session("session-curious", persona={"attitude": "curious"})
+class TestMetadataOnlyBehavior:
+    def test_transformed_text_equals_input(self):
+        engine = ConversationalMicroBehaviorEngine()
+        engine.initialize_session("test-session", persona={})
+        plan = engine.apply_to_response(
+            session_id="test-session",
+            raw_text="I already have a pest control company.",
+            emotion_before="neutral",
+            emotion_after="skeptical",
+            behavioral_signals=[],
+            active_objections=["incumbent_provider"],
+        )
+        assert plan.transformed_text == "I already have a pest control company."
 
-    plan = engine.apply_to_response(
-        session_id="session-curious",
-        raw_text="What would the process look like if we actually switched over next month?",
-        emotion_before="neutral",
-        emotion_after="curious",
-        behavioral_signals=["neutral_delivery", "acknowledges_concern"],
-        active_objections=["timing"],
-    )
+    def test_no_fillers_injected(self):
+        engine = ConversationalMicroBehaviorEngine()
+        engine.initialize_session("test-session", persona={})
+        plan = engine.apply_to_response(
+            session_id="test-session",
+            raw_text="That seems expensive.",
+            emotion_before="skeptical",
+            emotion_after="annoyed",
+            behavioral_signals=[],
+            active_objections=["price"],
+        )
+        assert plan.transformed_text == "That seems expensive."
 
-    assert not any(plan.transformed_text.startswith(variant) for variant in HESITATION_VARIANTS["curious"])
+    def test_no_sentence_truncation(self):
+        engine = ConversationalMicroBehaviorEngine()
+        engine.initialize_session("test-session", persona={})
+        plan = engine.apply_to_response(
+            session_id="test-session",
+            raw_text="I don't think so, we already have someone who comes out.",
+            emotion_before="annoyed",
+            emotion_after="annoyed",
+            behavioral_signals=[],
+            active_objections=[],
+        )
+        assert plan.transformed_text == "I don't think so, we already have someone who comes out."
 
-
-def test_trailing_off_is_blocked_when_filler_or_interruption_is_present():
-    engine = ConversationalMicroBehaviorEngine()
-
-    assert engine._should_trail_off(
-        session_id="session-trailing",
-        emotion_after="skeptical",
-        sentence_length="medium",
-        turn_count=1,
-        interruption_type=None,
-        filler_used=True,
-    ) is False
-    assert engine._should_trail_off(
-        session_id="session-trailing",
-        emotion_after="skeptical",
-        sentence_length="medium",
-        turn_count=1,
-        interruption_type="homeowner_cuts_off_rep",
-        filler_used=False,
-    ) is False
-
-
-def test_short_turns_stay_single_segment_even_with_hesitation():
-    engine = ConversationalMicroBehaviorEngine()
-    engine.initialize_session("session-short", persona={"attitude": "skeptical"})
-
-    plan = engine.apply_to_response(
-        session_id="session-short",
-        raw_text="I need to think about that first.",
-        emotion_before="neutral",
-        emotion_after="skeptical",
-        behavioral_signals=["neutral_delivery"],
-        active_objections=["price"],
-    )
-
-    assert plan.sentence_length == "short"
-    assert len(plan.segments) == 1
+    def test_still_produces_metadata(self):
+        engine = ConversationalMicroBehaviorEngine()
+        engine.initialize_session("test-session", persona={})
+        plan = engine.apply_to_response(
+            session_id="test-session",
+            raw_text="What kind of treatment do you use?",
+            emotion_before="curious",
+            emotion_after="curious",
+            behavioral_signals=[],
+            active_objections=[],
+        )
+        assert plan.tone is not None
+        assert plan.sentence_length is not None
+        assert len(plan.segments) > 0
+        assert plan.segments[0].pause_before_ms >= 0
+        assert plan.segments[0].tone is not None

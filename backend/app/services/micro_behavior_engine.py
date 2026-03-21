@@ -197,7 +197,7 @@ class MicroBehaviorPlan:
 
 
 class ConversationalMicroBehaviorEngine:
-    """Injects hesitation, filler, pause, and tone behavior between LLM output and TTS."""
+    """Computes TTS metadata (tone, pauses, segments) from LLM output. Does not modify text."""
 
     def __init__(self) -> None:
         self._states: dict[str, MicroBehaviorSessionState] = {}
@@ -228,58 +228,10 @@ class ConversationalMicroBehaviorEngine:
         base_text = self._normalize_text(raw_text)
         tone = self._determine_tone(emotion_before, emotion_after, behavioral_signals)
         sentence_length = self._determine_sentence_length(emotion_after, behavioral_signals, base_text)
-        trimmed_text = self._apply_sentence_length(base_text, sentence_length, active_objections=active_objections)
 
         interruption_type: str | None = None
         if self._should_interrupt(emotion_after, behavioral_signals):
             interruption_type = "homeowner_cuts_off_rep"
-            opener = self._pick_variant(
-                session_id,
-                f"interrupt:{emotion_after}:{state.turn_count}",
-                INTERRUPTION_VARIANTS.get(emotion_after, INTERRUPTION_VARIANTS["annoyed"]),
-                state.recent_interruptions,
-            )
-            trimmed_text = f"{opener} {trimmed_text}".strip()
-            self._remember(state.recent_interruptions, opener)
-
-        if self._should_hesitate(emotion_after, behavioral_signals, trimmed_text):
-            hesitation = self._pick_variant(
-                session_id,
-                f"hesitation:{emotion_after}:{state.turn_count}",
-                HESITATION_VARIANTS.get(emotion_after, HESITATION_VARIANTS["neutral"]),
-                state.recent_hesitations,
-            )
-            trimmed_text = f"{hesitation} {trimmed_text}".strip()
-            self._remember(state.recent_hesitations, hesitation)
-
-        filler_used = False
-        if self._should_use_filler(emotion_after, behavioral_signals, trimmed_text):
-            filler = self._pick_variant(
-                session_id,
-                f"filler:{emotion_after}:{state.turn_count}",
-                FILLER_VARIANTS.get(emotion_after, FILLER_VARIANTS["neutral"]),
-                state.recent_fillers,
-            )
-            trimmed_text = self._insert_filler(trimmed_text, filler)
-            self._remember(state.recent_fillers, filler)
-            filler_used = True
-
-        if self._should_trail_off(
-            session_id=session_id,
-            emotion_after=emotion_after,
-            sentence_length=sentence_length,
-            turn_count=state.turn_count,
-            interruption_type=interruption_type,
-            filler_used=filler_used,
-        ):
-            trailing_variant = self._pick_variant(
-                session_id,
-                f"trailing:{emotion_after}:{state.turn_count}",
-                TRAILING_OFF_VARIANTS.get(emotion_after, TRAILING_OFF_VARIANTS["skeptical"]),
-                state.recent_trailing_offs,
-            )
-            trimmed_text = self._apply_trailing_off(trimmed_text, trailing_variant)
-            self._remember(state.recent_trailing_offs, trailing_variant)
 
         behaviors = self._derive_behaviors(
             emotion_before=emotion_before,
@@ -291,7 +243,7 @@ class ConversationalMicroBehaviorEngine:
             tone=tone,
         )
         segments = self._segment_text(
-            trimmed_text,
+            base_text,
             tone=tone,
             behaviors=behaviors,
             sentence_length=sentence_length,
@@ -310,7 +262,7 @@ class ConversationalMicroBehaviorEngine:
         self._remember(state.recent_tones, tone)
 
         return MicroBehaviorPlan(
-            transformed_text=trimmed_text,
+            transformed_text=base_text,
             tone=tone,
             sentence_length=sentence_length,
             interruption_type=interruption_type,
@@ -345,19 +297,9 @@ class ConversationalMicroBehaviorEngine:
             return "long"
         return preferred
 
-    def _apply_sentence_length(self, text: str, sentence_length: str, *, active_objections: list[str]) -> str:
-        sentences = self._split_sentences(text)
-        if not sentences:
-            return text
-        if sentence_length == "short":
-            sentence = self._best_semantic_sentence(sentences, active_objections=active_objections) or sentences[0]
-            if "," in sentence:
-                sentence = sentence.split(",", 1)[0].strip()
-            return sentence.rstrip(".!?") + "."
-        if sentence_length == "medium":
-            selected = self._select_semantic_sentences(sentences, limit=2, active_objections=active_objections)
-            return " ".join(selected).strip()
-        return " ".join(sentences).strip()
+    def _apply_sentence_length(self, text: str, sentence_length: str, *, active_objections: list[str] | None = None) -> str:
+        # No-op: sentence length is metadata only; text is not modified.
+        return text
 
     def _best_semantic_sentence(self, sentences: list[str], *, active_objections: list[str]) -> str | None:
         if not sentences:
@@ -448,19 +390,8 @@ class ConversationalMicroBehaviorEngine:
         return (int(digest[:8], 16) % 10) < 3
 
     def _insert_filler(self, text: str, filler: str) -> str:
-        sentences = self._split_sentences(text)
-        if not sentences:
-            return text
-        first = sentences[0]
-        if len(first.split()) <= 5:
-            sentences[0] = f"{filler}, {first[0].lower() + first[1:] if len(first) > 1 else first.lower()}"
-        else:
-            words = first.split()
-            insert_at = min(3, len(words))
-            words.insert(insert_at, f"{filler},")
-            sentences[0] = " ".join(words)
-        updated = " ".join(sentences).strip()
-        return updated[0].upper() + updated[1:] if updated else updated
+        # No-op: filler injection is no longer performed; the LLM owns all language choices.
+        return text
 
     def _apply_trailing_off(self, text: str, trailing_variant: str) -> str:
         sentences = self._split_sentences(text)

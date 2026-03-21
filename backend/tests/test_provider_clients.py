@@ -529,3 +529,23 @@ def test_json_router_allows_explicit_mock_opt_in():
 
     assert result.provider == "mock"
     assert result.status == "mock"
+
+
+class TestExpandedHistoryWindow:
+    @pytest.mark.asyncio
+    async def test_history_retains_24_turns(self):
+        from app.services.provider_clients import _TaskConversationHistoryMixin
+
+        class TestClient(_TaskConversationHistoryMixin):
+            pass
+
+        client = TestClient()
+        client.set_session("test-session")
+
+        # Add 30 exchanges — note: _remember_exchange uses keyword-only args
+        for i in range(30):
+            client._remember_exchange(user_text=f"user message {i}", assistant_text=f"assistant response {i}")
+
+        history = client._history_for_current_task()
+        # Should retain 24, not 12
+        assert len(history) == 24
