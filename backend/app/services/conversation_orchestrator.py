@@ -554,13 +554,19 @@ class HomeownerPersona:
     pest_history: list[str] = field(default_factory=list)
     price_sensitivity: str | None = None
     communication_style: str | None = None
+    # Life details for natural responses
+    at_home_reason: str | None = None
+    last_salesperson_experience: str | None = None
+    specific_memory: str | None = None
+    current_mood_reason: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "HomeownerPersona":
         # Accepted scenario.persona keys:
         # name, attitude, concerns, objection_queue, objections, buy_likelihood,
         # softening_condition, household_type, home_ownership_years, pest_history,
-        # price_sensitivity, communication_style.
+        # price_sensitivity, communication_style, at_home_reason,
+        # last_salesperson_experience, specific_memory, current_mood_reason.
         data = payload or {}
         objections = data.get("objection_queue") or data.get("objections") or []
         concerns = data.get("concerns") or []
@@ -587,6 +593,10 @@ class HomeownerPersona:
             pest_history=[str(item) for item in pest_history if str(item).strip()],
             price_sensitivity=str(data.get("price_sensitivity")).strip().lower() if data.get("price_sensitivity") else None,
             communication_style=str(data.get("communication_style")).strip().lower() if data.get("communication_style") else None,
+            at_home_reason=str(data.get("at_home_reason")).strip() if data.get("at_home_reason") else None,
+            last_salesperson_experience=str(data.get("last_salesperson_experience")).strip() if data.get("last_salesperson_experience") else None,
+            specific_memory=str(data.get("specific_memory")).strip() if data.get("specific_memory") else None,
+            current_mood_reason=str(data.get("current_mood_reason")).strip() if data.get("current_mood_reason") else None,
         )
 
 
@@ -619,6 +629,42 @@ class ConversationTurnRecord:
 
 
 class PersonaEnricher:
+    _AT_HOME_REASON: dict[str, list[str]] = {
+        "family with kids": ["stay-at-home parent", "working from home today", "kids are at school so catching up on things"],
+        "retired couple": ["retired, home most days", "enjoying the morning at home"],
+        "single homeowner": ["day off work", "working from home", "just got back from errands"],
+    }
+    _AT_HOME_DEFAULT: list[str] = ["at home today", "just around the house"]
+
+    _SALESPERSON_EXPERIENCE: dict[int, list[str]] = {
+        1: ["doesn't get many solicitors", "hasn't had anyone knock in a while"],
+        2: ["occasionally gets door-to-door salespeople", "had a lawn care guy come by last month"],
+        3: ["gets salespeople every few weeks", "had a solar company knock last week"],
+        4: ["getting tired of constant solicitors", "had a pushy solar guy last week who wouldn't leave"],
+        5: ["fed up with door-to-door salespeople", "last one was rude and wouldn't take no for an answer"],
+    }
+
+    _MEMORY_TEMPLATES: list[str] = [
+        "neighbor {name} had {pest} last year and it cost around ${cost}",
+        "saw a {pest} in the {room} {timeframe}",
+        "read something online about {pest} in this area recently",
+        "friend mentioned they use {company} and it's been fine",
+    ]
+    _MEMORY_NAMES: list[str] = ["Bob", "Karen", "Dave", "Maria", "Jim", "Susan"]
+    _MEMORY_PESTS: list[str] = ["termites", "roaches", "ants", "mice", "spiders"]
+    _MEMORY_ROOMS: list[str] = ["garage", "kitchen", "basement", "backyard", "bathroom"]
+    _MEMORY_TIMEFRAMES: list[str] = ["last month", "a few weeks ago", "last summer"]
+    _MEMORY_COSTS: list[str] = ["1,500", "2,000", "3,000", "800", "4,500"]
+    _MEMORY_COMPANIES: list[str] = ["Orkin", "Terminix", "a local company", "some pest company"]
+
+    _MOOD_REASON: dict[int, list[str]] = {
+        1: ["relaxing at home", "just finished lunch", "was reading in the living room"],
+        2: ["in the middle of something but not urgent", "was tidying up the house"],
+        3: ["working on a project around the house", "was about to make a phone call"],
+        4: ["in the middle of making lunch", "about to leave for an errand"],
+        5: ["dealing with a stressful day", "was on an important phone call"],
+    }
+
     @classmethod
     def enrich(
         cls,
@@ -640,6 +686,17 @@ class PersonaEnricher:
             updates["price_sensitivity"] = cls._default_price_sensitivity(normalized_difficulty)
         if persona.communication_style is None:
             updates["communication_style"] = cls._default_communication_style(persona, normalized_difficulty, description)
+
+        # Life detail enrichment
+        resolved_household = updates.get("household_type") or persona.household_type or "homeowner"
+        if persona.at_home_reason is None:
+            updates["at_home_reason"] = cls._default_at_home_reason(persona, normalized_difficulty, resolved_household)
+        if persona.last_salesperson_experience is None:
+            updates["last_salesperson_experience"] = cls._default_last_salesperson_experience(persona, normalized_difficulty)
+        if persona.specific_memory is None:
+            updates["specific_memory"] = cls._default_specific_memory(persona, normalized_difficulty)
+        if persona.current_mood_reason is None:
+            updates["current_mood_reason"] = cls._default_current_mood_reason(persona, normalized_difficulty)
 
         if not updates:
             return replace(persona, pest_history=list(persona.pest_history))
@@ -699,6 +756,37 @@ class PersonaEnricher:
             if keyword in description:
                 return keyword
         return "pest"
+
+    @classmethod
+    def _default_at_home_reason(cls, persona: HomeownerPersona, difficulty: int, household_type: str) -> str:
+        options = cls._AT_HOME_REASON.get(household_type, cls._AT_HOME_DEFAULT)
+        idx = hash(persona.name + str(difficulty)) % len(options)
+        return options[idx]
+
+    @classmethod
+    def _default_last_salesperson_experience(cls, persona: HomeownerPersona, difficulty: int) -> str:
+        options = cls._SALESPERSON_EXPERIENCE.get(difficulty, cls._SALESPERSON_EXPERIENCE[3])
+        idx = hash(persona.name + str(difficulty)) % len(options)
+        return options[idx]
+
+    @classmethod
+    def _default_specific_memory(cls, persona: HomeownerPersona, difficulty: int) -> str:
+        seed = hash(persona.name + str(difficulty))
+        template = cls._MEMORY_TEMPLATES[seed % len(cls._MEMORY_TEMPLATES)]
+        return template.format(
+            name=cls._MEMORY_NAMES[seed % len(cls._MEMORY_NAMES)],
+            pest=cls._MEMORY_PESTS[seed % len(cls._MEMORY_PESTS)],
+            room=cls._MEMORY_ROOMS[seed % len(cls._MEMORY_ROOMS)],
+            timeframe=cls._MEMORY_TIMEFRAMES[seed % len(cls._MEMORY_TIMEFRAMES)],
+            cost=cls._MEMORY_COSTS[seed % len(cls._MEMORY_COSTS)],
+            company=cls._MEMORY_COMPANIES[seed % len(cls._MEMORY_COMPANIES)],
+        )
+
+    @classmethod
+    def _default_current_mood_reason(cls, persona: HomeownerPersona, difficulty: int) -> str:
+        options = cls._MOOD_REASON.get(difficulty, cls._MOOD_REASON[3])
+        idx = hash(persona.name + str(difficulty)) % len(options)
+        return options[idx]
 
 
 @dataclass
@@ -1305,6 +1393,24 @@ class PromptBuilder:
         "ended": "ENDED",
     }
 
+    EMOTION_LENGTH_GUIDANCE = {
+        "hostile": "You want this over. A few sharp words, maybe a sentence.",
+        "annoyed": "Keep it short and impatient. One sentence, maybe two if you're making a point.",
+        "skeptical": "You're testing them. A pointed question or a short challenge.",
+        "neutral": "Polite but measured. A sentence or two.",
+        "curious": "You're engaging now. Ask a real question or share a thought.",
+        "interested": "You're warming up. You might think out loud for a couple sentences.",
+    }
+
+    DELIVERY_DIRECTION = {
+        "hostile": "Delivery: direct and cutting -- no pleasantries, you want them gone.",
+        "annoyed": "Delivery: impatient and clipped -- you have better things to do.",
+        "skeptical": "Delivery: guarded and probing -- you're looking for holes in what they say.",
+        "neutral": "Delivery: measured and reserved -- neither warm nor cold.",
+        "curious": "Delivery: open but cautious -- you're interested but not sold.",
+        "interested": "Delivery: warm and engaged -- you might hesitate or think aloud naturally.",
+    }
+
     def __init__(self) -> None:
         self.last_token_count = 0
 
@@ -1363,6 +1469,14 @@ class PromptBuilder:
             layer_two_lines.append(f"Price sensitivity: {persona.price_sensitivity}")
         if persona.communication_style:
             layer_two_lines.append(f"Communication style: {persona.communication_style} - respond accordingly.")
+        if persona.at_home_reason:
+            layer_two_lines.append(f"You are home because: {persona.at_home_reason}")
+        if persona.last_salesperson_experience:
+            layer_two_lines.append(f"Recent salesperson experience: {persona.last_salesperson_experience}")
+        if persona.specific_memory:
+            layer_two_lines.append(f"Something on your mind: {persona.specific_memory}")
+        if persona.current_mood_reason:
+            layer_two_lines.append(f"You were just: {persona.current_mood_reason}")
         layer_two = "\n".join(layer_two_lines)
 
         layer_two_b = None
@@ -1437,29 +1551,19 @@ class PromptBuilder:
         transition_hint = EMOTION_TRANSITION_HINTS.get(emotional_state, EMOTION_TRANSITION_HINTS["neutral"])
         posture_text = homeowner_posture or "reserved"
         fast_path_prompt = bool(response_plan.fast_path_prompt) if response_plan is not None else False
-        response_cap = self._response_cap_rule(canonical_stage)
         internal_rule = self._internal_thought_rule(canonical_stage)
-        sentence_rule = self._response_sentence_rule(behavior_directives)
-        hard_rule_sentence = self._hard_rule_sentence(behavior_directives)
-        response_plan_rule = (
-            "Answer the rep's latest point first, preserve any unresolved concern memory, ask one short clarification question if the transcript is ambiguous, and only introduce a new move if the response plan explicitly allows it."
-        )
-        hard_rule_parts = [f"RULE: {hard_rule_sentence}"]
-        if response_cap:
-            hard_rule_parts.append(response_cap)
-        hard_rule_parts.append("You are a busy homeowner at your front door. Be blunt and brief.")
-        hard_rule_parts.append(response_plan_rule)
-        hard_rule = " ".join(hard_rule_parts)
+        # Emotion-driven length guidance replaces hard word caps
+        length_guidance = self.EMOTION_LENGTH_GUIDANCE.get(emotional_state, self.EMOTION_LENGTH_GUIDANCE["neutral"])
+        delivery = self.DELIVERY_DIRECTION.get(emotional_state, self.DELIVERY_DIRECTION["neutral"])
         layer_zero = resolved_static_layers.get("layer_zero")
 
         layer_one_lines = [
             "LAYER 1 - IMMERSION CONTRACT",
             "You are a real homeowner in a live door-to-door roleplay.",
             "Never break character.",
-            sentence_rule,
+            f"Response length: {length_guidance}",
+            delivery,
         ]
-        if response_cap:
-            layer_one_lines.append(response_cap)
         layer_one_lines.extend(
             [
                 "React only to what the rep ACTUALLY says — not what you expect them to say.",
@@ -1657,7 +1761,6 @@ class PromptBuilder:
             parts.append(layer_five_fatigue)
         if layer_five:
             parts.append(layer_five)
-        parts.append(hard_rule)
         parts = self._enforce_prompt_budget(parts)
         prompt = "\n\n".join(parts)
         self.last_token_count = measure_prompt_tokens(prompt)

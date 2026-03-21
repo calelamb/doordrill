@@ -1,0 +1,69 @@
+{
+  "species": {
+    "terms": [
+      "German cockroach", "American cockroach", "brown recluse", "black widow",
+      "subterranean termite", "drywood termite", "carpenter ant", "fire ant",
+      "bed bug", "house mouse", "Norway rat", "roof rat", "silverfish",
+      "earwig", "centipede", "millipede", "brown marmorated stink bug",
+      "yellow jacket", "paper wasp", "mud dauber", "flea", "tick",
+      "mosquito", "gopher", "vole", "mole"
+    ],
+    "misrecognitions": {
+      "german watches": "German cockroaches",
+      "german coach": "German cockroach",
+      "german roach": "German cockroach",
+      "brown recuse": "brown recluse",
+      "brown reclusive": "brown recluse",
+      "sub terrain termite": "subterranean termite",
+      "sub terranean": "subterranean"
+    }
+  },
+  "chemicals": {
+    "terms": [
+      "bifenthrin", "fipronil", "permethrin", "cypermethrin", "deltamethrin",
+      "imidacloprid", "chlorfenapyr", "abamectin", "hydramethylnon",
+      "diatomaceous earth", "boric acid", "pyrethrin", "lambda-cyhalothrin",
+      "indoxacarb", "spinosad"
+    ],
+    "misrecognitions": {
+      "by fen thin": "bifenthrin",
+      "by fenthin": "bifenthrin",
+      "fiber nil": "fipronil",
+      "fipro nil": "fipronil",
+      "permit thin": "permethrin",
+      "siper method": "cypermethrin",
+      "delta method": "deltamethrin",
+      "diamondaceous": "diatomaceous"
+    }
+  },
+  "sales_jargon": {
+    "terms": [
+      "initial service", "quarterly service", "general pest",
+      "perimeter treatment", "interior treatment", "spot treatment",
+      "power spray", "granule treatment", "bait station",
+      "monitoring station", "exclusion work", "caulking", "sealing",
+      "de-webbing", "free inspection", "free estimate", "free quote",
+      "service agreement", "annual contract", "pest control plan",
+      "integrated pest management", "IPM"
+    ],
+    "misrecognitions": {
+      "parameter treatment": "perimeter treatment",
+      "premature treatment": "perimeter treatment",
+      "bay station": "bait station",
+      "bake station": "bait station",
+      "great station": "bait station",
+      "deep webbing": "de-webbing"
+    }
+  },
+  "common_companies": {
+    "terms": [
+      "Orkin", "Terminix", "Aptive", "ABC Home", "Truly Nolen",
+      "HomeTeam", "Massey", "Turner", "Bulwark", "Moxie"
+    ],
+    "misrecognitions": {
+      "or kin": "Orkin",
+      "term mix": "Terminix",
+      "apt of": "Aptive"
+    }
+  }
+}
