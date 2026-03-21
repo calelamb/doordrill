@@ -103,15 +103,48 @@ _NOISE_ONLY_TRANSCRIPTS: frozenset[str] = frozenset(
     }
 )
 TRANSCRIPT_WORD_RE = re.compile(r"\b[a-z0-9']+\b", re.IGNORECASE)
+REPLY_SENTENCE_RE = re.compile(r"[^.?!]+(?:[.?!]+|$)")
+REPLY_QUESTION_FAMILY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("selling", ("what are you selling", "what exactly are you selling", "what do you have", "what are you offering")),
+    ("relevance", ("what does that have to do with me", "what does that mean for me", "why are you telling me this")),
+    ("opener", ("what brings you by", "can i help you with something", "what's going on", "what do you need")),
+    ("price", ("what's this going to cost", "what will this cost", "how much is this", "what does it cost")),
+    ("listening", ("okay i'm listening", "alright i'm listening", "what else can you tell me")),
+)
+ANSWER_LEAD_WORDS = frozenset(
+    {
+        "yes",
+        "yeah",
+        "yep",
+        "no",
+        "nope",
+        "not",
+        "nah",
+        "just",
+        "mostly",
+        "usually",
+        "honestly",
+        "well",
+        "i",
+        "we",
+        "it",
+        "there",
+        "they",
+    }
+)
 
 
 @dataclass
 class SessionRuntimeState:
     _vad_end_pending: bool = False
     vad_finalize_task: asyncio.Task[None] | None = None
+    vad_interrupt_task: asyncio.Task[None] | None = None
     turn_latency: TurnLatencyRecord | None = None
     active_tts_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     barge_in_started_at: float | None = None
+    client_vad_speaking: bool = False
+    pending_primary_reply: bool = False
+    had_recent_interrupted_primary: bool = False
 
 
 HOMEOWNER_MAX_TOKENS = 100  # generous ceiling, prompt guides natural length
@@ -161,6 +194,100 @@ def check_response_relevance(rep_text: str, ai_response: str, emotion: str) -> s
         return "engaged"
 
     return "disconnected"
+
+
+def _split_reply_sentences(text: str) -> list[str]:
+    parts = [match.group(0).strip() for match in REPLY_SENTENCE_RE.finditer(text or "")]
+    return [part for part in parts if part]
+
+
+def _normalize_reply_sentence(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", (text or "").strip().lower())
+    normalized = re.sub(r"[^a-z0-9? ]+", "", normalized)
+    return normalized.strip()
+
+
+def _classify_reply_sentence_family(text: str) -> str | None:
+    normalized = _normalize_reply_sentence(text)
+    for family, variants in REPLY_QUESTION_FAMILY_PATTERNS:
+        if any(variant in normalized for variant in variants):
+            return family
+    return None
+
+
+def _reply_stage_allows_filler(stage: str) -> bool:
+    normalized = (stage or "").strip().lower()
+    if normalized in {"door_open", "door_knock", "initial_pitch", "ended"}:
+        return False
+    return "open" not in normalized and "pitch" not in normalized and normalized != "ended"
+
+
+def _rep_requires_direct_answer(rep_text: str) -> bool:
+    normalized = f" {(rep_text or '').strip().lower()} "
+    if "?" in normalized:
+        return True
+    return any(token in normalized for token in (" have you ", " do you ", " are you ", " did you ", " is it "))
+
+
+def _sentence_looks_like_direct_answer(sentence: str) -> bool:
+    normalized = _normalize_reply_sentence(sentence)
+    if not normalized:
+        return False
+    if "?" not in normalized:
+        return True
+    first_word = normalized.split(" ", 1)[0]
+    return first_word in ANSWER_LEAD_WORDS
+
+
+def _validate_and_clean_homeowner_reply(rep_text: str, ai_response: str, stage: str) -> tuple[str, list[str]]:
+    sentences = _split_reply_sentences(ai_response)
+    if not sentences:
+        return "", ["empty_reply"]
+
+    cleaned: list[str] = []
+    seen_sentences: set[str] = set()
+    seen_families: set[str] = set()
+    follow_up_questions = 0
+    issues: list[str] = []
+    stage_lower = (stage or "").strip().lower()
+
+    for sentence in sentences:
+        normalized = _normalize_reply_sentence(sentence)
+        if not normalized:
+            continue
+        if normalized in seen_sentences:
+            issues.append("repeated_sentence")
+            continue
+        seen_sentences.add(normalized)
+
+        family = _classify_reply_sentence_family(sentence)
+        if family is not None:
+            if family in seen_families:
+                issues.append(f"repeated_{family}")
+                continue
+            seen_families.add(family)
+            if family in {"selling", "relevance", "opener"} and stage_lower in {"considering", "close_attempt", "close_window"}:
+                issues.append("stage_reset")
+                continue
+
+        if normalized.endswith("?"):
+            follow_up_questions += 1
+            if follow_up_questions > 1:
+                issues.append("too_many_followups")
+                continue
+
+        cleaned.append(sentence.strip())
+
+    if not cleaned:
+        cleaned = [sentences[0].strip()]
+
+    if _rep_requires_direct_answer(rep_text) and cleaned and not _sentence_looks_like_direct_answer(cleaned[0]):
+        issues.append("did_not_answer_rep_first")
+
+    finalized = " ".join(cleaned).strip()
+    if not finalized:
+        finalized = sentences[0].strip()
+    return finalized, sorted(set(issues))
 
 
 def _dedupe_retrieved_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
@@ -502,6 +629,13 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             task.cancel()
         return task
 
+    def _cancel_vad_interrupt_task() -> asyncio.Task[None] | None:
+        task = runtime_state.vad_interrupt_task
+        runtime_state.vad_interrupt_task = None
+        if task is not None:
+            task.cancel()
+        return task
+
     async def _run_vad_finalize_debounce() -> None:
         try:
             debounce_ms = int(getattr(settings, "stt_vad_finalize_debounce_ms", VAD_FINALIZE_DEBOUNCE_MS) or VAD_FINALIZE_DEBOUNCE_MS)
@@ -515,6 +649,38 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         finally:
             if runtime_state.vad_finalize_task is asyncio.current_task():
                 runtime_state.vad_finalize_task = None
+
+    async def _emit_interrupt_state(state_name: str, *, reason: str, confirmed_at: datetime) -> None:
+        await emit_session_state(
+            {
+                "state": state_name,
+                "reason": reason,
+                "at": confirmed_at.isoformat(),
+            }
+        )
+
+    async def _schedule_vad_interrupt_confirmation(ts: datetime | None) -> None:
+        confirmed_at = ts or datetime.now(timezone.utc)
+        pending = _cancel_vad_interrupt_task()
+        if pending is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
+
+        async def _confirm() -> None:
+            try:
+                await asyncio.sleep(0.12)
+                if not ai_speaking or not runtime_state.client_vad_speaking:
+                    await _emit_interrupt_state("interrupt_ignored", reason="vad_speaking", confirmed_at=confirmed_at)
+                    return
+                if await set_interrupt("vad_speaking", confirmed_at):
+                    await _emit_interrupt_state("interrupt_confirmed", reason="vad_speaking", confirmed_at=confirmed_at)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                if runtime_state.vad_interrupt_task is asyncio.current_task():
+                    runtime_state.vad_interrupt_task = None
+
+        runtime_state.vad_interrupt_task = asyncio.create_task(_confirm())
 
     def _track_tts_task(task: asyncio.Task[None]) -> asyncio.Task[None]:
         runtime_state.active_tts_tasks.add(task)
@@ -578,14 +744,14 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             payload["details"] = details
         await emit_server_event("server.error", payload)
 
-    async def set_interrupt(reason: str, ts: datetime | None = None) -> None:
+    async def set_interrupt(reason: str, ts: datetime | None = None) -> bool:
         nonlocal interrupt_signal_at, interrupt_signal_reason
         if interrupt_signal_at is not None:
-            return
+            return False
         interrupt_signal_at = ts or datetime.now(timezone.utc)
         interrupt_signal_reason = reason
         if not ai_speaking:
-            return
+            return True
         for task in list(runtime_state.active_tts_tasks):
             task.cancel()
         runtime_state.active_tts_tasks.clear()
@@ -608,6 +774,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "trace_id": ws_trace_id,
             },
         )
+        return True
 
     def consume_interrupt() -> tuple[datetime | None, str | None]:
         nonlocal interrupt_signal_at, interrupt_signal_reason
@@ -708,6 +875,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         emotion_after: str,
         behavioral_signals: list[str],
         active_objections: list[str],
+        turn_kind: str = "primary",
     ) -> dict[str, Any]:
         nonlocal audio_frame_count, total_audio_duration_ms
         t0 = asyncio.get_event_loop().time()
@@ -722,13 +890,11 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "elapsed_ms": 0,
             },
         )
-        ai_text_parts: list[str] = []
         llm_started_at = datetime.now(timezone.utc)
         ai_started_at: datetime | None = None
         turn_audio_duration_ms = 0
         ai_interrupted = False
         last_behavior_plan: MicroBehaviorPlan | None = None
-        tts_tasks: list[asyncio.Task[None]] = []
         tts_emit_lock = asyncio.Lock()
         first_tts_audio_started = asyncio.Event()
         persona_voice_id = _persona_voice_id()
@@ -963,176 +1129,114 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     },
                 )
 
-        async def process_sentence(raw_sentence: str) -> None:
-            nonlocal ai_started_at, last_behavior_plan
-            sentence = raw_sentence.strip()
-            if not sentence:
-                return
-            record = runtime_state.turn_latency
-            if record is not None and record.first_sentence_ts is None:
-                record.first_sentence_ts = _monotonic_ts()
-            logger.info(
-                "process_sentence_called",
-                extra={
-                    "session_id": session_id,
-                    "sentence": sentence[:40],
-                    "elapsed_ms": _elapsed_ms(),
-                },
+        async def generate_reply_text(active_system_prompt: str) -> str:
+            nonlocal ai_interrupted
+            chunks: list[str] = []
+            try:
+                async for chunk in providers.llm.stream_reply(
+                    rep_text=prompt_text,
+                    stage=stage,
+                    system_prompt=active_system_prompt,
+                    max_tokens=HOMEOWNER_MAX_TOKENS,
+                ):
+                    if interrupt_signal_at is not None:
+                        ai_interrupted = True
+                        break
+                    if not chunk:
+                        continue
+                    record = runtime_state.turn_latency
+                    if record is not None and record.llm_first_token_ts is None:
+                        record.llm_first_token_ts = _monotonic_ts()
+                    chunks.append(str(chunk))
+            except Exception as exc:
+                await emit_error("llm_error", str(exc), retryable=True)
+                await maybe_flush()
+            return "".join(chunks).strip()
+
+        full_ai_text = await generate_reply_text(system_prompt)
+        validation_issues: list[str] = []
+        if full_ai_text and not ai_interrupted:
+            full_ai_text, validation_issues = _validate_and_clean_homeowner_reply(prompt_text, full_ai_text, stage)
+            relevance = check_response_relevance(prompt_text, full_ai_text, emotion_after)
+            should_retry = turn_kind == "primary" and settings.response_quality_gate_enabled and (
+                relevance == "disconnected"
+                or any(issue in {"did_not_answer_rep_first", "too_many_followups", "stage_reset"} for issue in validation_issues)
             )
-            plan = build_behavior_plan(sentence)
+            if should_retry:
+                logger.warning(
+                    "response_quality_gate_triggered",
+                    extra={
+                        "session_id": session_id,
+                        "rep_text": prompt_text,
+                        "ai_response": full_ai_text,
+                        "emotion": emotion_after,
+                        "issues": validation_issues,
+                    },
+                )
+                augmented_system = (
+                    f"{system_prompt}\n\n"
+                    f"CRITICAL: The rep just said: {prompt_text!r}. "
+                    "Respond to that exact utterance in the first sentence. "
+                    "Do not repeat the same challenge twice. "
+                    "Ask at most one follow-up question after the direct response. "
+                    "Do not reset to an earlier stage once you have moved to pricing or listening mode."
+                )
+                retry_text = await generate_reply_text(augmented_system)
+                if retry_text and not ai_interrupted:
+                    cleaned_retry, retry_issues = _validate_and_clean_homeowner_reply(prompt_text, retry_text, stage)
+                    if cleaned_retry:
+                        full_ai_text = cleaned_retry
+                        validation_issues = retry_issues
+
+        if full_ai_text and not ai_interrupted:
+            ai_started_at = datetime.now(timezone.utc)
+            plan = build_behavior_plan(full_ai_text)
             last_behavior_plan = plan
             orchestrator.update_last_mb_plan(session_id, plan)
             transformed_text = plan.transformed_text.strip()
-            if not transformed_text:
-                return
-
-            if ai_started_at is None:
-                ai_started_at = datetime.now(timezone.utc)
-
-            if ai_text_parts:
-                ai_text_parts.append(" ")
-            ai_text_parts.append(transformed_text)
-
-            await emit_server_event(
-                "server.ai.text.delta",
-                {
-                    "token": transformed_text,
-                    "provider": providers.llm.provider_name,
-                    "stage": stage,
-                    "trace_id": ws_trace_id,
-                    "micro_behavior": _serialize_micro_behavior(plan),
-                },
-            )
-            await maybe_flush()
-            if record is not None and record.tts_task_created_ts is None:
-                record.tts_task_created_ts = _monotonic_ts()
-            tts_tasks.append(_track_tts_task(asyncio.create_task(stream_tts_for_plan(plan))))
-            logger.info(
-                "tts_task_created",
-                extra={
-                    "session_id": session_id,
-                    "sentence": sentence[:40],
-                    "lock_locked": tts_emit_lock.locked(),
-                },
-            )
-
-        sentence_buffer = ""
-        try:
-            async for chunk in providers.llm.stream_reply(
-                rep_text=prompt_text,
-                stage=stage,
-                system_prompt=system_prompt,
-                max_tokens=HOMEOWNER_MAX_TOKENS,
-            ):
-                if interrupt_signal_at is not None:
-                    ai_interrupted = True
-                    break
-                if not chunk:
-                    continue
+            if transformed_text:
+                full_ai_text = transformed_text
                 record = runtime_state.turn_latency
-                if record is not None and record.llm_first_token_ts is None:
-                    record.llm_first_token_ts = _monotonic_ts()
-                sentence_buffer += str(chunk)
-                while True:
-                    match = re.search(r"[.?!](?:\s|$)", sentence_buffer)
-                    if match is not None:
-                        sentence = sentence_buffer[:match.end()].strip()
-                        sentence_buffer = sentence_buffer[match.end():].lstrip()
-                        await process_sentence(sentence)
-                        continue
-                    comma_match = re.search(r",\s+", sentence_buffer)
-                    if comma_match is not None and len(sentence_buffer[:comma_match.start()].split()) >= 7:
-                        sentence = sentence_buffer[:comma_match.end()].strip().rstrip(",")
-                        sentence_buffer = sentence_buffer[comma_match.end():].lstrip()
-                        await process_sentence(sentence)
-                        continue
-                    break
-        except Exception as exc:
-            await emit_error("llm_error", str(exc), retryable=True)
-            await maybe_flush()
-
-        if sentence_buffer.strip() and not ai_interrupted:
-            await process_sentence(sentence_buffer.strip())
-
-        full_ai_text = "".join(ai_text_parts).strip()
-        if (
-            settings.response_quality_gate_enabled
-            and full_ai_text
-            and len(tts_tasks) > 0
-            and not ai_interrupted
-        ):
-            relevance = check_response_relevance(prompt_text, full_ai_text, emotion_after)
-            if relevance == "disconnected":
-                # If single sentence and TTS already done, accept it — audio is already playing
-                if len(tts_tasks) == 1 and tts_tasks[0].done():
-                    logger.info("quality_gate_skipped_single_sentence", extra={
-                        "session_id": session_id, "ai_response": full_ai_text,
-                    })
-                else:
-                    logger.warning("response_quality_gate_triggered", extra={
-                        "session_id": session_id, "rep_text": prompt_text,
-                        "ai_response": full_ai_text, "emotion": emotion_after,
-                    })
-                    for task in tts_tasks:
-                        if not task.done():
-                            task.cancel()
-                    if tts_tasks:
-                        await asyncio.gather(*tts_tasks, return_exceptions=True)
-                    tts_tasks.clear()
-                    ai_text_parts.clear()
-
-                    augmented_system = (
-                        system_prompt + "\n\nCRITICAL: The rep just said: '"
-                        + prompt_text
-                        + "'. Your response MUST directly address what they said. "
-                        "React to their specific words, not to a generic pitch."
-                    )
-                    sentence_buffer = ""
-                    async for chunk in providers.llm.stream_reply(
-                        rep_text=prompt_text, stage=stage,
-                        system_prompt=augmented_system, max_tokens=HOMEOWNER_MAX_TOKENS,
-                    ):
-                        if interrupt_signal_at is not None:
-                            ai_interrupted = True
-                            break
-                        if not chunk:
-                            continue
-                        sentence_buffer += str(chunk)
-                        while True:
-                            match = re.search(r"[.?!](?:\s|$)", sentence_buffer)
-                            if match is None:
-                                break
-                            sentence = sentence_buffer[:match.end()].strip()
-                            sentence_buffer = sentence_buffer[match.end():]
-                            if sentence:
-                                await process_sentence(sentence)
-                    if sentence_buffer.strip() and not ai_interrupted:
-                        await process_sentence(sentence_buffer.strip())
-
-        logger.info(
-            "emitting_text_done",
-            extra={
-                "session_id": session_id,
-                "elapsed_ms": _elapsed_ms(),
-            },
-        )
-        await emit_server_event(
-            "server.ai.text.done",
-            {
-                "provider": providers.llm.provider_name,
-                "stage": stage,
-                "trace_id": ws_trace_id,
-            },
-        )
-        await maybe_flush()
-
-        if tts_tasks:
-            try:
-                await asyncio.gather(*tts_tasks)
-            except asyncio.CancelledError:
-                for task in tts_tasks:
-                    task.cancel()
-                await asyncio.gather(*tts_tasks, return_exceptions=True)
+                if record is not None and record.first_sentence_ts is None:
+                    record.first_sentence_ts = _monotonic_ts()
+                await emit_server_event(
+                    "server.ai.text.delta",
+                    {
+                        "token": transformed_text,
+                        "provider": providers.llm.provider_name,
+                        "stage": stage,
+                        "trace_id": ws_trace_id,
+                        "turn_kind": turn_kind,
+                        "validation_issues": validation_issues,
+                        "micro_behavior": _serialize_micro_behavior(plan),
+                    },
+                )
+                await maybe_flush()
+                logger.info(
+                    "emitting_text_done",
+                    extra={
+                        "session_id": session_id,
+                        "elapsed_ms": _elapsed_ms(),
+                        "turn_kind": turn_kind,
+                    },
+                )
+                await emit_server_event(
+                    "server.ai.text.done",
+                    {
+                        "provider": providers.llm.provider_name,
+                        "stage": stage,
+                        "trace_id": ws_trace_id,
+                        "turn_kind": turn_kind,
+                    },
+                )
+                await maybe_flush()
+                if record is not None and record.tts_task_created_ts is None:
+                    record.tts_task_created_ts = _monotonic_ts()
+                tts_task = _track_tts_task(asyncio.create_task(stream_tts_for_plan(plan)))
+                try:
+                    await tts_task
+                except asyncio.CancelledError:
+                    ai_interrupted = True
 
         if interrupt_signal_at is not None:
             ai_interrupted = True
@@ -1142,11 +1246,14 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             int(((datetime.now(timezone.utc)) - (ai_started_at or llm_started_at)).total_seconds() * 1000),
         )
         return {
-            "text": "".join(ai_text_parts).strip(),
+            "text": full_ai_text if first_tts_audio_started.is_set() else "",
             "started_at": ai_started_at,
             "duration_ms": duration_ms,
             "interrupted": ai_interrupted,
             "micro_behavior": _serialize_micro_behavior(last_behavior_plan) if last_behavior_plan is not None else None,
+            "audio_emitted": first_tts_audio_started.is_set(),
+            "validation_issues": validation_issues,
+            "turn_kind": "interrupted_partial" if ai_interrupted and first_tts_audio_started.is_set() else turn_kind,
         }
 
     async def _emit_clarification_response(*, stage: str, consecutive_count: int) -> dict[str, Any]:
@@ -1319,15 +1426,20 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
     async def maybe_emit_silence_filler() -> bool:
         nonlocal ai_speaking, ai_speaking_started_at, barge_in_count, filler_emitted_for_silence
-        if disconnected.is_set() or ai_speaking or not has_rep_audio or filler_emitted_for_silence:
+        if (
+            disconnected.is_set()
+            or ai_speaking
+            or not has_rep_audio
+            or filler_emitted_for_silence
+            or runtime_state.pending_primary_reply
+            or runtime_state.had_recent_interrupted_primary
+        ):
             return False
         if (time.monotonic() - last_rep_audio_at) < SILENCE_FILLER_SECONDS:
             return False
 
         state = orchestrator.get_state(session_id)
-        # Don't inject filler during door-open or after session ends — the rep needs
-        # uninterrupted time to deliver their opener and the homeowner should wait.
-        if state.stage in {"DOOR_OPEN", "ENDED"}:
+        if not _reply_stage_allows_filler(state.stage):
             return False
         stage = state.stage
         emotion = state.emotion
@@ -1344,6 +1456,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
             emotion_after=emotion,
             behavioral_signals=list(state.last_behavior_signals),
             active_objections=active_objections,
+            turn_kind="filler",
         )
 
         interruption_payload: dict[str, Any] | None = None
@@ -1427,10 +1540,13 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "interruption": interruption_payload,
                     "trace_id": ws_trace_id,
                     "filler": True,
+                    "turn_kind": "filler",
                     "emotion_before": emotion,
                     "emotion_after": emotion,
                     "behavioral_signals": list(state.last_behavior_signals),
                     "micro_behavior": filler_result["micro_behavior"],
+                    "audio_emitted": bool(filler_result.get("audio_emitted")),
+                    "validation_issues": list(filler_result.get("validation_issues") or []),
                 },
             )
             await maybe_flush()
@@ -1462,19 +1578,31 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
             if msg.type == "client.vad.state":
                 speaking = bool(msg.payload.get("speaking", False))
+                runtime_state.client_vad_speaking = speaking
                 if speaking:
                     runtime_state._vad_end_pending = False
                     _cancel_vad_finalize_task()
-                    await set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
+                    if ai_speaking:
+                        await _schedule_vad_interrupt_confirmation(_normalize_ts(msg.timestamp))
                 else:
                     runtime_state._vad_end_pending = True
+                    pending_interrupt = _cancel_vad_interrupt_task()
+                    if pending_interrupt is not None:
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await pending_interrupt
                     record = _start_turn_latency() if _should_start_new_turn_latency() else _get_turn_latency()
                     if record.vad_end_ts is None:
                         record.vad_end_ts = _monotonic_ts()
                     _cancel_vad_finalize_task()
                     runtime_state.vad_finalize_task = asyncio.create_task(_run_vad_finalize_debounce())
             elif ai_speaking and msg.type == "client.audio.chunk":
-                await set_interrupt("audio_chunk", _normalize_ts(msg.timestamp))
+                pending_interrupt = _cancel_vad_interrupt_task()
+                if pending_interrupt is not None:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pending_interrupt
+                audio_ts = _normalize_ts(msg.timestamp)
+                if await set_interrupt("audio_chunk", audio_ts):
+                    await _emit_interrupt_state("interrupt_confirmed", reason="audio_chunk", confirmed_at=audio_ts)
 
             if msg.type == "client.session.end":
                 disconnected.set()
@@ -1623,8 +1751,6 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
             if msg.type == "client.vad.state":
                 speaking = bool(msg.payload.get("speaking", False))
-                if speaking and ai_speaking:
-                    await set_interrupt("vad_speaking", _normalize_ts(msg.timestamp))
                 await emit_session_state({"state": "rep_speaking" if speaking else "rep_idle"})
                 await maybe_flush()
                 continue
@@ -1781,6 +1907,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 stage=plan.stage_after,
                 emotion=plan.emotion_before,
             )
+            runtime_state.had_recent_interrupted_primary = False
 
             stt_final_payload = {
                 "text": rep_text,
@@ -1831,6 +1958,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
 
             ai_speaking = True
             ai_speaking_started_at = datetime.now(timezone.utc)
+            runtime_state.pending_primary_reply = True
             await emit_session_state({"state": "ai_speaking", "stage": plan.stage_after})
             ai_result = await stream_ai_response(
                 prompt_text=rep_text,
@@ -1841,6 +1969,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 behavioral_signals=plan.behavioral_signals,
                 active_objections=plan.active_objections,
             )
+            runtime_state.pending_primary_reply = False
 
             interruption_payload: dict[str, Any] | None = None
             if ai_result["interrupted"]:
@@ -1860,69 +1989,72 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     "trace_id": ws_trace_id,
                 }
                 await emit_session_state(interruption_payload)
+                runtime_state.had_recent_interrupted_primary = True
             else:
                 consume_interrupt()
+                runtime_state.had_recent_interrupted_primary = False
 
             ai_speaking = False
             await emit_session_state({"state": "ai_idle", "interrupted": ai_result["interrupted"]})
 
             ai_text = ai_result["text"]
-            if ai_result["interrupted"] and not ai_text:
-                ai_text = "(response interrupted)"
-            orchestrator.mark_ai_turn(session_id=session_id)
-            orchestrator.record_turn(
-                session_id,
-                speaker="homeowner",
-                text=ai_text,
-                stage=plan.stage_after,
-                emotion=plan.emotion_after,
-            )
-            ai_now = datetime.now(timezone.utc)
-            ai_started_at = ai_result["started_at"] or ai_speaking_started_at or ai_now
-            ai_duration_ms = ai_result["duration_ms"]
-            ai_ended_at = ai_started_at + timedelta(milliseconds=ai_duration_ms)
-            ai_turn = ledger.commit_turn(
-                db,
-                session_id=session_id,
-                turn_index=next_turn_index + 1,
-                speaker=TurnSpeaker.AI,
-                text=ai_text,
-                stage=plan.stage_after,
-                started_at=ai_started_at,
-                ended_at=max(ai_ended_at, ai_now),
-                objection_tags=[],
-            )
-            if ai_turn.speaker == TurnSpeaker.AI:
-                ai_turn.system_prompt_snapshot = _compress_prompt(plan.system_prompt)
-                ai_turn.emotion_before = plan.emotion_before
-                ai_turn.emotion_after = plan.emotion_after
-                ai_turn.emotion_changed = plan.emotion_changed
-                ai_turn.resistance_level = plan.resistance_level
-                ai_turn.objection_pressure = plan.objection_pressure_after
-                ai_turn.active_objections = list(plan.active_objections)
-                ai_turn.queued_objections = list(plan.queued_objections)
-                ai_turn.behavioral_signals = list(plan.behavioral_signals)
-                if ai_result["micro_behavior"] is not None:
-                    mb = ai_result["micro_behavior"]
-                    ai_turn.mb_tone = mb.get("tone")
-                    ai_turn.mb_sentence_length = mb.get("sentence_length")
-                    ai_turn.mb_behaviors = list(mb.get("behaviors") or [])
-                    ai_turn.mb_interruption_type = mb.get("interruption_type")
-                    ai_turn.mb_realism_score = mb.get("realism_score")
-                    pause_profile = dict(mb.get("pause_profile") or {})
-                    ai_turn.mb_opening_pause_ms = pause_profile.get("opening_pause_ms")
-                    ai_turn.mb_total_pause_ms = pause_profile.get("total_pause_ms")
-                _commit_turn_updates()
+            ai_turn: SessionTurn | None = None
+            if ai_result.get("audio_emitted"):
+                orchestrator.mark_ai_turn(session_id=session_id)
+                orchestrator.record_turn(
+                    session_id,
+                    speaker="homeowner",
+                    text=ai_text,
+                    stage=plan.stage_after,
+                    emotion=plan.emotion_after,
+                )
+                ai_now = datetime.now(timezone.utc)
+                ai_started_at = ai_result["started_at"] or ai_speaking_started_at or ai_now
+                ai_duration_ms = ai_result["duration_ms"]
+                ai_ended_at = ai_started_at + timedelta(milliseconds=ai_duration_ms)
+                ai_turn = ledger.commit_turn(
+                    db,
+                    session_id=session_id,
+                    turn_index=next_turn_index + 1,
+                    speaker=TurnSpeaker.AI,
+                    text=ai_text,
+                    stage=plan.stage_after,
+                    started_at=ai_started_at,
+                    ended_at=max(ai_ended_at, ai_now),
+                    objection_tags=[],
+                )
+                if ai_turn.speaker == TurnSpeaker.AI:
+                    ai_turn.system_prompt_snapshot = _compress_prompt(plan.system_prompt)
+                    ai_turn.emotion_before = plan.emotion_before
+                    ai_turn.emotion_after = plan.emotion_after
+                    ai_turn.emotion_changed = plan.emotion_changed
+                    ai_turn.resistance_level = plan.resistance_level
+                    ai_turn.objection_pressure = plan.objection_pressure_after
+                    ai_turn.active_objections = list(plan.active_objections)
+                    ai_turn.queued_objections = list(plan.queued_objections)
+                    ai_turn.behavioral_signals = list(plan.behavioral_signals)
+                    if ai_result["micro_behavior"] is not None:
+                        mb = ai_result["micro_behavior"]
+                        ai_turn.mb_tone = mb.get("tone")
+                        ai_turn.mb_sentence_length = mb.get("sentence_length")
+                        ai_turn.mb_behaviors = list(mb.get("behaviors") or [])
+                        ai_turn.mb_interruption_type = mb.get("interruption_type")
+                        ai_turn.mb_realism_score = mb.get("realism_score")
+                        pause_profile = dict(mb.get("pause_profile") or {})
+                        ai_turn.mb_opening_pause_ms = pause_profile.get("opening_pause_ms")
+                        ai_turn.mb_total_pause_ms = pause_profile.get("total_pause_ms")
+                    _commit_turn_updates()
 
             phase_latency_breakdown = _serialize_phase_latency(runtime_state.turn_latency)
             turn_payload = {
                 "rep_turn_id": rep_turn.id,
-                "ai_turn_id": ai_turn.id,
+                "ai_turn_id": ai_turn.id if ai_turn is not None else None,
                 "session_id": session_id,
                 "stage": plan.stage_after,
                 "objection_tags": plan.objection_tags,
                 "interrupted": ai_result["interrupted"],
                 "interruption": interruption_payload,
+                "turn_kind": ai_result.get("turn_kind", "primary"),
                 "trace_id": ws_trace_id,
                 "prompt_version": session.prompt_version,
                 "analyzer_prompt_version": context_after_plan.analyzer_prompt_version if context_after_plan is not None else None,
@@ -1938,6 +2070,8 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 "transcript_quality": transcript_quality,
                 "transcript_normalization": _serialize_transcript_normalization(transcript_result),
                 "micro_behavior": ai_result["micro_behavior"],
+                "audio_emitted": bool(ai_result.get("audio_emitted")),
+                "validation_issues": list(ai_result.get("validation_issues") or []),
             }
             await emit_server_event("server.turn.committed", turn_payload)
             if runtime_state.turn_latency is not None and runtime_state.turn_latency.turn_index == next_turn_index + 1:
@@ -1948,6 +2082,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         pass
     finally:
         pending_vad_finalize_task = _cancel_vad_finalize_task()
+        pending_vad_interrupt_task = _cancel_vad_interrupt_task()
         receiver_task.cancel()
         keepalive_task.cancel()
         try:
@@ -1959,6 +2094,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
         if pending_vad_finalize_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await pending_vad_finalize_task
+        if pending_vad_interrupt_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending_vad_interrupt_task
         try:
             await keepalive_task
         except asyncio.CancelledError:

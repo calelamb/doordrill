@@ -33,6 +33,7 @@ type ApiRequestOptions = {
   headers?: HeaderMap;
   allowNotFound?: boolean;
   retryOn401?: boolean;
+  timeoutMs?: number;
 };
 
 type RawCategoryScore = number | (Partial<CategoryScoreDetail> & { score?: number | null }) | null;
@@ -108,7 +109,7 @@ async function apiRequest<T>(
 ): Promise<T> {
   const auth = options.auth !== false;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? API_TIMEOUT_MS);
   let response: Response;
 
   try {
@@ -471,8 +472,12 @@ export async function fetchRepScenario(_repId: string, scenarioId: string): Prom
   return apiRequest<ScenarioBrief>("GET", `/scenarios/${encodeURIComponent(scenarioId)}`);
 }
 
-export async function fetchRepSession(_repId: string, sessionId: string): Promise<RepSessionDetail> {
-  const payload = await apiRequest<RawRepSessionDetail>("GET", `/rep/sessions/${encodeURIComponent(sessionId)}`);
+export async function fetchRepSession(
+  _repId: string,
+  sessionId: string,
+  options: { timeoutMs?: number } = {}
+): Promise<RepSessionDetail> {
+  const payload = await apiRequest<RawRepSessionDetail>("GET", `/rep/sessions/${encodeURIComponent(sessionId)}`, options);
   return normalizeRepSessionDetail(payload);
 }
 

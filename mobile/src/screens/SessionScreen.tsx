@@ -19,6 +19,7 @@ import { Activity, Home, Mic, MicOff, Volume2, WifiOff } from "lucide-react-nati
 
 import { RootStackParamList } from "../navigation/types";
 import { AudioCaptureService } from "../services/audio";
+import { shouldSendCapturedChunk } from "../services/captureLogic";
 import { SessionWsClient } from "../services/websocket";
 import { colors } from "../theme/tokens";
 import { WsInboundEvent } from "../types";
@@ -29,6 +30,7 @@ const RECONNECT_DELAYS_MS = [500, 1000, 2000];
 const HOLD_END_MS = 500;
 const NUDGE_DELAY_MS = 4000;
 const INTERRUPT_BANNER_MS = 2200;
+const AUTO_SEGMENT_SILENCE_MS = 420;
 const WAVE_BAR_COUNT = 12;
 const START_DING = require("../../assets/record-start-ding.wav");
 
@@ -180,11 +182,15 @@ export function SessionScreen({ route, navigation }: Props) {
   const drainingAudioRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
   const recordingRef = useRef(false);
+  const holdActiveRef = useRef(false);
+  const autoSegmentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoSegmentingRef = useRef(false);
   const endSessionWaitResolverRef = useRef<(() => void) | null>(null);
   const endSessionWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ignoreNextCloseRef = useRef(false);
   const manualCloseRef = useRef(false);
   const speechDetectedRef = useRef(false);
+  const captureTelemetryRef = useRef<Record<string, number>>({});
   const endHoldProgress = useRef(new RNAnimated.Value(0)).current;
   const holdIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -237,6 +243,22 @@ export function SessionScreen({ route, navigation }: Props) {
       waitingNudgeTimerRef.current = null;
     }
     setShowWaitingNudge(false);
+  }
+
+  function clearAutoSegmentTimer() {
+    if (autoSegmentTimerRef.current) {
+      clearTimeout(autoSegmentTimerRef.current);
+      autoSegmentTimerRef.current = null;
+    }
+  }
+
+  function recordCaptureMetric(metric: string, details: Record<string, unknown> = {}) {
+    captureTelemetryRef.current[metric] = (captureTelemetryRef.current[metric] ?? 0) + 1;
+    console.info("[doordrill.capture]", metric, {
+      count: captureTelemetryRef.current[metric],
+      sessionId,
+      ...details,
+    });
   }
 
   function scheduleWaitingNudge() {
@@ -568,7 +590,7 @@ export function SessionScreen({ route, navigation }: Props) {
     }
   }
 
-  async function startRecording() {
+  async function startRecording(options?: { playCue?: boolean }) {
     if (endingSession || showSavePartial) {
       return;
     }
@@ -597,7 +619,9 @@ export function SessionScreen({ route, navigation }: Props) {
       recordingRef.current = true;
       setRecording(true);
       setStatusLabel("Listening...");
-      void playStartCue();
+      if (options?.playCue !== false) {
+        void playStartCue();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start microphone capture");
       recordingRef.current = false;
@@ -606,9 +630,9 @@ export function SessionScreen({ route, navigation }: Props) {
     }
   }
 
-  async function stopRecordingAndSend() {
+  async function stopRecordingAndSend(options?: { flushReason?: "release" | "auto_segment"; suppressNoSpeechError?: boolean }) {
     if (!recordingRef.current) {
-      return;
+      return false;
     }
 
     const client = wsClientRef.current;
@@ -617,22 +641,72 @@ export function SessionScreen({ route, navigation }: Props) {
     setRecording(false);
 
     if (!audioCapture) {
-      return;
+      return false;
     }
 
     try {
       const chunk = await audioCapture.stop();
-      if (chunk && speechDetectedRef.current && client?.isConnected()) {
+      const flushReason = options?.flushReason ?? "release";
+      if (chunk && shouldSendCapturedChunk(chunk) && client?.isConnected()) {
         client.sendAudioChunk(chunk);
+        if (!speechDetectedRef.current) {
+          recordCaptureMetric("chunk_sent_without_vad", {
+            flushReason,
+            durationMs: chunk.durationMs,
+            payloadChars: chunk.payload.length,
+          });
+        }
+        recordCaptureMetric(flushReason === "auto_segment" ? "auto_segment_flush" : "release_flush", {
+          durationMs: chunk.durationMs,
+          payloadChars: chunk.payload.length,
+        });
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        setStatusLabel("AI is responding...");
-      } else if (!speechDetectedRef.current) {
+        setStatusLabel(flushReason === "auto_segment" && holdActiveRef.current ? "Listening..." : "AI is responding...");
+        speechDetectedRef.current = false;
+        return true;
+      }
+
+      recordCaptureMetric("chunk_dropped", {
+        flushReason,
+        durationMs: chunk?.durationMs ?? 0,
+        payloadChars: chunk?.payload.length ?? 0,
+        hadSpeech: speechDetectedRef.current,
+      });
+      if (!options?.suppressNoSpeechError) {
         setError("No speech detected. Hold the mic and speak clearly.");
         scheduleWaitingNudge();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send captured audio");
     }
+    speechDetectedRef.current = false;
+    return false;
+  }
+
+  async function flushAndRestartRecording() {
+    if (autoSegmentingRef.current || !holdActiveRef.current || !recordingRef.current) {
+      return;
+    }
+    autoSegmentingRef.current = true;
+    clearAutoSegmentTimer();
+    try {
+      const sent = await stopRecordingAndSend({ flushReason: "auto_segment", suppressNoSpeechError: true });
+      if (sent && holdActiveRef.current && connected && !endingSession && !showSavePartial) {
+        await startRecording({ playCue: false });
+      }
+    } finally {
+      autoSegmentingRef.current = false;
+    }
+  }
+
+  function scheduleAutoSegmentFlush() {
+    clearAutoSegmentTimer();
+    if (!holdActiveRef.current || !recordingRef.current || !speechDetectedRef.current) {
+      return;
+    }
+    autoSegmentTimerRef.current = setTimeout(() => {
+      void flushAndRestartRecording();
+    }, AUTO_SEGMENT_SILENCE_MS);
   }
 
   async function completeSessionFlow() {
@@ -640,8 +714,9 @@ export function SessionScreen({ route, navigation }: Props) {
     manualCloseRef.current = true;
     clearReconnectTimer();
     clearWaitingNudgeTimer();
+    clearAutoSegmentTimer();
     if (recordingRef.current) {
-      await stopRecordingAndSend();
+      await stopRecordingAndSend({ flushReason: "release" });
     }
     try {
       wsClientRef.current?.endSession();
@@ -661,6 +736,7 @@ export function SessionScreen({ route, navigation }: Props) {
     manualCloseRef.current = true;
     clearReconnectTimer();
     clearWaitingNudgeTimer();
+    clearAutoSegmentTimer();
     ignoreNextCloseRef.current = true;
     wsClientRef.current?.close();
     wsClientRef.current = null;
@@ -679,6 +755,9 @@ export function SessionScreen({ route, navigation }: Props) {
       if (speaking) {
         speechDetectedRef.current = true;
         setShowWaitingNudge(false);
+        clearAutoSegmentTimer();
+      } else if (holdActiveRef.current) {
+        scheduleAutoSegmentFlush();
       }
       wsClientRef.current?.sendVadState(speaking);
     });
@@ -696,6 +775,8 @@ export function SessionScreen({ route, navigation }: Props) {
       manualCloseRef.current = true;
       clearReconnectTimer();
       clearWaitingNudgeTimer();
+      clearAutoSegmentTimer();
+      holdActiveRef.current = false;
       if (interruptionTimerRef.current) {
         clearTimeout(interruptionTimerRef.current);
       }
@@ -794,10 +875,13 @@ export function SessionScreen({ route, navigation }: Props) {
           <Pressable
             disabled={!connected || endingSession || showSavePartial}
             onPressIn={() => {
+              holdActiveRef.current = true;
               void startRecording();
             }}
             onPressOut={() => {
-              void stopRecordingAndSend();
+              holdActiveRef.current = false;
+              clearAutoSegmentTimer();
+              void stopRecordingAndSend({ flushReason: "release" });
             }}
             style={[styles.micButton, (!connected || endingSession || showSavePartial) && styles.micButtonDisabled, recording && styles.micButtonActive]}
           >

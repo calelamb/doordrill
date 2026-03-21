@@ -43,9 +43,9 @@ import { Audio } from "expo-av";
 import { AudioCaptureService } from "../services/audio";
 import type { AudioChunk } from "../services/audio";
 
-const VAD_ATTACK_FRAMES = 2;
-const VAD_RELEASE_FRAMES = 5;
-const SPEAKING_THRESHOLD_DB = -45;
+const VAD_ATTACK_FRAMES = 1;
+const VAD_RELEASE_FRAMES = 3;
+const SPEAKING_THRESHOLD_DB = -50;
 
 function makeSvc() {
   return new AudioCaptureService();
@@ -119,14 +119,14 @@ describe("AudioCaptureService — codec", () => {
 });
 
 describe("AudioCaptureService — VAD hysteresis", () => {
-  it("single frame above threshold does NOT trigger speaking=true", () => {
+  it("single frame above threshold now triggers speaking=true for short openers", () => {
     const svc = makeSvc();
     const changes: boolean[] = [];
     svc.onVadChange((v) => changes.push(v));
 
     fireMetering(svc, SPEAKING_THRESHOLD_DB + 5, 1);
 
-    expect(changes).toHaveLength(0);
+    expect(changes).toEqual([true]);
   });
 
   it(`requires ${VAD_ATTACK_FRAMES} consecutive frames above threshold to start speaking`, () => {
@@ -141,15 +141,15 @@ describe("AudioCaptureService — VAD hysteresis", () => {
     expect(changes).toEqual([true]);
   });
 
-  it("noise spike (1 frame above, 1 below) does not trigger speaking", () => {
+  it("noise spike flips on, then releases after the shorter hysteresis window", () => {
     const svc = makeSvc();
     const changes: boolean[] = [];
     svc.onVadChange((v) => changes.push(v));
 
     fireMetering(svc, SPEAKING_THRESHOLD_DB + 10, 1);
-    fireMetering(svc, SPEAKING_THRESHOLD_DB - 10, 1);
+    fireMetering(svc, SPEAKING_THRESHOLD_DB - 10, VAD_RELEASE_FRAMES);
 
-    expect(changes).toHaveLength(0);
+    expect(changes).toEqual([true, false]);
   });
 
   it("single frame below threshold does NOT trigger speaking=false once speaking", () => {

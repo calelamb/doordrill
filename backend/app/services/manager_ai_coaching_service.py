@@ -21,6 +21,7 @@ from app.models.warehouse import FactRepDaily
 from app.schemas.ai_meta import AiAttemptMeta, AiMeta
 from app.schemas.manager_ai import (
     AssignmentSuggestion,
+    ChatDataPoint,
     ManagerChatAnswerContent,
     ManagerChatClassification,
     ManagerPrimaryAction,
@@ -203,6 +204,7 @@ class ManagerAiCoachingService:
         task: str,
         fast: bool = False,
         validator: Any | None = None,
+        timeout_seconds: float | None = None,
     ) -> JsonLlmResult:
         legacy_override = self.__dict__.get("_call_claude_json")
         if callable(legacy_override):
@@ -239,6 +241,7 @@ class ManagerAiCoachingService:
                 task=task,
                 validator=validator,
                 allow_mock_fallback=self.settings.manager_ai_allow_mock,
+                timeout_seconds=timeout_seconds,
             )
         except JsonLlmRouterError as exc:
             attempts = [
@@ -262,6 +265,7 @@ class ManagerAiCoachingService:
         generated_at: str,
         status: str | None = None,
         cached: bool = False,
+        fallback_kind: str | None = None,
     ) -> AiMeta:
         return AiMeta(
             provider=result.provider,
@@ -271,6 +275,7 @@ class ManagerAiCoachingService:
             status=status or result.status,
             latency_ms=result.latency_ms,
             fallback_used=result.fallback_used,
+            fallback_kind=fallback_kind or ("provider" if result.fallback_used else None),
             attempts=[
                 AiAttemptMeta(
                     provider=attempt.provider,
@@ -300,6 +305,7 @@ class ManagerAiCoachingService:
                 status="unavailable",
                 latency_ms=0,
                 fallback_used=False,
+                fallback_kind=None,
                 attempts=[],
                 generated_at=generated_at,
             )
@@ -332,6 +338,7 @@ class ManagerAiCoachingService:
             status=final_result.status,
             latency_ms=total_latency,
             fallback_used=fallback_used,
+            fallback_kind="provider" if fallback_used else None,
             attempts=attempts,
             generated_at=generated_at,
         )
@@ -350,6 +357,7 @@ class ManagerAiCoachingService:
                 status="unavailable",
                 latency_ms=0,
                 fallback_used=False,
+                fallback_kind=None,
                 attempts=[],
                 generated_at=generated_at,
             )
@@ -360,11 +368,13 @@ class ManagerAiCoachingService:
         fallback_used = False
         real_call = False
         cached = False
+        fallback_kind: str | None = None
         for task, meta in items:
             total_latency += meta.latency_ms
             fallback_used = fallback_used or meta.fallback_used
             real_call = real_call or meta.real_call
             cached = cached or meta.cached
+            fallback_kind = fallback_kind or meta.fallback_kind
             for attempt in meta.attempts:
                 attempts.append(
                     attempt.model_copy(
@@ -382,6 +392,7 @@ class ManagerAiCoachingService:
             status=final_meta.status,
             latency_ms=total_latency,
             fallback_used=fallback_used,
+            fallback_kind=final_meta.fallback_kind or fallback_kind or ("provider" if fallback_used else None),
             attempts=attempts,
             generated_at=generated_at,
         )
@@ -409,7 +420,8 @@ class ManagerAiCoachingService:
             cached=cached,
             status=status,
             latency_ms=0,
-            fallback_used=False,
+            fallback_used=status == "fallback",
+            fallback_kind="deterministic" if status == "fallback" else None,
             attempts=[],
             generated_at=generated_at,
         )
@@ -580,6 +592,148 @@ class ManagerAiCoachingService:
             self._system_ai_meta(generated_at=generated_at, status="no_data"),
         )
 
+    def heuristic_manager_chat_classification(self, *, message: str) -> ManagerChatClassification:
+        lowered = (message or "").strip().lower()
+        intent = "team_performance"
+        if any(token in lowered for token in ("scenario", "drill", "difficulty")):
+            intent = "scenario_analysis"
+        elif any(token in lowered for token in ("risk", "at risk", "slipping")):
+            intent = "risk_alerts"
+        elif any(token in lowered for token in ("coach", "coaching", "1:1", "one on one", "briefing")):
+            intent = "coaching_effectiveness"
+        elif any(token in lowered for token in ("compare", "versus", " vs ")):
+            intent = "comparison"
+        elif "rep " in lowered or "ray" in lowered:
+            intent = "rep_specific"
+        return ManagerChatClassification(
+            intent=intent,
+            rep_name_mentioned=None,
+            scenario_mentioned=None,
+            category_mentioned=None,
+        )
+
+    def _deterministic_chat_fallback(
+        self,
+        *,
+        message: str,
+        relevant_data: dict[str, Any],
+    ) -> ManagerChatAnswerContent | None:
+        command_center = relevant_data.get("command_center") if isinstance(relevant_data, dict) else None
+        if isinstance(command_center, dict):
+            summary = command_center.get("summary", {}) if isinstance(command_center.get("summary"), dict) else {}
+            average_score = summary.get("team_average_score")
+            scored_session_count = summary.get("scored_session_count")
+            reps_at_risk = summary.get("reps_at_risk")
+            sessions_count = summary.get("sessions_count")
+            data_points = []
+            if average_score is not None:
+                data_points.append(ChatDataPoint(label="Team Average", value=f"{float(average_score):.1f}"))
+            if scored_session_count is not None:
+                data_points.append(ChatDataPoint(label="Scored Sessions", value=str(int(scored_session_count))))
+            if reps_at_risk is not None:
+                data_points.append(ChatDataPoint(label="Reps At Risk", value=str(int(reps_at_risk))))
+            answer_parts = [
+                "Live AI timed out, but the current analytics snapshot is still available."
+            ]
+            if average_score is not None and scored_session_count is not None:
+                answer_parts.append(
+                    f"The team average score is {float(average_score):.1f} across {int(scored_session_count)} scored sessions."
+                )
+            elif sessions_count is not None:
+                answer_parts.append(f"There are {int(sessions_count)} sessions in the selected window.")
+            if reps_at_risk is not None:
+                answer_parts.append(f"{int(reps_at_risk)} reps are currently flagged above low risk.")
+            return ManagerChatAnswerContent(
+                answer=" ".join(answer_parts[:3]),
+                key_metric=f"{float(average_score):.1f}" if average_score is not None else None,
+                key_metric_label="Team Average Score" if average_score is not None else None,
+                follow_up_suggestions=[
+                    "Which reps are driving the current risk count?",
+                    "Which scenario is dragging the average down?",
+                ],
+                action_suggestion="Open the coaching view and review the lowest-performing cluster from the current snapshot.",
+                data_points=data_points[:4],
+                data_state=None,
+            )
+
+        coaching_analytics = relevant_data.get("coaching_analytics") if isinstance(relevant_data, dict) else None
+        if isinstance(coaching_analytics, dict):
+            summary = coaching_analytics.get("summary", {}) if isinstance(coaching_analytics.get("summary"), dict) else {}
+            note_count = int(summary.get("coaching_note_count") or 0)
+            review_count = int(summary.get("review_count") or 0)
+            retry_uplift = summary.get("retry_uplift_avg")
+            answer = (
+                f"Live AI timed out, but the coaching analytics show {note_count} coaching notes and {review_count} reviews"
+                " in the selected window."
+            )
+            if isinstance(retry_uplift, (int, float)):
+                answer += f" Average retry uplift is {float(retry_uplift):.1f}."
+            return ManagerChatAnswerContent(
+                answer=answer,
+                key_metric=str(note_count),
+                key_metric_label="Coaching Notes",
+                follow_up_suggestions=[
+                    "Which weakness tag improved the most?",
+                    "Which reps responded best to coaching?",
+                ],
+                action_suggestion="Review the latest coaching notes and retry lift before assigning the next drill block.",
+                data_points=[
+                    ChatDataPoint(label="Coaching Notes", value=str(note_count)),
+                    ChatDataPoint(label="Reviews", value=str(review_count)),
+                ],
+                data_state=None,
+            )
+
+        scenario_intelligence = relevant_data.get("scenario_intelligence") if isinstance(relevant_data, dict) else None
+        if isinstance(scenario_intelligence, dict):
+            items = scenario_intelligence.get("items")
+            if isinstance(items, list) and items:
+                top_item = next((item for item in items if isinstance(item, dict)), None)
+                if isinstance(top_item, dict):
+                    scenario_name = str(top_item.get("scenario_name") or top_item.get("name") or "that scenario")
+                    average_score = top_item.get("average_score")
+                    answer = (
+                        "Live AI timed out, but the scenario analytics are still available. "
+                        f"{scenario_name} is currently the clearest scenario to review."
+                    )
+                    if isinstance(average_score, (int, float)):
+                        answer += f" Its average score is {float(average_score):.1f}."
+                    return ManagerChatAnswerContent(
+                        answer=answer,
+                        key_metric=f"{float(average_score):.1f}" if isinstance(average_score, (int, float)) else None,
+                        key_metric_label="Scenario Average" if isinstance(average_score, (int, float)) else None,
+                        follow_up_suggestions=[
+                            "Which reps struggle most on that scenario?",
+                            "What should I assign next to address it?",
+                        ],
+                        action_suggestion=f"Open scenario intelligence and review {scenario_name} before assigning the next drill.",
+                        data_points=[],
+                        data_state=None,
+                    )
+
+        return None
+
+    def _deterministic_team_coaching_summary(self, *, period_days: int, coaching_analytics: dict[str, Any]) -> str | None:
+        summary = coaching_analytics.get("summary", {}) if isinstance(coaching_analytics, dict) else {}
+        weakness_items = coaching_analytics.get("weakness_tag_uplift", []) if isinstance(coaching_analytics, dict) else []
+        note_count = int(summary.get("coaching_note_count") or 0)
+        review_count = int(summary.get("review_count") or 0)
+        if note_count <= 0 and review_count <= 0 and not weakness_items:
+            return None
+
+        weakness_note = None
+        for item in weakness_items:
+            if isinstance(item, dict) and item.get("tag"):
+                weakness_note = f"The clearest coaching opportunity is still {str(item['tag']).replace('_', ' ')}."
+                break
+
+        sentences = [
+            f"Live AI timed out, but the current {period_days}-day coaching snapshot still shows {note_count} coaching notes and {review_count} reviews.",
+            weakness_note or "Use the latest note and retry patterns to decide which skill block needs the next intervention.",
+            "Review the current coaching lift and assign the next drill from the existing analytics rather than waiting on a regenerated summary.",
+        ]
+        return " ".join(sentences[:3])
+
     def classify_manager_chat_intent(self, *, message: str) -> ManagerChatClassification:
         classification, _ = self.classify_manager_chat_intent_with_meta(message=message)
         return classification
@@ -610,6 +764,7 @@ Respond with JSON only:
             task="manager_chat_classification",
             fast=True,
             validator=ManagerChatClassification.model_validate,
+            timeout_seconds=self.settings.manager_ai_fast_timeout_seconds,
         )
         classification = result.payload
         return classification, self._ai_meta_from_result(result, generated_at=generated_at)
@@ -664,24 +819,31 @@ Respond with JSON:
 """.strip()
 
         generated_at = datetime.now(timezone.utc).isoformat()
-        result = self._call_manager_ai_json(
-            system_prompt="You are a precise manager analytics copilot. Return only valid JSON.",
-            user_prompt=prompt,
-            max_tokens=700,
-            task="manager_chat_answer",
-            validator=ManagerChatAnswerContent.model_validate,
-        )
-        content = result.payload
+        try:
+            result = self._call_manager_ai_json(
+                system_prompt="You are a precise manager analytics copilot. Return only valid JSON.",
+                user_prompt=prompt,
+                max_tokens=700,
+                task="manager_chat_answer",
+                validator=ManagerChatAnswerContent.model_validate,
+                timeout_seconds=self.settings.manager_ai_timeout_seconds,
+            )
+            content = result.payload
 
-        answer = ManagerChatAnswerContent(
-            answer=content.answer,
-            key_metric=content.key_metric,
-            key_metric_label=content.key_metric_label,
-            follow_up_suggestions=content.follow_up_suggestions[:3],
-            action_suggestion=content.action_suggestion,
-            data_points=content.data_points[:4],
-        )
-        return answer, self._ai_meta_from_result(result, generated_at=generated_at)
+            answer = ManagerChatAnswerContent(
+                answer=content.answer,
+                key_metric=content.key_metric,
+                key_metric_label=content.key_metric_label,
+                follow_up_suggestions=content.follow_up_suggestions[:3],
+                action_suggestion=content.action_suggestion,
+                data_points=content.data_points[:4],
+            )
+            return answer, self._ai_meta_from_result(result, generated_at=generated_at)
+        except AiCoachingUnavailableError:
+            deterministic = self._deterministic_chat_fallback(message=message, relevant_data=relevant_data)
+            if deterministic is None:
+                raise
+            return deterministic, self._system_ai_meta(generated_at=generated_at, status="fallback")
 
     def answer_company_material_question(
         self,
@@ -1957,21 +2119,6 @@ Return JSON:
 }}
 """.strip()
 
-        result = self._call_manager_ai_json(
-            system_prompt=(
-                f"{coaching_system_prefix}\n\n"
-                "You are a precise coaching strategist. Return only valid JSON."
-            ),
-            user_prompt=prompt,
-            max_tokens=320,
-            task="team_coaching_summary",
-            validator=TeamCoachingSummaryContent.model_validate,
-        )
-        content = result.payload
-        summary_text = _trim_to_three_sentences(content.summary)
-        if _sentence_count(summary_text) > 3:
-            summary_text = _trim_to_three_sentences(summary_text)
-
         data_summary = {
             "period_days": period_days,
             "summary": summary,
@@ -1981,13 +2128,39 @@ Return JSON:
             "recent_note_previews": recent_note_previews,
         }
         generated_at = datetime.now(timezone.utc).isoformat()
+        try:
+            result = self._call_manager_ai_json(
+                system_prompt=(
+                    f"{coaching_system_prefix}\n\n"
+                    "You are a precise coaching strategist. Return only valid JSON."
+                ),
+                user_prompt=prompt,
+                max_tokens=320,
+                task="team_coaching_summary",
+                validator=TeamCoachingSummaryContent.model_validate,
+                timeout_seconds=self.settings.manager_ai_timeout_seconds,
+            )
+            content = result.payload
+            summary_text = _trim_to_three_sentences(content.summary)
+            if _sentence_count(summary_text) > 3:
+                summary_text = _trim_to_three_sentences(summary_text)
+            ai_meta = self._ai_meta_from_result(result, generated_at=generated_at)
+        except AiCoachingUnavailableError:
+            summary_text = self._deterministic_team_coaching_summary(
+                period_days=period_days,
+                coaching_analytics=coaching_analytics,
+            )
+            if summary_text is None:
+                raise
+            ai_meta = self._system_ai_meta(generated_at=generated_at, status="fallback")
+
         return TeamCoachingSummaryResponse(
             manager_id=manager.id,
             period_days=period_days,
             generated_at=generated_at,
             summary=summary_text,
             data_summary=data_summary,
-            ai_meta=self._ai_meta_from_result(result, generated_at=generated_at),
+            ai_meta=ai_meta,
         )
 
     def _call_claude_json(

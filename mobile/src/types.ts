@@ -67,6 +67,9 @@ export type TranscriptTurn = {
   objection_tags: string[];
   emotion?: string | null;
   stage?: string | null;
+  turn_kind?: string | null;
+  interrupted?: boolean;
+  interruption_reason?: string | null;
 };
 
 export type Scorecard = {

@@ -19,7 +19,7 @@ from app.models.prompt_version import PromptVersion
 from app.models.scenario import Scenario
 from app.models.scorecard import Scorecard
 from app.models.session import Session as DrillSession
-from app.models.session import SessionArtifact, SessionTurn
+from app.models.session import SessionArtifact, SessionEvent, SessionTurn
 from app.models.types import AssignmentStatus, SessionStatus
 from app.models.user import User, Team
 from app.schemas.adaptive_training import RepAdaptivePlanResponse, RepForecastResponse
@@ -186,7 +186,34 @@ def _calculate_most_improved_category(scored_rows: list[tuple[DrillSession, Scor
     return best_category, round(best_delta, 2)
 
 
-def _serialize_transcript(turns: list[SessionTurn]) -> list[dict[str, Any]]:
+def _build_turn_event_meta(events: list[SessionEvent]) -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        interruption = payload.get("interruption") if isinstance(payload.get("interruption"), dict) else {}
+        interruption_reason = interruption.get("reason") if isinstance(interruption, dict) else None
+        rep_turn_id = payload.get("rep_turn_id")
+        ai_turn_id = payload.get("ai_turn_id")
+        if isinstance(rep_turn_id, str) and rep_turn_id:
+            metadata.setdefault(
+                rep_turn_id,
+                {
+                    "turn_kind": "primary",
+                    "interrupted": False,
+                    "interruption_reason": None,
+                },
+            )
+        if isinstance(ai_turn_id, str) and ai_turn_id:
+            metadata[ai_turn_id] = {
+                "turn_kind": str(payload.get("turn_kind") or ("filler" if payload.get("filler") else "primary")),
+                "interrupted": bool(payload.get("interrupted", False)),
+                "interruption_reason": interruption_reason if isinstance(interruption_reason, str) else None,
+            }
+    return metadata
+
+
+def _serialize_transcript(turns: list[SessionTurn], turn_meta: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    turn_meta = turn_meta or {}
     return [
         {
             "turn_index": turn.turn_index,
@@ -196,6 +223,9 @@ def _serialize_transcript(turns: list[SessionTurn]) -> list[dict[str, Any]]:
             "objection_tags": list(turn.objection_tags or []),
             "emotion": turn.emotion_after or turn.emotion_before,
             "stage": turn.stage,
+            "turn_kind": turn_meta.get(turn.id, {}).get("turn_kind"),
+            "interrupted": bool(turn_meta.get(turn.id, {}).get("interrupted", False)),
+            "interruption_reason": turn_meta.get(turn.id, {}).get("interruption_reason"),
         }
         for turn in turns
     ]
@@ -619,6 +649,11 @@ def get_session_with_feedback(
         .where(SessionTurn.session_id == session_id)
         .order_by(SessionTurn.turn_index.asc(), SessionTurn.started_at.asc())
     ).all()
+    committed_events = db.scalars(
+        select(SessionEvent)
+        .where(SessionEvent.session_id == session_id, SessionEvent.event_type == "server.turn.committed")
+        .order_by(SessionEvent.event_ts.asc())
+    ).all()
     grading_artifact = _latest_grading_artifact(db, session_id)
     grading_run = _latest_grading_run(db, session_id)
     grade_postprocess_run = _latest_grade_postprocess_run(db, session_id)
@@ -643,7 +678,7 @@ def get_session_with_feedback(
             if manager_coaching_note
             else None
         ),
-        "transcript": _serialize_transcript(transcript_turns),
+        "transcript": _serialize_transcript(transcript_turns, _build_turn_event_meta(committed_events)),
         "improvement_targets": improvement_targets,
     }
 

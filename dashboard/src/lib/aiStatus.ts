@@ -22,7 +22,7 @@ export function describeAiMeta(meta: AiMeta | null | undefined): AiStatusPresent
   }
   if (status === "fallback") {
     return {
-      label: "Fallback",
+      label: meta.fallback_kind === "deterministic" ? "Deterministic Fallback" : "Fallback",
       toneClass: "border-amber-200 bg-amber-50 text-amber-800",
       detail: `${meta.provider} · ${meta.latency_ms}ms`,
     };

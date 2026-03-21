@@ -309,6 +309,7 @@ class JsonLlmRouter:
         task: str = "manager_ai",
         validator: Callable[[Any], Any] | None = None,
         allow_mock_fallback: bool | None = None,
+        timeout_seconds: float | None = None,
     ) -> JsonLlmResult:
         primary_provider = self._normalize_provider(self.settings.llm_provider)
         fallback_provider = self._resolve_fallback_provider(primary_provider)
@@ -333,6 +334,7 @@ class JsonLlmRouter:
                 max_tokens=max_tokens,
                 task=task,
                 validator=validator,
+                timeout_seconds=timeout_seconds,
             )
             attempts.append(attempt)
             if error is None:
@@ -362,6 +364,7 @@ class JsonLlmRouter:
                 max_tokens=max_tokens,
                 task=task,
                 validator=validator,
+                timeout_seconds=timeout_seconds,
             )
             attempts.append(attempt)
             if error is None:
@@ -396,6 +399,7 @@ class JsonLlmRouter:
         max_tokens: int,
         task: str,
         validator: Callable[[Any], Any] | None,
+        timeout_seconds: float | None,
     ) -> tuple[Any | None, JsonLlmAttempt, bool, JsonLlmRouterError | None]:
         if provider == "mock":
             started = perf_counter()
@@ -450,6 +454,7 @@ class JsonLlmRouter:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     max_tokens=max_tokens,
+                    timeout_seconds=timeout_seconds,
                 )
                 if provider == "openai"
                 else self._call_anthropic_json(
@@ -458,6 +463,7 @@ class JsonLlmRouter:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     max_tokens=max_tokens,
+                    timeout_seconds=timeout_seconds,
                 )
             )
             latency_ms = max(1, int((perf_counter() - started) * 1000))
@@ -526,8 +532,9 @@ class JsonLlmRouter:
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
+        timeout_seconds: float | None = None,
     ) -> Any:
-        with httpx.Client(timeout=self.settings.provider_timeout_seconds) as client:
+        with httpx.Client(timeout=timeout_seconds or self.settings.provider_timeout_seconds) as client:
             try:
                 response = client.post(
                     f"{self.settings.openai_base_url.rstrip('/')}/chat/completions",
@@ -571,8 +578,9 @@ class JsonLlmRouter:
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
+        timeout_seconds: float | None = None,
     ) -> Any:
-        with httpx.Client(timeout=self.settings.provider_timeout_seconds) as client:
+        with httpx.Client(timeout=timeout_seconds or self.settings.provider_timeout_seconds) as client:
             try:
                 response = client.post(
                     f"{self.settings.anthropic_base_url.rstrip('/')}/v1/messages",

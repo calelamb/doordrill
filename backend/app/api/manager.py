@@ -464,7 +464,34 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def _serialize_transcript_turns(turns: list[SessionTurn]) -> list[dict[str, Any]]:
+def _build_turn_event_meta(events: list[SessionEvent]) -> dict[str, dict[str, Any]]:
+    metadata: dict[str, dict[str, Any]] = {}
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        interruption = payload.get("interruption") if isinstance(payload.get("interruption"), dict) else {}
+        interruption_reason = interruption.get("reason") if isinstance(interruption, dict) else None
+        rep_turn_id = payload.get("rep_turn_id")
+        ai_turn_id = payload.get("ai_turn_id")
+        if isinstance(rep_turn_id, str) and rep_turn_id:
+            metadata.setdefault(
+                rep_turn_id,
+                {
+                    "turn_kind": "primary",
+                    "interrupted": False,
+                    "interruption_reason": None,
+                },
+            )
+        if isinstance(ai_turn_id, str) and ai_turn_id:
+            metadata[ai_turn_id] = {
+                "turn_kind": str(payload.get("turn_kind") or ("filler" if payload.get("filler") else "primary")),
+                "interrupted": bool(payload.get("interrupted", False)),
+                "interruption_reason": interruption_reason if isinstance(interruption_reason, str) else None,
+            }
+    return metadata
+
+
+def _serialize_transcript_turns(turns: list[SessionTurn], turn_meta: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    turn_meta = turn_meta or {}
     return [
         {
             "turn_id": turn.id,
@@ -478,6 +505,9 @@ def _serialize_transcript_turns(turns: list[SessionTurn]) -> list[dict[str, Any]
             "transcript_confidence": turn.transcript_confidence,
             "started_at": turn.started_at.isoformat(),
             "ended_at": turn.ended_at.isoformat(),
+            "turn_kind": turn_meta.get(turn.id, {}).get("turn_kind"),
+            "interrupted": bool(turn_meta.get(turn.id, {}).get("interrupted", False)),
+            "interruption_reason": turn_meta.get(turn.id, {}).get("interruption_reason"),
         }
         for turn in turns
     ]
@@ -2142,8 +2172,10 @@ def chat_with_manager_ai(
 
     try:
         classification, classification_meta = manager_ai_service.classify_manager_chat_intent_with_meta(message=payload.message)
-    except AiCoachingUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=exc.detail()) from exc
+    except AiCoachingUnavailableError:
+        generated_at = datetime.now(timezone.utc).isoformat()
+        classification = manager_ai_service.heuristic_manager_chat_classification(message=payload.message)
+        classification_meta = manager_ai_service._system_ai_meta(generated_at=generated_at, status="fallback")
 
     current_end = datetime.now(timezone.utc).replace(microsecond=0)
     current_start = (current_end - timedelta(days=payload.period_days)).replace(microsecond=0)
@@ -2870,7 +2902,8 @@ def get_session_replay(
         .order_by(SessionEvent.event_ts.asc())
     ).all()
 
-    transcript_turns = _serialize_transcript_turns(turns)
+    turn_event_meta = _build_turn_event_meta(committed_events)
+    transcript_turns = _serialize_transcript_turns(turns, turn_event_meta)
     objection_timeline = [
         {"turn_id": t.id, "turn_index": t.turn_index, "objection_tags": t.objection_tags}
         for t in turns
@@ -2887,7 +2920,13 @@ def get_session_replay(
         total_barge_ins += int(artifact.metadata_json.get("barge_in_count", 0))
 
     interruption_timeline = []
+    interrupt_confirmed_count = 0
+    interrupt_ignored_count = 0
     for event in state_events:
+        if event.payload.get("state") == "interrupt_confirmed":
+            interrupt_confirmed_count += 1
+        if event.payload.get("state") == "interrupt_ignored":
+            interrupt_ignored_count += 1
         if event.payload.get("state") != "barge_in_detected":
             continue
         interruption_timeline.append(
@@ -3013,6 +3052,12 @@ def get_session_replay(
             "turn_count": len(transcript_turns),
             "objection_turn_count": len(objection_timeline),
             "barge_in_count": max(total_barge_ins, len(interruption_timeline)),
+            "interrupt_confirmed": interrupt_confirmed_count,
+            "interrupt_ignored": interrupt_ignored_count,
+            "filler_emitted": sum(1 for turn in transcript_turns if turn.get("turn_kind") == "filler"),
+            "primary_reply_count": sum(
+                1 for turn in transcript_turns if turn.get("speaker") == "ai" and turn.get("turn_kind") == "primary"
+            ),
             "phase_latency_summary": {
                 key: round(sum(values) / len(values), 1) if values else None
                 for key, values in phase_latency_totals.items()

@@ -55,6 +55,9 @@ class RepSessionTranscriptEntryResponse(BaseModel):
     objection_tags: list[str] = Field(default_factory=list)
     emotion: str | None = None
     stage: str | None = None
+    turn_kind: str | None = None
+    interrupted: bool = False
+    interruption_reason: str | None = None
 
 
 class RepSessionImprovementTargetResponse(BaseModel):
@@ -144,6 +147,9 @@ class TranscriptTurnResponse(BaseModel):
     text: str
     started_at: str
     ended_at: str
+    turn_kind: str | None = None
+    interrupted: bool = False
+    interruption_reason: str | None = None
 
 
 class StageTimelineEntryResponse(BaseModel):

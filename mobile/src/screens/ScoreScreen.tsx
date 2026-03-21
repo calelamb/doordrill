@@ -95,6 +95,8 @@ const NEGATIVE_SIGNALS = new Set([
   "ignores_objection",
   "high_difficulty_backfire",
 ]);
+const SCORECARD_FETCH_TIMEOUT_MS = 20_000;
+const SCORECARD_POLL_LIMIT = 10;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -143,6 +145,14 @@ export function shouldPollScorecard(detail: RepSessionDetail): boolean {
     return true;
   }
   return detail.session.status === "processing" && !detail.scorecard;
+}
+
+export function shouldRetryScorecardLoadError(
+  message: string,
+  detail: RepSessionDetail | null,
+  pollCount: number
+): boolean {
+  return message === "Request timed out" && pollCount < SCORECARD_POLL_LIMIT && (!detail || shouldPollScorecard(detail));
 }
 
 export function heroStateFor(scorecard: RepSessionDetail["scorecard"], gradingMeta?: GradingMeta | null): HeroState {
@@ -596,6 +606,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [processingFallback, setProcessingFallback] = useState(false);
   const [pollCount, setPollCount] = useState(0);
   const [activeTab, setActiveTab] = useState<TabKey>("scorecard");
   const [expandedCategoryKey, setExpandedCategoryKey] = useState<CategoryKey | null>(null);
@@ -625,9 +636,10 @@ export function ScoreScreen({ route, navigation }: Props) {
       }
 
       try {
-        const result = await fetchRepSession(repId, sessionId);
+        const result = await fetchRepSession(repId, sessionId, { timeoutMs: SCORECARD_FETCH_TIMEOUT_MS });
         if (cancelled) return;
         setData(result);
+        setProcessingFallback(false);
         setError(null);
 
         if (result.session.scenario_id && !scenario) {
@@ -635,14 +647,22 @@ export function ScoreScreen({ route, navigation }: Props) {
           if (!cancelled) setScenario(scenarioResult);
         }
 
-        if (shouldPollScorecard(result) && pollCount < 10) {
+        if (shouldPollScorecard(result) && pollCount < SCORECARD_POLL_LIMIT) {
           retryTimer = setTimeout(() => {
             if (!cancelled) setPollCount((current) => current + 1);
           }, 2000);
         }
       } catch (err) {
-        if (!cancelled && pollCount === 0) {
-          setError(err instanceof Error ? err.message : "Failed to load scorecard");
+        const message = err instanceof Error ? err.message : "Failed to load scorecard";
+        const shouldRetryAsProcessing = shouldRetryScorecardLoadError(message, data, pollCount);
+        if (!cancelled && shouldRetryAsProcessing) {
+          setProcessingFallback(true);
+          setError(null);
+          retryTimer = setTimeout(() => {
+            if (!cancelled) setPollCount((current) => current + 1);
+          }, 2000);
+        } else if (!cancelled && pollCount === 0) {
+          setError(message);
         }
       } finally {
         if (!cancelled) {
@@ -665,7 +685,7 @@ export function ScoreScreen({ route, navigation }: Props) {
   const transcript = data?.transcript ?? [];
   const overallScore = hasNumericScore(scorecard?.overall_score) ? scorecard.overall_score : null;
   const overallBand = scoreBand(overallScore ?? 0);
-  const heroState = heroStateFor(scorecard ?? null, gradingMeta);
+  const heroState = processingFallback && !scorecard ? "processing" : heroStateFor(scorecard ?? null, gradingMeta);
   const managerNote = data?.manager_coaching_note?.note ?? data?.manager_note ?? data?.manager_review?.notes ?? null;
   const improvementTargets = scorecard?.improvement_targets ?? [];
   const highlights = (scorecard?.highlights ?? []).slice(0, 4);

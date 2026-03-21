@@ -1,4 +1,4 @@
-import { heroStateFor, shouldPollScorecard, techniqueBuckets } from "../screens/ScoreScreen";
+import { heroStateFor, shouldPollScorecard, shouldRetryScorecardLoadError, techniqueBuckets } from "../screens/ScoreScreen";
 
 describe("ScoreScreen logic", () => {
   it("keeps polling while grading is processing and no scorecard exists", () => {
@@ -20,6 +20,32 @@ describe("ScoreScreen logic", () => {
         },
         transcript: [],
       })
+    ).toBe(true);
+  });
+
+  it("treats an initial scorecard timeout as processing when grading is still pending", () => {
+    expect(
+      shouldRetryScorecardLoadError(
+        "Request timed out",
+        {
+          session: {
+            id: "session-1",
+            assignment_id: "assignment-1",
+            rep_id: "rep-1",
+            scenario_id: "scenario-1",
+            started_at: new Date().toISOString(),
+            ended_at: null,
+            status: "processing",
+          },
+          scorecard: null,
+          grading_meta: {
+            status: "processing",
+            provisional: false,
+          },
+          transcript: [],
+        },
+        0
+      )
     ).toBe(true);
   });
 

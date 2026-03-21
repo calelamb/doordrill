@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.models.session import SessionTurn
+from app.models.types import TurnSpeaker
 from app.services.provider_clients import MockLlmClient, MockSttClient, MockTtsClient, ProviderSuite, SttTranscript
 from app.voice import ws as voice_ws
 
@@ -166,6 +167,16 @@ class _LatencyAwareTtsClient(MockTtsClient):
             yield chunk
 
 
+class _SlowFirstChunkTtsClient(MockTtsClient):
+    def __init__(self, *, first_chunk_delay_s: float) -> None:
+        self.first_chunk_delay_s = first_chunk_delay_s
+
+    async def stream_audio(self, text: str):
+        await asyncio.sleep(self.first_chunk_delay_s)
+        async for chunk in super().stream_audio(text):
+            yield chunk
+
+
 class _PayloadRecordingSttClient(MockSttClient):
     def __init__(self) -> None:
         self.start_payloads: list[dict] = []
@@ -237,7 +248,6 @@ def test_ws_voice_pipeline_streams_events_in_order(client, seed_org, monkeypatch
         ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
 
     assert [message["type"] for message in all_messages[:2]] == ["server.session.state", "server.error"]
-
     for batch in turn_batches:
         types = [message["type"] for message in batch]
         assert "server.session.state" in types
@@ -267,6 +277,74 @@ def test_ws_voice_pipeline_streams_events_in_order(client, seed_org, monkeypatch
 
     committed = [message for message in all_messages if message["type"] == "server.turn.committed"]
     assert len(committed) == 3
+
+
+def test_ws_does_not_commit_placeholder_turn_when_interrupted_before_audio(client, seed_org, monkeypatch):
+    monkeypatch.setattr(
+        voice_ws,
+        "providers",
+        ProviderSuite(
+            stt=MockSttClient(),
+            llm=MockLlmClient(),
+            tts=_SlowFirstChunkTtsClient(first_chunk_delay_s=0.35),
+        ),
+    )
+
+    assignment_id = _create_assignment(client, seed_org)
+    session_id = _create_session(client, seed_org, assignment_id)
+
+    with client.websocket_connect(f"/ws/sessions/{session_id}") as ws:
+        ws.receive_json()
+
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 1,
+                "payload": {
+                    "transcript_hint": "Hi, I'm with Acme Pest Control.",
+                    "codec": "opus",
+                },
+            }
+        )
+
+        saw_ai_speaking = False
+        for _ in range(120):
+            message = ws.receive_json()
+            if message["type"] == "server.session.state" and message["payload"].get("state") == "ai_speaking":
+                saw_ai_speaking = True
+                break
+        assert saw_ai_speaking is True
+
+        ws.send_json(
+            {
+                "type": "client.audio.chunk",
+                "sequence": 2,
+                "payload": {
+                    "transcript_hint": "Wait a second.",
+                    "codec": "opus",
+                },
+            }
+        )
+
+        committed_count = 0
+        for _ in range(240):
+            message = ws.receive_json()
+            if message["type"] == "server.turn.committed":
+                committed_count += 1
+                if committed_count >= 2:
+                    break
+
+        ws.send_json({"type": "client.session.end", "sequence": 99, "payload": {}})
+
+    db = SessionLocal()
+    try:
+        turns = db.scalars(select(SessionTurn).where(SessionTurn.session_id == session_id)).all()
+    finally:
+        db.close()
+
+    texts = [turn.text for turn in turns]
+    assert "(response interrupted)" not in texts
+    assert len([turn for turn in turns if turn.speaker == TurnSpeaker.AI]) == 1
 
 
 def test_ws_vad_end_triggers_stt_finalization_and_logs_latency(client, seed_org, monkeypatch, caplog):

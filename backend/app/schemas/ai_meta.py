@@ -21,5 +21,6 @@ class AiMeta(BaseModel):
     status: str = Field(min_length=1, max_length=64)
     latency_ms: int = Field(ge=0)
     fallback_used: bool = False
+    fallback_kind: str | None = Field(default=None, max_length=32)
     attempts: list[AiAttemptMeta] = Field(default_factory=list)
     generated_at: str

@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     manager_ai_fallback_model: str | None = Field(default=None, alias="MANAGER_AI_FALLBACK_MODEL")
     manager_ai_fallback_fast_model: str | None = Field(default=None, alias="MANAGER_AI_FALLBACK_FAST_MODEL")
     manager_ai_allow_mock: bool = Field(default=False, alias="MANAGER_AI_ALLOW_MOCK")
+    manager_ai_timeout_seconds: float = Field(default=18.0, alias="MANAGER_AI_TIMEOUT_SECONDS")
+    manager_ai_fast_timeout_seconds: float = Field(default=12.0, alias="MANAGER_AI_FAST_TIMEOUT_SECONDS")
     elevenlabs_api_key: str | None = Field(default=None, alias="ELEVENLABS_API_KEY")
     elevenlabs_voice_id: str | None = Field(default=None, alias="ELEVENLABS_VOICE_ID")
     elevenlabs_model_id: str = Field(default="eleven_flash_v2_5", alias="ELEVENLABS_MODEL_ID")

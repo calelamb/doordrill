@@ -315,6 +315,35 @@ def test_ai_team_coaching_summary_endpoint_returns_summary(client, seed_org, mon
     assert body["data_summary"]["summary"]["coaching_note_count"] == 6
 
 
+def test_manager_chat_falls_back_to_deterministic_snapshot(monkeypatch):
+    def failing_manager_call(**kwargs):
+        raise AiCoachingUnavailableError("Manager AI timed out.", code="ai_timeout")
+
+    monkeypatch.setattr(manager_api.manager_ai_service, "_call_manager_ai_json", failing_manager_call)
+
+    content, meta = manager_api.manager_ai_service.answer_manager_chat_with_meta(
+        period_days=7,
+        message="Who's at risk this week?",
+        conversation_history=[],
+        relevant_data={
+            "command_center": {
+                "summary": {
+                    "team_average_score": 6.8,
+                    "scored_session_count": 4,
+                    "reps_at_risk": 2,
+                    "sessions_count": 5,
+                }
+            }
+        },
+    )
+
+    assert "6.8" in content.answer
+    assert content.key_metric == "6.8"
+    assert any(point.label == "Reps At Risk" and point.value == "2" for point in content.data_points)
+    assert meta.status == "fallback"
+    assert meta.fallback_kind == "deterministic"
+
+
 def test_company_training_context_reuses_cached_retrieval(seed_org, monkeypatch):
     call_count = {"value": 0}
 
@@ -410,8 +439,9 @@ def test_ai_endpoints_return_503_when_claude_is_unavailable(client, seed_org, mo
         headers=_manager_headers(seed_org),
         json={"manager_id": seed_org["manager_id"], "message": "Who needs coaching help?", "period_days": 30},
     )
-    assert chat_response.status_code == 503
-    assert "temporarily unavailable" in chat_response.json()["detail"]["message"]
+    assert chat_response.status_code == 200
+    assert chat_response.json()["ai_meta"]["status"] == "fallback"
+    assert chat_response.json()["ai_meta"]["fallback_kind"] == "deterministic"
 
 
 def test_manager_ai_chat_uses_command_center_for_team_questions(client, seed_org, monkeypatch):

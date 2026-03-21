@@ -15,9 +15,9 @@ type ChunkListener = (chunk: AudioChunk) => void;
 type VadListener = (speaking: boolean) => void;
 type MeterListener = (db: number) => void;
 
-const SPEAKING_THRESHOLD_DB = -45;
-const VAD_ATTACK_FRAMES = 2;
-const VAD_RELEASE_FRAMES = 5;
+const SPEAKING_THRESHOLD_DB = -50;
+const VAD_ATTACK_FRAMES = 1;
+const VAD_RELEASE_FRAMES = 3;
 const STATUS_UPDATE_MS = 80;
 
 const RECORDING_OPTIONS: Audio.RecordingOptions = {

@@ -56,6 +56,7 @@ export type AiMeta = {
   status: string;
   latency_ms: number;
   fallback_used: boolean;
+  fallback_kind?: string | null;
   attempts: AiAttemptMeta[];
   generated_at: string;
 };
@@ -127,6 +128,9 @@ export type TranscriptTurn = {
   text: string;
   started_at: string;
   ended_at: string;
+  turn_kind?: string | null;
+  interrupted?: boolean;
+  interruption_reason?: string | null;
 };
 
 export type StageTimelineEntry = {
