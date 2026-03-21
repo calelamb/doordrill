@@ -425,11 +425,16 @@ export function RepPanel() {
           <div className="flex gap-3">
             <button
               onClick={connectLiveSession}
-              disabled={!activeSessionId || liveConnected}
+              disabled={!activeSessionId || liveConnected || liveStatus === "connecting"}
+              title={!activeSessionId ? "Start an assignment first to connect" : liveConnected ? "Already connected" : "Connect live socket"}
               className="flex items-center gap-2 bg-accent text-white rounded-xl px-4 py-2.5 text-sm font-medium hover:bg-accent-hover transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
             >
-              <Wifi className="w-4 h-4" />
-              Connect
+              {liveStatus === "connecting" ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Wifi className="w-4 h-4" />
+              )}
+              {liveStatus === "connecting" ? "Connecting..." : "Connect"}
             </button>
             <button
               onClick={() => void endLiveSession()}

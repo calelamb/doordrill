@@ -1,16 +1,16 @@
 @import "tailwindcss";
 
 @theme {
-  --color-background: #f5f2ec;
-  --color-surface: rgba(255, 253, 248, 0.60);
-  --color-surface-solid: #fffdf8;
+  --color-background: #e6e3dd;
+  --color-surface: rgba(255, 255, 255, 0.85);
+  --color-surface-solid: #ffffff;
   --color-ink: #1a2e1a;
   --color-muted: #5a6e5a;
   --color-accent: #2d5a3d;
   --color-accent-hover: #1f4a2e;
   --color-accent-soft: #d4e6d4;
-  --color-border: rgba(45, 90, 61, 0.15);
-  --color-border-strong: rgba(45, 90, 61, 0.25);
+  --color-border: rgba(45, 90, 61, 0.20);
+  --color-border-strong: rgba(45, 90, 61, 0.35);
   --color-error: #b5331e;
   --color-rep: #2d5a3d;
   --color-ai: #8b6914;
@@ -131,4 +131,26 @@ h1, h2, h3 {
 .thin-scrollbar::-webkit-scrollbar-thumb {
   background: rgba(45, 90, 61, 0.15);
   border-radius: 999px;
+}
+
+/* Base Input Styles for Form Controls */
+input:not([type="checkbox"]):not([type="radio"]), textarea {
+  background-color: #ffffff;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 0.75rem;
+  padding: 0.5rem 1rem;
+  color: var(--color-ink);
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  transition: all 0.2s ease;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(45, 90, 61, 0.5);
+}
+
+/* Apply base hover transitions globally to buttons and interactive items */
+button, a {
+  transition: all 0.2s ease;
 }
